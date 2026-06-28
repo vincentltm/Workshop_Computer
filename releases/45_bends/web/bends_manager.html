@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bends Manager</title>
+  <style>
+    :root {
+      --bg: #09090b;
+      --card-bg: #18181b;
+      --border: #27272a;
+      --text: #f4f4f5;
+      --dim: #71717a;
+      --accent: #fbbf24;
+      --accent-dim: rgba(251, 191, 36, 0.1);
+      --red: #ef4444;
+      --green: #22c55e;
+      --blue: #3b82f6;
+      --cyan: #06b6d4;
+      --yellow: #eab308;
+      --orange: #f97316;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+      padding: 24px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+
+    .header-title-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .global-actions {
+      display: flex;
+      gap: 12px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .tab {
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--dim);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .tab:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .tab.active {
+      color: var(--bg);
+      background: var(--accent);
+    }
+
+    .tab-content {
+      display: none;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 40px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 20px;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .drop-zone:hover,
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(251, 191, 36, 0.02);
+    }
+
+    .drop-zone h3 {
+      font-size: 1.1rem;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .drop-zone p {
+      font-size: 0.85rem;
+      color: var(--dim);
+    }
+
+    .drop-zone input {
+      display: none;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 20px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text);
+    }
+
+    .btn:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--dim);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg);
+      border-color: var(--accent);
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #fbbf24cc;
+      border-color: #fbbf24cc;
+    }
+
+    .samples-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .sample-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 16px;
+      position: relative;
+    }
+
+    .sample-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .sample-name input {
+      background: none;
+      border: none;
+      border-bottom: 1px solid transparent;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 2px 0;
+      width: 100%;
+    }
+
+    .sample-name input:focus {
+      outline: none;
+      border-bottom-color: var(--accent);
+    }
+
+    .sample-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 0.8rem;
+      color: var(--dim);
+    }
+
+    .sample-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn-mini {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .btn-mini:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: var(--dim);
+    }
+
+    .canvas-wrap {
+      grid-column: 1 / -1;
+      height: 48px;
+      background: #121214;
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    .canvas-wrap canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .trim-overlay {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(9, 9, 11, 0.7);
+      pointer-events: none;
+    }
+
+    .trim-handle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      margin-left: -4px;
+      background: var(--accent);
+      cursor: ew-resize;
+      box-shadow: 0 0 8px var(--accent);
+      z-index: 10;
+    }
+
+    .budget-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 24px;
+    }
+
+    .budget-bar .bar {
+      height: 8px;
+      background: #121214;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.03);
+    }
+
+    .budget-bar .fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    .manual-grid {
+      display: grid;
+      gap: 24px;
+    }
+
+    .manual-section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+    }
+
+    .manual-section h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+      color: var(--accent);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .slot-list {
+      list-style-position: inside;
+      margin-bottom: 16px;
+    }
+
+    .slot-list li {
+      margin-bottom: 6px;
+    }
+
+    .actions-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+      user-select: none;
+    }
+
+    .checkbox-row label {
+      cursor: pointer;
+      font-size: 0.9rem;
+      color: var(--dim);
+      transition: color 0.2s;
+    }
+
+    .checkbox-row:hover label {
+      color: var(--text);
+    }
+
+    .status-badge {
+      font-size: 0.75rem;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: #3f3f46;
+      color: #a1a1aa;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      padding: 12px 24px;
+      border-radius: 12px;
+      font-size: .9rem;
+      background: var(--accent);
+      color: var(--bg);
+      font-weight: 600;
+      transform: translateY(80px);
+      opacity: 0;
+      transition: all .3s;
+      z-index: 99;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    }
+
+    .toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    .status-box {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid var(--green);
+      color: var(--green);
+      padding: 14px;
+      border-radius: 12px;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+      display: none;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-title-container">
+        <h1>Bends Manager</h1>
+      </div>
+      <div class="global-actions">
+        <div class="status-badge" id="uf2Status">✅ Firmware Loaded</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="manager">Manager</div>
+      <div class="tab" data-tab="manual">Manual</div>
+    </div>
+
+    <div id="manager" class="tab-content active">
+      <div class="card">
+        <div class="drop-zone" id="dropZone">
+          <h3>Drop audio files here</h3>
+          <p>WAV, MP3, OGG, FLAC (Max 28 samples, up to 1MB/15MB total)</p>
+          <p style="margin-top:6px;color:var(--accent);font-weight:500;font-size:.8rem">Auto-converts to 16-bit mono @
+            24000Hz</p>
+          <input type="file" id="fileInput" multiple accept="audio/*">
+        </div>
+
+        <div class="checkbox-row">
+          <input type="checkbox" id="normalize" checked style="width:18px;height:18px;cursor:pointer">
+          <label for="normalize" style="cursor:pointer; margin-right: 20px;">Normalize samples to -1dB</label>
+
+          <input type="checkbox" id="autoLoop" checked style="width:18px;height:18px;cursor:pointer">
+          <label for="autoLoop" style="cursor:pointer; margin-right: 20px;">Auto-loop short samples (SCW)</label>
+
+          <button id="btnClearAll"
+            style="background:none; border:none; color:var(--red); font-size:0.8rem; cursor:pointer; opacity:0.7; transition:opacity 0.2s; padding:0; margin-left: auto;">
+            Clear All Samples
+          </button>
+        </div>
+      </div>
+
+      <div class="samples-list" id="samplesList"></div>
+
+      <div class="output-section" id="outputSection">
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h2
+              style="font-size:1.1rem; color:var(--accent); text-transform:uppercase; letter-spacing:0.05em; margin:0">
+              Flash Memory Allocation</h2>
+            <div class="checkbox-row"
+              style="margin:0; padding:8px 12px; background:rgba(255,255,255,0.03); border-radius:8px; border:1px solid rgba(255,255,255,0.05);">
+              <input type="checkbox" id="mode16mb" style="width:16px; height:16px; cursor:pointer;">
+              <label for="mode16mb"
+                style="font-size:0.75rem; color:var(--dim); cursor:pointer; margin-left:8px;"><b>16MB FLASH</b></label>
+            </div>
+          </div>
+          <div class="budget-bar">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:.9rem;font-weight:600">Storage Usage</span>
+              <span id="budgetText" style="font-size:.8rem;color:var(--dim)">0 KB / 1024 KB</span>
+            </div>
+            <div class="bar">
+              <div class="fill" id="budgetFill" style="width:0%;background:var(--accent)"></div>
+            </div>
+            <div
+              style="display:flex; justify-content:space-between; font-size:.75rem; color:var(--dim); margin-top:4px;">
+              <span id="budgetBytes">0 / 28 slots used</span>
+              <span id="maxLabel">Max 1MB total</span>
+            </div>
+          </div>
+
+          <div class="actions-row">
+            <button class="btn btn-primary" id="btnDownload">Export UF2</button>
+            <button class="btn" id="btnEnterBootloader"
+              style="font-size: 0.8rem; color: var(--dim); border-color: rgba(255,255,255,0.1);">Enter Flash
+              Mode</button>
+            <button class="btn" id="btnFlash" style="color:var(--yellow); border-color:rgba(251,191,36,0.4)">Flash to
+              Device</button>
+            <button class="btn" id="btnRead" style="color:var(--cyan); border-color:rgba(56,189,248,0.4)">Sync from
+              Device</button>
+          </div>
+
+          <div id="flashProgress"
+            style="display:none; margin-top:20px; padding:16px; background:rgba(0,0,0,0.2); border-radius:12px; border:1px solid rgba(255,255,255,0.05)">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span id="flashStatus" style="font-size:.9rem; color:var(--accent)">Communicating with device...</span>
+              <span id="flashPercent" style="font-size:.8rem; color:var(--dim)">0%</span>
+            </div>
+            <div class="bar" style="height:6px; background:rgba(0,0,0,0.4); border-radius:3px;">
+              <div class="fill" id="flashFill"
+                style="width:0%; background:var(--accent); box-shadow: 0 0 10px var(--accent)"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="manual" class="tab-content">
+      <div class="manual-grid" style="grid-template-columns: 1fr 1fr; gap: 24px;">
+
+        <!-- Header Section -->
+        <div class="manual-section"
+          style="grid-column: 1 / -1; background: rgba(251, 191, 36, 0.05); border-color: rgba(251, 191, 36, 0.2);">
+          <h3 style="margin-bottom: 8px;">Bends</h3>
+          <p style="font-size: 0.95rem; opacity: 0.8;">Bends is a multi-stage lo-fi audio degradation processor, dynamic tape delay, granular glitcher, and ambient sample player. It takes incoming signals or internal ambient samples from clean through various stages of compression, dropouts, signal integrity failures, and resonant filtering.</p>
+        </div>
+
+        <!-- Controls Column -->
+        <div class="manual-section">
+          <h3>Controls</h3>
+          <ul class="slot-list" style="font-family: inherit; font-size: 0.9rem;">
+            <li><b>Switch DOWN (Flick):</b> Next Page</li>
+            <li><b>Switch DOWN (Hold, unadjusted):</b> Previous Page</li>
+            <li><b>Switch DOWN (Hold + Tweak Main):</b> Adjust global grittiness macro (bakes on release, locks page)</li>
+            <li><b>Switch UP (Flick):</b> Toggle Latching Freeze</li>
+            <li><b>Switch UP (Hold, frozen):</b> Open Page 7 (Freeze Scrub)</li>
+            <li><b>Switch UP (Hold, live):</b> Open Page 6 (Sample Select/Player)</li>
+          </ul>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 0: Chorus</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Mix</li>
+                <li>X: LFO Rate</li>
+                <li>Y: Depth & FB</li>
+              </ul>
+            </div>
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 1: Codec</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Mix (Strength)</li>
+                <li>X: Downsampling</li>
+                <li>Y: Ringing XOR</li>
+              </ul>
+            </div>
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 2: Delay</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Mix</li>
+                <li>X: Delay Time</li>
+                <li>Y: Feedback</li>
+              </ul>
+            </div>
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 3: Glitcher</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Mix</li>
+                <li>X: Loop Size</li>
+                <li>Y: Loop Speed</li>
+              </ul>
+            </div>
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 4: Filter</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Cutoff</li>
+                <li>X: Res/Wavefold</li>
+                <li>Y: Morph</li>
+              </ul>
+            </div>
+            <div>
+              <b style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; display:block; margin-bottom:8px;">Page 5: Reverb</b>
+              <ul style="font-size: 0.85rem; list-style-position: inside;">
+                <li>Main: Mix</li>
+                <li>X: Room Size</li>
+                <li>Y: Decay & Crunch</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- IO Column -->
+        <div class="manual-section">
+          <h3>IO</h3>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; font-size: 0.85rem;">
+            <ul style="list-style:none; padding:0;">
+              <li style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; margin-bottom:8px;"><b>Inputs</b></li>
+              <li>Audio 1: Main In (unplug to enable sample player)</li>
+              <li>Audio 2: Pitch CV (1V/Oct speed modulation on Page 6)</li>
+              <li>CV 1: Modulates Cutoff / Chorus / Delay Time</li>
+              <li>CV 2: Modulates Codec downsample / glitch mix</li>
+              <li>Pulse 1: Glitch trigger / Stutter repeat</li>
+              <li>Pulse 2: Freeze gate</li>
+            </ul>
+            <ul style="list-style:none; padding:0;">
+              <li style="font-size:0.7rem; text-transform:uppercase; opacity:0.5; margin-bottom:8px;"><b>Outputs</b></li>
+              <li>Audio 1/2: Stereo Output</li>
+              <li>CV 1: Visual LFO Phase / Envelope output</li>
+              <li>CV 2: Jitter / Random CV</li>
+              <li>Pulse 1: Clock Output</li>
+              <li>Pulse 2: Freeze State Output</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Sample Player Engine -->
+        <div class="manual-section" style="grid-column: 1 / -1;">
+          <h3>Pages 6 & 7: Ambient Sample Player & Freeze Scrub</h3>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 40px; font-size: 0.85rem;">
+            <div>
+              <b style="display:block; margin-bottom:12px; font-size:0.75rem; text-transform:uppercase;">Page 6: Sample Player</b>
+              <ul style="font-size: 0.85rem; list-style-type: square; padding-left: 20px;">
+                <li><b>Main Knob:</b> Start position / scrubbing</li>
+                <li><b>X Knob:</b> Playback Speed (Center 1.0x)</li>
+                <li><b>Y Knob:</b> Loop Select (loads slots 1-28). Displays the selected slot temporarily in **1-based binary** on the 6 LEDs.</li>
+              </ul>
+            </div>
+            <div>
+              <b style="display:block; margin-bottom:12px; font-size:0.75rem; text-transform:uppercase;">Page 7: Freeze Scrub</b>
+              <ul style="font-size: 0.85rem; list-style-type: square; padding-left: 20px;">
+                <li><b>Main Knob:</b> Scrub position inside the frozen granular buffer</li>
+                <li><b>X Knob:</b> Playback Speed / Reverse mult</li>
+                <li><b>Y Knob:</b> Grain loop length</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Web Manager Interface -->
+        <div class="manual-section" style="grid-column: 1 / -1;">
+          <h3>Web Manager Interface</h3>
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 24px; font-size: 0.85rem;">
+            <div>
+              <b style="display:block; margin-bottom:8px; text-transform:uppercase; font-size:0.75rem;">Importing</b>
+              Drag and drop .wav, .mp3 or other audio files. They are automatically normalized to -1dB and downsampled to the native 24kHz format.
+            </div>
+            <div>
+              <b style="display:block; margin-bottom:8px; text-transform:uppercase; font-size:0.75rem;">Flashing</b>
+              Connect via USB, click <b>Enter Flash Mode</b>, then click <b>Flash to Device</b> to write your sample list directly to the card's flash memory.
+            </div>
+            <div>
+              <b style="display:block; margin-bottom:8px; text-transform:uppercase; font-size:0.75rem;">Syncing</b>
+              Click <b>Sync from Device</b> to retrieve all current flash samples from the card to back up your current patches.
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script type="module">
+    import { Picoboot, UF2_RP2040_FAMILY_ID } from './lib/picoflash/index.js';
+    import { uf2ToFlashBuffer } from './lib/picoflash/uf2.js';
+
+    const SAMPLE_RATE = 24000;
+    let MAX_GRAIN_SAMPLES = 524288;
+    const MAX_SAMPLES_COUNT = 28;
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+    let samples = [];
+
+    const FLASH_1MB = 1024 * 1024;
+    const FLASH_15MB = 15 * 1024 * 1024;
+
+    const TARGET_ADDRESS = 0x10100000;
+    const SAMPLES_MAGIC = 0x6772616E;
+    const UF2_MAGIC_START0 = 0x0A324655;
+    const UF2_MAGIC_START1 = 0x9E5D5157;
+    const UF2_MAGIC_END = 0x0AB16F30;
+    const RP2040_FAMILY_ID = 0xe48bff56;
+
+    let baseUf2Blocks = [];
+
+    window.samples = samples;
+    window.renderSamples = renderSamples;
+    window.playSample = playSample;
+    window.downloadWav = downloadWav;
+    window.removeSample = removeSample;
+    window.moveSample = moveSample;
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const res = await fetch('./bends.uf2');
+        if (!res.ok) throw new Error("Fetch failed");
+        const buf = await res.arrayBuffer();
+        const view = new Uint8Array(buf);
+        baseUf2Blocks = [];
+        for (let i = 0; i < view.length; i += 512) {
+          if (i + 512 <= view.length) baseUf2Blocks.push(view.slice(i, i + 512));
+        }
+        document.getElementById('uf2Status').style.display = 'block';
+      } catch (err) {
+        document.getElementById('uf2Status').style.display = 'block';
+        document.getElementById('uf2Status').style.background = 'rgba(239, 68, 68, 0.1)';
+        document.getElementById('uf2Status').style.borderColor = 'var(--red)';
+        document.getElementById('uf2Status').style.color = 'var(--red)';
+        document.getElementById('uf2Status').innerHTML = '⚠️ Base bends.uf2 not found.';
+        document.getElementById('btnDownload').disabled = true;
+      }
+    });
+
+    function showToast(msg, isErr) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.style.background = isErr ? 'var(--red)' : 'var(--green)';
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    function removeSample(idx) {
+      if (samples[idx].playingSource) {
+        samples[idx].playingSource.stop();
+        samples[idx].playingSource = null;
+      }
+      samples.splice(idx, 1);
+      renderSamples();
+      updateBudget();
+    }
+
+    function moveSample(idx, dir) {
+      const newIdx = idx + dir;
+      if (newIdx < 0 || newIdx >= samples.length) return;
+      const temp = samples[idx];
+      samples[idx] = samples[newIdx];
+      samples[newIdx] = temp;
+      const list = document.getElementById('samplesList');
+      list.innerHTML = '';
+      renderSamples();
+    }
+
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+
+    document.getElementById('btnClearAll').addEventListener('click', () => {
+      if (samples.length === 0) return;
+      if (confirm("Clear all samples from the manager?")) {
+        samples = [];
+        renderSamples();
+        updateBudget();
+        showToast("Project cleared");
+      }
+    });
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab, .tab-content').forEach(el => el.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+      });
+    });
+
+    document.getElementById('mode16mb').addEventListener('change', (e) => {
+      MAX_GRAIN_SAMPLES = e.target.checked ? (FLASH_15MB / 2) : (FLASH_1MB / 2);
+      updateBudget();
+    });
+
+    document.getElementById('btnDownload').addEventListener('click', generateUf2);
+    document.getElementById('btnFlash').addEventListener('click', flashToDevice);
+    document.getElementById('btnRead').addEventListener('click', readFromDevice);
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); handleFiles(e.dataTransfer.files); });
+    fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+    async function handleFiles(files) {
+      for (const file of files) {
+        if (samples.length >= MAX_SAMPLES_COUNT) {
+          showToast(`Maximum ${MAX_SAMPLES_COUNT} samples allowed!`, true);
+          break;
+        }
+        try {
+          const buf = await file.arrayBuffer();
+          const decoded = await audioCtx.decodeAudioData(buf);
+          let mono;
+          if (decoded.numberOfChannels === 1) {
+            mono = decoded.getChannelData(0);
+          } else {
+            const ch0 = decoded.getChannelData(0);
+            const ch1 = decoded.getChannelData(1);
+            mono = new Float32Array(ch0.length);
+            for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) * 0.5;
+          }
+
+          let resampled = mono;
+          if (decoded.sampleRate !== SAMPLE_RATE) {
+            const ratio = SAMPLE_RATE / decoded.sampleRate;
+            const newLen = Math.floor(mono.length * ratio);
+            resampled = new Float32Array(newLen);
+            for (let i = 0; i < newLen; i++) {
+              const srcIdx = i / ratio;
+              const i0 = Math.floor(srcIdx), i1 = Math.min(i0 + 1, mono.length - 1);
+              const frac = srcIdx - i0;
+              resampled[i] = mono[i0] * (1 - frac) + mono[i1] * frac;
+            }
+          }
+
+          let trimEnd = Math.min(resampled.length, MAX_GRAIN_SAMPLES);
+          const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 23);
+          samples.push({ name, data: resampled, trimStart: 0, trimEnd: trimEnd, origLen: resampled.length });
+          renderSamples();
+        } catch (err) { showToast('Failed: ' + file.name, true); }
+      }
+    }
+
+    function renderSamples() {
+      const list = document.getElementById('samplesList');
+
+      if (list.children.length !== samples.length || samples.length === 0) {
+        list.innerHTML = '';
+        if (samples.length === 0) {
+          list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--dim);background:rgba(255,255,255,0.02);border-radius:12px;border:1px dashed rgba(255,255,255,0.1)">No samples loaded. Drag & drop files to begin.</div>';
+          return;
+        }
+        samples.forEach((s, idx) => {
+          const trimLen = s.trimEnd - s.trimStart;
+          const card = document.createElement('div');
+          card.className = 'sample-card';
+          card.draggable = true;
+          card.dataset.idx = idx;
+
+          card.addEventListener('dragstart', e => {
+            e.dataTransfer.setData('text/plain', idx);
+            card.style.opacity = '0.4';
+          });
+          card.addEventListener('dragend', () => card.style.opacity = '1');
+          card.addEventListener('dragover', e => e.preventDefault());
+          card.addEventListener('drop', e => {
+            e.preventDefault();
+            const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+            const toIdx = idx;
+            if (fromIdx === toIdx) return;
+            const moved = samples.splice(fromIdx, 1)[0];
+            samples.splice(toIdx, 0, moved);
+            list.innerHTML = '';
+            renderSamples();
+          });
+
+          card.innerHTML = `
+            <div class="drag-handle" style="cursor:grab; color:var(--dim); padding-right:12px; font-size:1.2rem">⠿</div>
+            <div class="sample-info">
+              <div class="sample-name"><input value="${s.name}" onchange="window.samples[${idx}].name=this.value.replace(/[^a-zA-Z0-9_]/g,'_')"></div>
+              <div class="sample-meta">
+                <span>📐 ${trimLen.toLocaleString()} samples</span>
+                <span>⏱️ ${(trimLen / SAMPLE_RATE).toFixed(3)}s</span>
+                <span>💾 ${((trimLen * 2) / 1024).toFixed(1)} KB</span>
+              </div>
+            </div>
+            <div class="sample-controls">
+              <button class="btn-mini btn-play" onclick="window.playSample(${idx})">${s.playingSource ? '⏹' : '▶'}</button>
+              <button class="btn-mini" onclick="window.downloadWav(${idx})" title="Download WAV">⬇</button>
+              <button class="btn-mini" style="color:var(--red); border-color:rgba(239,68,68,0.2)" onclick="window.removeSample(${idx})">✕</button>
+            </div>
+            <div class="canvas-wrap" id="cw${idx}">
+              <div class="trim-overlay" id="tol${idx}" style="left:0;width:0"></div>
+              <canvas id="cv${idx}"></canvas>
+              <div class="trim-overlay" id="tor${idx}" style="left:0;width:0"></div>
+              <div class="trim-handle" id="th0_${idx}" style="left:0"></div>
+              <div class="trim-handle" id="th1_${idx}" style="left:100%"></div>
+            </div>`;
+          list.appendChild(card);
+          requestAnimationFrame(() => { drawWaveform(idx); setupTrim(idx); });
+        });
+      } else {
+        samples.forEach((s, idx) => {
+          const card = list.children[idx];
+          if (!card) return;
+          const playBtn = card.querySelector('.btn-play');
+          if (playBtn) {
+            const icon = s.playingSource ? '⏹' : '▶';
+            if (playBtn.textContent !== icon) playBtn.textContent = icon;
+          }
+        });
+      }
+      updateBudget();
+    }
+
+    function drawWaveform(idx) {
+      const s = samples[idx], cv = document.getElementById('cv' + idx);
+      if (!cv) return;
+      const ctx = cv.getContext('2d'), w = cv.offsetWidth, h = cv.offsetHeight;
+      cv.width = w * 2; cv.height = h * 2;
+      ctx.scale(2, 2);
+      ctx.fillStyle = '#18181b'; ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 1.5; ctx.beginPath();
+
+      const len = s.origLen;
+      if (len < w * 2) {
+        ctx.moveTo(0, h / 2);
+        for (let x = 0; x < w; x++) {
+          const si = Math.floor(x / w * len);
+          const v = s.data[si] || 0;
+          ctx.lineTo(x, h / 2 - v * h / 2);
+        }
+      } else {
+        const step = Math.floor(len / w);
+        for (let x = 0; x < w; x++) {
+          const si = Math.floor(x / w * len);
+          let mn = 1, mx = -1;
+          for (let j = 0; j < step; j++) {
+            const v = s.data[si + j] || 0;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+          }
+          ctx.moveTo(x, h / 2 - mx * h / 2);
+          ctx.lineTo(x, h / 2 - mn * h / 2);
+        }
+      }
+      ctx.stroke();
+    }
+
+    function setupTrim(idx) {
+      const cw = document.getElementById('cw' + idx);
+      const h0 = document.getElementById('th0_' + idx);
+      const h1 = document.getElementById('th1_' + idx);
+      const ol = document.getElementById('tol' + idx);
+      const or2 = document.getElementById('tor' + idx);
+      if (!cw) return;
+      const s = samples[idx];
+
+      function updateHandles() {
+        const ww = cw.getBoundingClientRect().width;
+        const x0 = s.trimStart / s.origLen * ww;
+        const x1 = s.trimEnd / s.origLen * ww;
+        h0.style.left = x0 + 'px'; h1.style.left = x1 + 'px';
+        ol.style.width = x0 + 'px'; or2.style.left = x1 + 'px'; or2.style.width = (ww - x1) + 'px';
+      }
+
+      if (cw._hasListeners) return updateHandles();
+      cw._hasListeners = true;
+
+      const makeDrag = (el, setter) => {
+        el.addEventListener('mousedown', e => {
+          e.preventDefault();
+          const rect = cw.getBoundingClientRect();
+          const move = ev => {
+            const frac = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+            setter(Math.floor(frac * s.origLen));
+            updateBudget();
+            updateHandles();
+          };
+          const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+          document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+        });
+      };
+      makeDrag(h0, v => { s.trimStart = Math.min(v, s.trimEnd - 1); });
+      makeDrag(h1, v => { s.trimEnd = Math.max(v, s.trimStart + 1); });
+      updateHandles();
+    }
+
+    function playSample(idx) {
+      const s = samples[idx];
+      if (s.playingSource) {
+        s.playingSource.stop();
+        s.playingSource = null;
+        renderSamples();
+        return;
+      }
+      let trimmed = getTrimmedData(s);
+
+      if (document.getElementById('autoLoop').checked && trimmed.length < 2048 && trimmed.length > 0) {
+        const repeats = Math.ceil(2048 / trimmed.length);
+        let looped = new Float32Array(trimmed.length * repeats);
+        for (let r = 0; r < repeats; r++) looped.set(trimmed, r * trimmed.length);
+        trimmed = looped;
+      }
+
+      const buf = audioCtx.createBuffer(1, trimmed.length, SAMPLE_RATE);
+      buf.getChannelData(0).set(trimmed);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      src.onended = () => { if (s.playingSource === src) { s.playingSource = null; renderSamples(); } };
+      s.playingSource = src;
+      src.start();
+      renderSamples();
+    }
+
+    function downloadWav(idx) {
+      const s = samples[idx];
+      const data = getTrimmedData(s);
+      const wavBuffer = encodeWav(data, SAMPLE_RATE);
+      const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${s.name.replace(/\s+/g, '_')}.wav`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function encodeWav(samples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+      const writeString = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, samples.length * 2, true);
+      for (let i = 0; i < samples.length; i++) {
+        let v = Math.round(samples[i] * 32767);
+        view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, v)), true);
+      }
+      return buffer;
+    }
+
+    function getTrimmedData(s) {
+      let len = s.trimEnd - s.trimStart;
+      if (len > MAX_GRAIN_SAMPLES) len = MAX_GRAIN_SAMPLES;
+      let data = s.data.slice(s.trimStart, s.trimStart + len);
+      if (document.getElementById('normalize').checked) {
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+        if (peak > 0.001) {
+          const gain = 0.891 / peak;
+          data = data.map(v => v * gain);
+        }
+      }
+      return data;
+    }
+
+    function updateBudget() {
+      let totalBytes = 512;
+      for (let s of samples) {
+        let len = s.trimEnd - s.trimStart;
+        totalBytes += len * 2;
+        while (totalBytes % 256 !== 0) totalBytes++;
+      }
+      const MAX_BYTES = MAX_GRAIN_SAMPLES * 2;
+      const pct = Math.min(100, totalBytes / MAX_BYTES * 100);
+      const fill = document.getElementById('budgetFill');
+      if (fill) {
+        fill.style.width = pct + '%';
+        fill.style.background = pct > 100 ? 'var(--red)' : pct > 80 ? 'var(--orange)' : 'var(--green)';
+      }
+      document.getElementById('budgetText').textContent = `${(totalBytes / 1024).toFixed(1)} KB / ${(MAX_BYTES / 1024).toFixed(0)} KB`;
+      document.getElementById('budgetBytes').textContent = `${samples.length} / ${MAX_SAMPLES_COUNT} slots used`;
+      document.getElementById('maxLabel').textContent = `Max ${(MAX_BYTES / (1024 * 1024)).toFixed(0)}MB total`;
+
+      const btn = document.getElementById('btnDownload');
+      if (btn) btn.disabled = (totalBytes > MAX_BYTES);
+      const btnF = document.getElementById('btnFlash');
+      if (btnF) btnF.disabled = (totalBytes > MAX_BYTES);
+    }
+
+    function generateUf2Data() {
+      if (baseUf2Blocks.length === 0) return null;
+
+      const sampleCount = samples.length;
+      const MAX_BYTES = MAX_GRAIN_SAMPLES * 2;
+      let flashData = new Uint8Array(MAX_BYTES);
+      let dataView = new DataView(flashData.buffer);
+      dataView.setUint32(0, SAMPLES_MAGIC, true);
+      dataView.setUint32(4, samples.length, true);
+      let currentOffset = 512;
+      for (let i = 0; i < samples.length; i++) {
+        let s = samples[i], trimmed = getTrimmedData(s), len = trimmed.length;
+
+        if (document.getElementById('autoLoop').checked && len < 2048 && len > 0) {
+          const repeats = Math.ceil(2048 / len);
+          let looped = new Float32Array(len * repeats);
+          for (let r = 0; r < repeats; r++) looped.set(trimmed, r * len);
+          trimmed = looped;
+          len = trimmed.length;
+        }
+
+        let entryStart = 8 + i * 32;
+        dataView.setUint32(entryStart, currentOffset, true);
+        dataView.setUint32(entryStart + 4, len, true);
+        for (let j = 0; j < 24 && j < s.name.length; j++) dataView.setUint8(entryStart + 8 + j, s.name.charCodeAt(j));
+        if (currentOffset + len * 2 > MAX_BYTES) return null;
+        for (let j = 0; j < len; j++) {
+          let v = Math.round(trimmed[j] * 32767);
+          dataView.setInt16(currentOffset + j * 2, Math.max(-32768, Math.min(32767, v)), true);
+        }
+        currentOffset += len * 2;
+        while (currentOffset % 256 !== 0) currentOffset++;
+      }
+
+      let payloadSize = currentOffset, maxFirmwareAddr = 0;
+      for (let block of baseUf2Blocks) {
+        let addr = new DataView(block.buffer, block.byteOffset, block.byteLength).getUint32(12, true);
+        if (addr > maxFirmwareAddr) maxFirmwareAddr = addr;
+      }
+      let firmwareEnd = maxFirmwareAddr + 256;
+      let gapBlocks = Math.floor(Math.max(0, TARGET_ADDRESS - firmwareEnd) / 256);
+      let sampleBlocks = Math.ceil(payloadSize / 256);
+      let totalBlocks = baseUf2Blocks.length + gapBlocks + sampleBlocks;
+      let outUf2 = new Uint8Array(totalBlocks * 512), outView = new DataView(outUf2.buffer), blockIdx = 0;
+      for (let block of baseUf2Blocks) {
+        outUf2.set(block, blockIdx * 512);
+        outView.setUint32(blockIdx * 512 + 20, blockIdx, true);
+        outView.setUint32(blockIdx * 512 + 24, totalBlocks, true);
+        blockIdx++;
+      }
+      for (let i = 0; i < gapBlocks; i++) {
+        let offset = blockIdx * 512, addr = firmwareEnd + (i * 256);
+        outView.setUint32(offset + 0, UF2_MAGIC_START0, true);
+        outView.setUint32(offset + 4, UF2_MAGIC_START1, true);
+        outView.setUint32(offset + 8, 0x00002000, true);
+        outView.setUint32(offset + 12, addr, true);
+        outView.setUint32(offset + 16, 256, true);
+        outView.setUint32(offset + 20, blockIdx, true);
+        outView.setUint32(offset + 24, totalBlocks, true);
+        outView.setUint32(offset + 28, RP2040_FAMILY_ID, true);
+        for (let k = 0; k < 256; k++) outView.setUint8(offset + 32 + k, 0xFF);
+        outView.setUint32(offset + 508, UF2_MAGIC_END, true);
+        blockIdx++;
+      }
+      for (let i = 0; i < sampleBlocks; i++) {
+        let offset = blockIdx * 512;
+        outView.setUint32(offset + 0, UF2_MAGIC_START0, true);
+        outView.setUint32(offset + 4, UF2_MAGIC_START1, true);
+        outView.setUint32(offset + 8, 0x00002000, true);
+        outView.setUint32(offset + 12, TARGET_ADDRESS + i * 256, true);
+        outView.setUint32(offset + 16, 256, true);
+        outView.setUint32(offset + 20, blockIdx, true);
+        outView.setUint32(offset + 24, totalBlocks, true);
+        outView.setUint32(offset + 28, RP2040_FAMILY_ID, true);
+        for (let j = 0; j < 256; j++) outView.setUint8(offset + 32 + j, flashData[i * 256 + j]);
+        outView.setUint32(offset + 508, UF2_MAGIC_END, true);
+        blockIdx++;
+      }
+      return outUf2;
+    }
+
+    function generateUf2() {
+      const outUf2 = generateUf2Data();
+      if (!outUf2) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([outUf2], { type: "application/octet-stream" }));
+      a.download = "bends_samples.uf2"; a.click();
+      showToast("Firmware baked! 🚀");
+    }
+
+    async function flashToDevice() {
+      const outUf2 = generateUf2Data();
+      if (!outUf2) return;
+      if (!('usb' in navigator)) { showToast("WebUSB not supported.", true); return; }
+      const btnFlash = document.getElementById('btnFlash'), progressDiv = document.getElementById('flashProgress'), statusText = document.getElementById('flashStatus'), percentText = document.getElementById('flashPercent'), fill = document.getElementById('flashFill');
+      btnFlash.disabled = true; progressDiv.style.display = 'block'; statusText.textContent = "Requesting device...";
+
+      let device;
+      try {
+        device = await Picoboot.requestDevice();
+      } catch (err) {
+        if (navigator.serial) {
+          try {
+            statusText.textContent = "Searching for Pico (Normal Mode)...";
+            let picoPort = (await navigator.serial.getPorts()).find(p => {
+              const info = p.getInfo();
+              return info.usbVendorId === 0x2e8a;
+            });
+            if (!picoPort) {
+              picoPort = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x2e8a }] });
+            }
+            if (picoPort) {
+              statusText.textContent = "Triggering Flash Mode...";
+              await picoPort.open({ baudRate: 1200 });
+              await picoPort.close();
+              await new Promise(r => setTimeout(r, 1500));
+              statusText.textContent = "Requesting Picoboot...";
+              device = await Picoboot.requestDevice();
+            }
+          } catch (serialErr) {
+            console.error("Auto-reset failed:", serialErr);
+          }
+        }
+
+        if (!device) {
+          showToast("Device not found.", true);
+          btnFlash.disabled = false;
+          progressDiv.style.display = 'none';
+          return;
+        }
+      }
+      const picoboot = device;
+      try {
+        statusText.textContent = "Connecting..."; await picoboot.connect();
+        statusText.textContent = "Preparing..."; const flashBuffer = uf2ToFlashBuffer(outUf2);
+
+        await picoboot.flashEraseAndWrite(flashBuffer.address, flashBuffer.data, (percent, status) => {
+          statusText.textContent = status;
+          percentText.textContent = percent + '%';
+          fill.style.width = percent + '%';
+        });
+
+        statusText.textContent = "Rebooting..."; await picoboot.reboot(100);
+        showToast("Flashed! 🎉"); fill.style.width = '100%'; percentText.textContent = '100%';
+      } catch (err) { showToast(`Failed: ${err.message}`, true); statusText.textContent = `Error: ${err.message}`; }
+      finally { btnFlash.disabled = false; if (picoboot.isConnected()) await picoboot.disconnect(); }
+    }
+
+    document.getElementById('btnEnterBootloader').addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (!navigator.serial) {
+        alert("Your browser does not support WebSerial. Please use Chrome or Edge, or manually enter BOOTSEL mode.");
+        return;
+      }
+      try {
+        const port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 1200 });
+        await port.close();
+        showToast("Reset signal sent! Device should enter Flash Mode.");
+      } catch (err) {
+        console.error(err);
+        showToast("Could not trigger bootloader.", true);
+      }
+    });
+
+    async function readFromDevice() {
+      if (!('usb' in navigator)) { showToast("WebUSB not supported.", true); return; }
+      const btnRead = document.getElementById('btnRead'), progressDiv = document.getElementById('flashProgress'), statusText = document.getElementById('flashStatus'), percentText = document.getElementById('flashPercent'), fill = document.getElementById('flashFill');
+      btnRead.disabled = true; progressDiv.style.display = 'block'; statusText.textContent = "Requesting device...";
+
+      let device;
+      try {
+        device = await Picoboot.requestDevice();
+      } catch (err) {
+        if (navigator.serial) {
+          try {
+            statusText.textContent = "Searching for Pico (Normal Mode)...";
+            let picoPort = (await navigator.serial.getPorts()).find(p => {
+              const info = p.getInfo();
+              return info.usbVendorId === 0x2e8a;
+            });
+            if (!picoPort) {
+              picoPort = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x2e8a }] });
+            }
+            if (picoPort) {
+              statusText.textContent = "Triggering Flash Mode...";
+              await picoPort.open({ baudRate: 1200 });
+              await picoPort.close();
+              await new Promise(r => setTimeout(r, 1500));
+              statusText.textContent = "Requesting Picoboot...";
+              device = await Picoboot.requestDevice();
+            }
+          } catch (serialErr) {
+            console.error("Auto-reset failed:", serialErr);
+          }
+        }
+        if (!device) {
+          showToast("Device not found.", true);
+          btnRead.disabled = false;
+          progressDiv.style.display = 'none';
+          return;
+        }
+      }
+      const picoboot = device;
+      try {
+        await picoboot.connect();
+        statusText.textContent = "Reading header...";
+        fill.style.width = '5%'; percentText.textContent = '5%';
+
+        const headerData = await picoboot.flashRead(TARGET_ADDRESS, 512), headerView = new DataView(headerData.buffer);
+        samples = [];
+        if (headerView.getUint32(0, true) === SAMPLES_MAGIC) {
+          const count = headerView.getUint32(4, true);
+          for (let i = 0; i < count; i++) {
+            const progress = Math.floor(5 + (i / count) * 90);
+            statusText.textContent = `Reading user sample ${i + 1}/${count}...`;
+            fill.style.width = progress + '%'; percentText.textContent = progress + '%';
+
+            const entryStart = 8 + (i * 32), offset = headerView.getUint32(entryStart, true), length = headerView.getUint32(entryStart + 4, true);
+            let name = ""; for (let j = 0; j < 24; j++) { const char = headerView.getUint8(entryStart + 8 + j); if (char === 0) break; name += String.fromCharCode(char); }
+            const rawData = await picoboot.flashRead(TARGET_ADDRESS + offset, length * 2), int16View = new Int16Array(rawData.buffer), floatData = new Float32Array(length);
+            for (let j = 0; j < length; j++) floatData[j] = int16View[j] / 32767.0;
+            samples.push({ name: name || `Sample ${i + 1}`, data: floatData, trimStart: 0, trimEnd: length, origLen: length });
+          }
+        }
+
+        renderSamples(); updateBudget();
+        showToast(`Sync complete! 📥`);
+        fill.style.width = '100%'; percentText.textContent = '100%';
+        statusText.textContent = "Synchronized";
+      } catch (err) {
+        showToast(`Read failed: ${err.message}`, true);
+        statusText.textContent = "Error: " + err.message;
+      }
+      finally {
+        btnRead.disabled = false;
+        if (picoboot.isConnected()) await picoboot.disconnect();
+      }
+    }
+    window.addEventListener('resize', () => {
+      samples.forEach((_, idx) => {
+        drawWaveform(idx);
+        setupTrim(idx);
+      });
+    });
+  </script>
+</body>
+
+</html>
