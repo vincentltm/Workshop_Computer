@@ -16,13 +16,3 @@ Icon?
 .vscode/
 site/
 tools/sitegen/node_modules/
-
-# Ignore all files under build directories
-**/build/**
-
-# Allow the build directory itself and any subdirectories
-!**/build/
-!**/build/**/
-
-# Allow .uf2 files
-!**/build/**/*.uf2
