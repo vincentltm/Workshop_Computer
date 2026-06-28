@@ -1,0 +1,100 @@
+Name: Rooms
+Description: Stereo Binaural Room Simulator
+Language: C++ (RP2040 Pico SDK)
+Creator: Vincent Maurer
+Version: 1.0
+Status: Released
+
+tags:
+  - binaural
+  - spatializer
+  - 3d-audio
+  - reverb
+  - delay
+  - room-simulator
+
+manual: |
+  Rooms places a sound source in a virtual 3D room.
+  The switch determines the source input: Switch Up selects Audio Input 1, Switch Middle selects Audio Input 2.
+  When Switch is Up or Middle, the knobs control source positioning:
+  - Main: azimuth rotation (0 to 360 degrees)
+  - X: distance from listener
+  - Y: binaural width (from pinpoint to wide cloud)
+  
+  When Switch is Down, the knobs control the room reverb and delay boundaries:
+  - Main: Reverb size (decay and mix)
+  - X: Delay Time (from 20ms to 400ms; bypassed/off if X < 500)
+  - Y: Delay Feedback (bounces level)
+
+panel:
+  inputs:
+    - id: AudioIn1
+      name: Audio Input 1
+      description: Audio source selected by Switch Up for spatialization
+    - id: AudioIn2
+      name: Audio Input 2
+      description: Audio source selected by Switch Middle for spatialization
+    - id: CVIn1
+      name: Audio 1 Azimuth CV
+      description: Modulates Audio In 1 rotation angle
+    - id: CVIn2
+      name: Audio 2 Azimuth CV
+      description: Modulates Audio In 2 rotation angle
+    - id: PulseIn1
+      name: Audio 1 Randomize Pulse
+      description: Trigger randomizes Audio In 1's position (azimuth, distance, width)
+    - id: PulseIn2
+      name: Audio 2 Randomize Pulse
+      description: Trigger randomizes Audio In 2's position (azimuth, distance, width)
+  outputs:
+    - id: AudioOut1
+      name: Binaural Out Left
+      description: Binaural left output (headphones recommended)
+    - id: AudioOut2
+      name: Binaural Out Right
+      description: Binaural right output (headphones recommended)
+    - id: CVOut1
+      name: Azimuth CV
+      description: CV output showing current azimuth position (-2048 to +2047)
+    - id: CVOut2
+      name: Distance CV
+      description: CV output showing current distance position (-2048 to +2047)
+    - id: PulseOut1
+      name: Zero-Cross Trigger
+      description: Pulses high when source crosses 0 degrees (front)
+    - id: PulseOut2
+      name: Flight Step
+      description: Unused in this version
+
+controls:
+  knobs:
+    - when: { switch: Up }
+      main:
+        name: Rotation
+        description: Set azimuth angle (0 to 360 degrees)
+      x:
+        name: Distance
+        description: Set source distance (near to far)
+      y:
+        name: Binaural Width
+        description: Set source width (pinpoint to wide cloud)
+    - when: { switch: Middle }
+      main:
+        name: Rotation
+        description: Set azimuth angle (0 to 360 degrees)
+      x:
+        name: Distance
+        description: Set source distance (near to far)
+      y:
+        name: Binaural Width
+        description: Set source width (pinpoint to wide cloud)
+    - when: { switch: Down }
+      main:
+        name: Reverb Size
+        description: Set decay and mix level of plate reverb
+      x:
+        name: Delay Time
+        description: Set room delay time (bypassed/off if X < 500)
+      y:
+        name: Feedback / Bounces
+        description: Set reflection feedback level
