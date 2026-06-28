@@ -1,0 +1,1337 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+:root {
+    --bg: #16181d;
+    --card: #1f2229;
+    --accent: #ff9400;          /* Muted retro screen-printed orange/amber */
+    --accent-glow: rgba(255, 148, 0, 0.15);
+    --lcd-bg: #0c1a16;          /* Green backlit character LCD */
+    --lcd-text: #39ffb0;        /* Pixel mint green text */
+    --lcd-text-dim: #248860;
+    --text: #d1d5db;
+    --dim: #7f8c9f;
+    --border: #323743;
+    --green: #10b981;
+    --red: #f43f5e;
+    --blue: #06b6d4;
+    
+    --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Tahoma", "Geneva", "Arial", sans-serif;
+    --font-lcd: "Share Tech Mono", "Courier New", monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: var(--font-family);
+    background: radial-gradient(circle at 50% 50%, #2a2d36 0%, #0c0e10 100%);
+    color: var(--text);
+    max-width: 1280px;
+    margin: 40px auto;
+    padding: 0 20px;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ─── 19-Inch Rack Chassis ─── */
+.rack-chassis {
+    display: flex;
+    position: relative;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.85);
+    border-radius: 8px;
+    background: #16171b;
+}
+
+.rack-ear {
+    width: 42px;
+    background: linear-gradient(90deg, #151619 0%, #3a3f4a 45%, #262931 55%, #101113 100%);
+    border-top: 1px solid #4a505d;
+    border-bottom: 1px solid #0c0d0f;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    align-items: center;
+    padding: 80px 0;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.rack-ear.left {
+    border-radius: 8px 0 0 8px;
+    border-right: 2px solid #000;
+}
+
+.rack-ear.right {
+    border-radius: 0 8px 8px 0;
+    border-left: 2px solid #000;
+}
+
+.rack-ear::before {
+    content: '';
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 1px;
+    background: rgba(255,255,255,0.08);
+}
+.rack-ear.left::before { right: 2px; }
+.rack-ear.right::before { left: 2px; }
+
+/* Screws holding the rack */
+.rack-ear .bolt {
+    width: 18px;
+    height: 18px;
+    background: radial-gradient(circle at 6px 6px, #8d95a5 20%, #4b5260 60%, #15161a 90%);
+    border-radius: 50%;
+    box-shadow: inset 0 1px 1px rgba(255,255,255,0.4), 0 3px 6px rgba(0,0,0,0.7);
+    position: relative;
+}
+
+.rack-ear .bolt::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 2px;
+    width: 14px;
+    height: 2px;
+    background: #0d0f12;
+    transform: rotate(35deg); /* Slightly random rotation */
+}
+
+/* Faceplate */
+.rack-faceplate {
+    flex-grow: 1;
+    background: #2b2e37;
+    background-image: linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(255,255,255,0.01) 1px, transparent 1px);
+    background-size: 100% 3px, 3px 100%; /* subtle brushed metal texture */
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+    min-width: 0;
+    position: relative;
+    border-top: 1px solid #4d5363;
+    border-bottom: 1px solid #08090a;
+}
+
+/* ─── Header Section ─── */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding: 16px 20px;
+    background: linear-gradient(180deg, #373b47 0%, #20232a 100%);
+    border-top: 2px solid #52586a;
+    border-left: 2px solid #52586a;
+    border-right: 2px solid #0c0d10;
+    border-bottom: 2px solid #0c0d10;
+    border-radius: 4px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+}
+
+.header h1 {
+    font-family: var(--font-family);
+    color: var(--accent);
+    font-size: 1.8rem;
+    font-weight: 900;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    text-shadow: 0 0 6px rgba(255, 144, 0, 0.4);
+}
+
+.subtitle {
+    font-family: var(--font-family);
+    color: var(--dim);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-top: 6px;
+}
+
+/* Physical LED Badge */
+.status-badge {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    border-radius: 4px;
+    background: #000;
+    border: 1px solid #2b303b;
+    color: #aaa;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #440000;
+    border: 1px solid #000;
+    box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+    position: relative;
+}
+
+.status-dot.online {
+    background: #00ff66;
+    box-shadow: 0 0 8px #00ff66, inset 0 2px 2px rgba(255,255,255,0.6);
+}
+
+.status-dot::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.7);
+}
+
+/* ─── Dashboard Grid ─── */
+.dashboard {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+}
+
+@media (max-width: 900px) {
+    .dashboard { grid-template-columns: 1fr; }
+    .combined-sf2-card, .combined-midi-card {
+        grid-template-columns: 1fr !important;
+        min-height: auto !important;
+    }
+    .combined-sf2-card > div:last-child, .combined-midi-card > div:last-child {
+        border-left: none !important;
+        padding-left: 0 !important;
+        margin-top: 24px;
+        border-top: 1px solid var(--border) !important;
+        padding-top: 24px !important;
+    }
+}
+
+/* ─── Card Modules ─── */
+.card {
+    background: #232731;
+    border-radius: 4px;
+    padding: 24px;
+    border-top: 2px solid #52586a;
+    border-left: 2px solid #52586a;
+    border-right: 2px solid #0c0d10;
+    border-bottom: 2px solid #0c0d10;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255,255,255,0.08);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.card.full-width { grid-column: 1 / -1; }
+
+/* Bevel screws on cards */
+.card::before, .card::after {
+    content: '';
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: radial-gradient(circle, #7a7e8a 30%, #3e414b 70%, #15161b 100%);
+    border-radius: 50%;
+    box-shadow: 0 1px 1px rgba(255,255,255,0.1), inset 0 1px 1px rgba(0,0,0,0.5);
+    z-index: 5;
+}
+.card::before { top: 8px; left: 8px; }
+.card::after { top: 8px; right: 8px; }
+
+.card h2 {
+    font-family: var(--font-family);
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 20px;
+    border-bottom: 2px solid rgba(255, 144, 0, 0.25);
+    padding-bottom: 8px;
+    font-weight: 700;
+}
+
+/* ─── Drop Zone as PCM Expansion Card Slot ─── */
+.drop-zone {
+    border-top: 2px solid #0c0d10;
+    border-left: 2px solid #0c0d10;
+    border-right: 2px solid #52586a;
+    border-bottom: 2px solid #52586a;
+    border-radius: 4px;
+    padding: 35px 20px;
+    text-align: center;
+    cursor: pointer;
+    background: #0d0f13;
+    box-shadow: inset 0 6px 12px rgba(0,0,0,0.85);
+    position: relative;
+    overflow: hidden;
+}
+
+.drop-zone::before {
+    content: '';
+    position: absolute;
+    top: 4px; left: 4px; right: 4px; bottom: 4px;
+    border: 1px solid rgba(255, 144, 0, 0.1);
+    border-radius: 4px;
+    pointer-events: none;
+}
+
+.drop-zone:hover, .drop-zone.drag-over {
+    background: #11141a;
+    border-color: var(--accent);
+}
+
+.drop-zone h3 {
+    font-family: var(--font-family);
+    font-size: 0.9rem;
+    margin-bottom: 8px;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.drop-zone p {
+    font-size: 0.78rem;
+    color: var(--dim);
+}
+
+#fileInput { display: none; }
+
+/* ─── Recessed LCD Displays (Only on specific readouts to maximize legibility) ─── */
+.lcd-readout-screen {
+    background: var(--lcd-bg) !important;
+    border-top: 2px solid #0c0d10 !important;
+    border-left: 2px solid #0c0d10 !important;
+    border-right: 2px solid #52586a !important;
+    border-bottom: 2px solid #52586a !important;
+    border-radius: 3px !important;
+    box-shadow: inset 0 4px 8px rgba(0,0,0,0.85) !important;
+    padding: 14px !important;
+    margin-bottom: 14px !important;
+    position: relative !important;
+    font-family: var(--font-lcd) !important;
+    color: var(--lcd-text) !important;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Finer, subtle scanline overlay only on the LCD readout screens */
+.lcd-readout-screen::before {
+    content: " ";
+    display: block;
+    position: absolute;
+    top: 0; left: 0; bottom: 0; right: 0;
+    background: linear-gradient(rgba(18, 22, 20, 0) 50%, rgba(0, 0, 0, 0.12) 50%);
+    background-size: 100% 4px;
+    z-index: 10;
+    pointer-events: none;
+    border-radius: 2px;
+}
+
+.sf2-details, #midiDetails {
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    color: var(--text) !important;
+    text-shadow: none !important;
+    display: none; /* controlled by JS */
+    flex-direction: column;
+    gap: 14px;
+}
+
+#midiDetailsPlaceholder {
+    background: #0d0f12 !important;
+    border: 2px solid #22252a !important;
+    border-radius: 6px !important;
+    box-shadow: inset 0 4px 8px rgba(0,0,0,0.8) !important;
+    color: #5a6475 !important;
+    font-family: inherit !important;
+    text-shadow: none !important;
+    padding: 30px !important;
+    text-align: center;
+    font-size: 0.85rem;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.12);
+    font-size: 0.82rem;
+}
+
+.detail-label {
+    color: var(--lcd-text-dim) !important;
+    text-shadow: none !important;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.detail-value {
+    font-family: 'Share Tech Mono', monospace;
+    font-weight: 500;
+    color: var(--lcd-text) !important;
+}
+
+.detail-value.warning {
+    color: var(--red) !important;
+    text-shadow: 0 0 6px rgba(255, 51, 68, 0.6) !important;
+}
+.detail-value.ok {
+    color: var(--green) !important;
+}
+
+/* ─── Hardware Checkboxes and Lists (Optimized for High Legibility) ─── */
+.list-container {
+    background: #090b0e !important;
+    border: 3px solid #14161a !important;
+    outline: 1px solid #23262d !important;
+    border-radius: 4px !important;
+    box-shadow: inset 0 4px 8px rgba(0,0,0,0.85) !important;
+    max-height: 480px;
+    overflow-y: auto;
+    font-family: 'Share Tech Mono', monospace !important;
+    padding: 2px !important;
+}
+
+.list-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 2px solid #22252a !important;
+    background: #0e1014 !important;
+    font-size: 0.72rem;
+    color: var(--dim) !important;
+    font-weight: bold;
+    text-transform: uppercase;
+    position: sticky;
+    top: 0;
+    z-index: 15;
+}
+
+.list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-bottom: 1px solid #14161a !important;
+    font-size: 0.8rem;
+    gap: 10px;
+    color: #cbd5e1 !important;
+}
+
+.list-item:hover {
+    background: rgba(255, 144, 0, 0.08) !important;
+    color: #ff9000 !important;
+}
+
+.list-item.unchecked {
+    opacity: 0.3 !important;
+}
+
+.list-item input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.item-name {
+    font-weight: 500;
+}
+
+.item-meta {
+    font-family: 'Share Tech Mono', monospace;
+    color: var(--lcd-text-dim) !important;
+    font-size: 0.78rem;
+}
+
+/* ─── Progress & Size Estimate Bars ─── */
+.est-bar-wrap {
+    margin-top: 12px;
+    background: rgba(0, 15, 10, 0.5) !important;
+    border-radius: 4px !important;
+    border: 1px solid rgba(0, 255, 136, 0.2) !important;
+    padding: 12px 14px !important;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.est-bar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+}
+
+.est-bar-label span:first-child {
+    color: var(--lcd-text-dim);
+}
+
+.est-bar {
+    height: 10px !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+    border: 1px solid rgba(0, 255, 136, 0.25) !important;
+    border-radius: 2px !important;
+    overflow: hidden;
+}
+
+.est-bar-fill {
+    height: 100% !important;
+    background: var(--green) !important;
+    border-radius: 0;
+    box-shadow: 0 0 8px var(--green) !important;
+    transition: width 0.3s ease;
+}
+.est-bar-fill.over {
+    background: var(--red) !important;
+    box-shadow: 0 0 8px var(--red) !important;
+}
+
+.progress-container {
+    margin-top: 20px;
+    background: rgba(0, 15, 10, 0.5) !important;
+    border: 1px solid rgba(0, 255, 136, 0.2) !important;
+    padding: 12px 14px !important;
+    border-radius: 4px !important;
+}
+
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+}
+
+.progress-bar {
+    height: 12px !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+    border: 1px solid rgba(0, 255, 136, 0.25) !important;
+    border-radius: 2px !important;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--green) !important;
+    box-shadow: 0 0 8px var(--green) !important;
+    transition: width 0.15s ease;
+}
+
+/* ─── Tactile Push Buttons (Skeuomorphic) ─── */
+.actions {
+    display: flex;
+    gap: 14px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 3px;
+    border-top: 2px solid #6b7280;
+    border-left: 2px solid #6b7280;
+    border-right: 2px solid #111827;
+    border-bottom: 2px solid #111827;
+    background: linear-gradient(180deg, #374151 0%, #1f2937 100%);
+    color: #f3f4f6;
+    font-family: var(--font-family);
+    font-size: 0.75rem;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    flex: 1;
+    min-width: 150px;
+    transition: none; /* Instant tactile action */
+}
+
+.btn:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4b5563 0%, #374151 100%);
+    color: #fff;
+}
+
+.btn:active:not(:disabled) {
+    border-top: 2px solid #111827;
+    border-left: 2px solid #111827;
+    border-right: 2px solid #4b5563;
+    border-bottom: 2px solid #4b5563;
+    background: linear-gradient(180deg, #111827 0%, #1f2937 100%);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+    transform: translateY(1px);
+}
+
+.btn:disabled {
+    background: #1c1e22;
+    border-top: 2px solid #23252b;
+    border-left: 2px solid #23252b;
+    border-right: 2px solid #0f1012;
+    border-bottom: 2px solid #0f1012;
+    color: #4b5260;
+    box-shadow: none;
+    cursor: not-allowed;
+    transform: none !important;
+}
+
+.btn-primary {
+    background: linear-gradient(180deg, #f97316 0%, #c2410c 100%);
+    border-top: 2px solid #fdba74;
+    border-left: 2px solid #fdba74;
+    border-right: 2px solid #7c2d12;
+    border-bottom: 2px solid #7c2d12;
+    color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #ea580c 0%, #9a3412 100%);
+}
+
+.btn-primary:active:not(:disabled) {
+    border-top: 2px solid #7c2d12;
+    border-left: 2px solid #7c2d12;
+    border-right: 2px solid #ea580c;
+    border-bottom: 2px solid #ea580c;
+    background: linear-gradient(180deg, #7c2d12 0%, #c2410c 100%);
+}
+
+/* Tab buttons */
+.tab-buttons {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.tab-btn {
+    background: linear-gradient(180deg, #3c404c 0%, #22242b 100%) !important;
+    border-top: 2px solid #545b6b !important;
+    border-left: 2px solid #545b6b !important;
+    border-right: 2px solid #0f1013 !important;
+    border-bottom: 2px solid #0f1013 !important;
+    color: #9aa2b1 !important;
+    padding: 8px 16px !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+    font-family: var(--font-family) !important;
+    font-size: 0.75rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    box-shadow: 0 3px 5px rgba(0,0,0,0.3) !important;
+    transition: none !important;
+}
+
+.tab-btn:hover {
+    color: #fff !important;
+}
+
+.tab-btn.active {
+    background: linear-gradient(180deg, #18191f 0%, #282a33 100%) !important;
+    border-top: 2px solid #0f1013 !important;
+    border-left: 2px solid #0f1013 !important;
+    border-right: 2px solid #4a5061 !important;
+    border-bottom: 2px solid #4a5061 !important;
+    color: var(--accent) !important;
+    text-shadow: 0 0 4px rgba(255, 144, 0, 0.5) !important;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.6) !important;
+}
+
+/* ─── Toast Alerts ─── */
+.toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 14px 24px;
+    border-radius: 4px;
+    background: var(--lcd-bg);
+    border: 2px solid var(--accent);
+    color: var(--accent);
+    font-family: 'Share Tech Mono', monospace;
+    font-weight: 700;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    text-shadow: 0 0 5px rgba(255, 144, 0, 0.5);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.8);
+    transform: translateY(100px);
+    opacity: 0;
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    z-index: 999;
+}
+
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.error { border-color: var(--red); color: var(--red); text-shadow: 0 0 5px rgba(255, 51, 68, 0.5); }
+.toast.success { border-color: var(--green); color: var(--green); text-shadow: 0 0 5px rgba(0, 255, 136, 0.5); }
+
+/* ─── Virtual Keyboard ─── */
+.keyboard-section {
+    margin-top: 32px;
+}
+
+.keyboard-section-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 0 6px;
+}
+
+.keyboard-section-title h2 {
+    font-family: var(--font-family);
+    font-size: 0.82rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    border: none;
+    margin: 0;
+    padding: 0;
+}
+
+.keyboard-section-title .midi-status {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.keyboard-outer {
+    background: #1c1d23;
+    border-radius: 6px;
+    padding: 24px;
+    border-top: 2px solid #3c414d;
+    border-left: 2px solid #3c414d;
+    border-right: 2px solid #0f1013;
+    border-bottom: 2px solid #0f1013;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.65);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    position: relative;
+}
+
+.keyboard-outer::before, .keyboard-outer::after {
+    content: '';
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: radial-gradient(circle, #7a7e8a 30%, #3e414b 70%, #15161b 100%);
+    border-radius: 50%;
+    box-shadow: 0 1px 1px rgba(255,255,255,0.1), inset 0 1px 1px rgba(0,0,0,0.5);
+    z-index: 5;
+}
+.keyboard-outer::before { top: 8px; left: 8px; }
+.keyboard-outer::after { top: 8px; right: 8px; }
+
+.keyboard-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.keyboard-header span:first-child {
+    font-family: var(--font-family) !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.05em;
+    color: var(--dim);
+}
+
+.octave-display {
+    font-family: 'Share Tech Mono', monospace;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-left: 12px;
+    text-shadow: 0 0 4px rgba(255, 144, 0, 0.4);
+}
+
+.keyboard-hint {
+    font-size: 0.72rem;
+    color: var(--dim);
+}
+.keyboard-hint b { color: #fff; }
+
+.keyboard-controls {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: #0e0f12;
+    border-radius: 4px;
+    border: 1px solid #23252c;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.7);
+}
+
+.kb-ctrl-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--dim);
+}
+.kb-ctrl-label b { color: var(--accent); }
+
+/* Custom Physical Volume Slider */
+input[type="range"].vel-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    background: #000;
+    border: 1px solid #23252c;
+    border-radius: 4px;
+    height: 10px;
+    outline: none;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+    width: 120px;
+    cursor: pointer;
+}
+
+input[type="range"].vel-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 24px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #444 0%, #666 40%, #ff3b30 45%, #ff3b30 55%, #666 60%, #444 100%);
+    border: 1px solid #111;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.7);
+    cursor: pointer;
+}
+
+/* Realistic Keyboard Keys */
+.keyboard-keys {
+    display: flex;
+    position: relative;
+    height: 160px;
+    background: #08090a;
+    border-radius: 4px;
+    overflow: hidden;
+    user-select: none;
+    border: 3px solid #101114;
+    box-shadow: inset 0 4px 10px rgba(0,0,0,0.8);
+}
+
+.key {
+    position: relative;
+    cursor: pointer;
+    transition: background 0.05s;
+}
+
+.key.white {
+    flex: 1;
+    height: 100%;
+    background: linear-gradient(180deg, #dddddd 0%, #f7f7f7 85%, #cccccc 100%) !important;
+    border-right: 1px solid #111 !important;
+    border-bottom: 4px solid #aaa !important;
+    z-index: 1;
+    box-shadow: 0 2px 3px rgba(0,0,0,0.3) !important;
+}
+
+.key.black {
+    position: absolute;
+    width: 7%;
+    height: 60%;
+    background: linear-gradient(180deg, #111 0%, #2a2a2a 80%, #000 100%) !important;
+    z-index: 20;
+    border-radius: 0 0 3px 3px;
+    border: 1px solid #000;
+    border-top: none;
+    border-bottom: 5px solid #000 !important;
+    box-shadow: 2px 3px 5px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08) !important;
+}
+
+.key.white:hover {
+    background: linear-gradient(180deg, #d3d3d3 0%, #eaeaea 85%, #bebebe 100%) !important;
+}
+.key.black:hover {
+    background: linear-gradient(180deg, #1a1a1a 0%, #353535 80%, #0c0c0c 100%) !important;
+}
+
+.key.white.active {
+    background: linear-gradient(180deg, #ffc800 0%, #d46b00 100%) !important;
+    border-bottom: 1px solid #8c3f00 !important;
+    box-shadow: inset 0 3px 5px rgba(0,0,0,0.5), 0 0 8px rgba(255, 144, 0, 0.4) !important;
+    transform: translateY(2px);
+    height: calc(100% - 2px);
+}
+
+.key.black.active {
+    background: linear-gradient(180deg, #ffa81a 0%, #a65100 100%) !important;
+    border-bottom: 1px solid #440000 !important;
+    box-shadow: 0 0 6px rgba(255, 144, 0, 0.4), inset 0 2px 4px rgba(0,0,0,0.6) !important;
+    transform: translateY(3px);
+    height: calc(60% - 3px);
+}
+
+.key-label {
+    position: absolute;
+    bottom: 6px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 0.58rem;
+    font-weight: 700;
+    color: #555;
+    pointer-events: none;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.key.black .key-label {
+    color: #888;
+    bottom: 8px;
+    font-size: 0.52rem;
+}
+
+.key.white.active .key-label { color: rgba(0,0,0,0.65); }
+.key.black.active .key-label { color: rgba(255,255,255,0.7); }
+
+.key-note-name {
+    position: absolute;
+    bottom: 22px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 0.52rem;
+    color: rgba(0,0,0,0.18);
+    pointer-events: none;
+    font-weight: bold;
+}
+
+/* Keyboard footer details */
+.keyboard-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 12px;
+    border-top: 1px solid #282a33;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.keyboard-footer select.mini-select {
+    min-width: 140px;
+}
+
+/* ─── Hardware Push Buttons (Specifics) ─── */
+.panic-btn {
+    padding: 6px 14px !important;
+    border-radius: 4px !important;
+    background: linear-gradient(180deg, #dd3b30 0%, #99160d 100%) !important;
+    border-top: 2px solid #ff7066 !important;
+    border-left: 2px solid #ff7066 !important;
+    border-right: 2px solid #550600 !important;
+    border-bottom: 2px solid #550600 !important;
+    color: #fff !important;
+    font-family: var(--font-family) !important;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    box-shadow: 0 3px 5px rgba(0,0,0,0.4) !important;
+    transition: none !important;
+}
+
+.panic-btn:hover {
+    background: linear-gradient(180deg, #ea4c40 0%, #aa1e14 100%) !important;
+}
+
+.panic-btn:active {
+    border-top: 2px solid #550600 !important;
+    border-left: 2px solid #550600 !important;
+    border-right: 2px solid #ff7066 !important;
+    border-bottom: 2px solid #ff7066 !important;
+    background: linear-gradient(180deg, #660a03 0%, #8c1007 100%) !important;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.7) !important;
+    transform: translateY(1px);
+}
+
+.preview-toggle-btn {
+    padding: 6px 14px !important;
+    border-radius: 4px !important;
+    background: linear-gradient(180deg, #2c4263 0%, #17263b 100%) !important;
+    border-top: 2px solid #537bb2 !important;
+    border-left: 2px solid #537bb2 !important;
+    border-right: 2px solid #0d1726 !important;
+    border-bottom: 2px solid #0d1726 !important;
+    color: #94bbf0 !important;
+    font-family: var(--font-family) !important;
+    font-size: 0.72rem !important;
+    font-weight: 700 !important;
+    text-transform: uppercase;
+    box-shadow: 0 3px 5px rgba(0,0,0,0.4) !important;
+    transition: none !important;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.preview-toggle-btn:hover {
+    color: #fff !important;
+    background: linear-gradient(180deg, #344c70 0%, #1c2d47 100%) !important;
+}
+
+.preview-toggle-btn.active {
+    background: linear-gradient(180deg, #00b0c2 0%, #006b77 100%) !important;
+    border-top: 2px solid #00f0ff !important;
+    border-left: 2px solid #00f0ff !important;
+    border-right: 2px solid #00363d !important;
+    border-bottom: 2px solid #00363d !important;
+    color: #fff !important;
+    text-shadow: 0 0 4px rgba(0,240,255,0.6) !important;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.7) !important;
+}
+
+/* ─── Hardware Optimizer Panel ─── */
+.optimizer-panel {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px dashed rgba(0, 255, 136, 0.2);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.opt-title {
+    font-family: var(--font-family);
+    font-size: 0.75rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+}
+
+.opt-select {
+    width: 100%;
+}
+
+.opt-check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.opt-check-row input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 15px;
+    height: 15px;
+}
+
+.opt-check-row label {
+    font-size: 0.82rem;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+}
+
+.opt-check-row label small {
+    color: var(--dim);
+    font-size: 0.75rem;
+}
+
+#optimizationSummary {
+    font-size: 0.85rem;
+    color: var(--green) !important;
+    display: none;
+    padding: 12px !important;
+    border-radius: 4px !important;
+    background: rgba(0, 255, 136, 0.06) !important;
+    border: 1px solid rgba(0, 255, 136, 0.2) !important;
+    line-height: 1.6;
+}
+
+/* ─── MIDI Card Configuration Table ─── */
+#midiConfigCard table {
+    background: var(--lcd-bg) !important;
+    border: 3px solid #14161a !important;
+    border-radius: 4px !important;
+    box-shadow: inset 0 8px 16px rgba(0,0,0,0.9) !important;
+    color: var(--lcd-text) !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    text-shadow: 0 0 5px rgba(0,255,136,0.5) !important;
+    border-collapse: collapse;
+}
+
+#midiConfigCard table::before {
+    content: "";
+    display: block;
+    position: absolute;
+    top: 0; left: 0; bottom: 0; right: 0;
+    background: linear-gradient(rgba(18, 22, 20, 0) 50%, rgba(0, 0, 0, 0.18) 50%);
+    background-size: 100% 4px;
+    z-index: 10;
+    pointer-events: none;
+}
+
+#midiConfigCard th {
+    background: rgba(0, 20, 15, 0.8) !important;
+    border-bottom: 2px solid rgba(0, 255, 136, 0.3) !important;
+    color: var(--lcd-text-dim) !important;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.78rem;
+    letter-spacing: 0.05em;
+    padding: 12px 16px !important;
+}
+
+#midiConfigCard td {
+    border-bottom: 1px solid rgba(0, 255, 136, 0.12) !important;
+    padding: 10px 16px !important;
+    font-size: 0.85rem;
+}
+
+#midiRoutingTableBody tr:hover {
+    background: rgba(0, 255, 136, 0.05) !important;
+}
+
+/* Custom mini select inside LCD tables */
+.mini-select {
+    background: #050d0b !important;
+    border: 1px solid rgba(0, 255, 136, 0.25) !important;
+    color: var(--lcd-text) !important;
+    padding: 4px 8px !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.8rem !important;
+    outline: none !important;
+    cursor: pointer !important;
+    text-shadow: 0 0 4px rgba(0,255,136,0.5) !important;
+    border-radius: 3px !important;
+}
+
+.mini-select:hover {
+    border-color: rgba(0, 255, 136, 0.6) !important;
+}
+
+/* MIDI Radio Buttons Styling */
+#midiConfigCard input[type="radio"] {
+    accent-color: var(--accent);
+}
+
+/* ─── Added Detailed 90s Rompler Aesthetics ─── */
+
+.printed-schematic {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--font-family);
+    font-size: 0.62rem;
+    color: rgba(255, 144, 0, 0.45);
+    margin: 0 0 24px 0;
+    padding: 10px;
+    border: 1px dashed rgba(255, 144, 0, 0.25);
+    border-radius: 4px;
+    letter-spacing: 0.12em;
+    user-select: none;
+    background: rgba(0, 0, 0, 0.2);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+    flex-wrap: wrap;
+}
+
+.printed-schematic span {
+    border: 1px solid rgba(255, 144, 0, 0.25);
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: #0f1013;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    font-weight: 700;
+}
+
+/* 3D Value Jog Wheel */
+.jog-wheel-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-left: 24px;
+    user-select: none;
+}
+
+.jog-wheel-label {
+    font-family: var(--font-family);
+    font-size: 0.52rem;
+    font-weight: 900;
+    color: var(--accent);
+    letter-spacing: 0.15em;
+    margin-bottom: 5px;
+    text-shadow: 0 0 3px rgba(255, 144, 0, 0.3);
+}
+
+.jog-wheel {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 14px 14px, #525866 0%, #1e2026 65%, #08090a 100%);
+    border: 3px solid #000;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.7), inset 0 1px 1px rgba(255,255,255,0.15);
+    position: relative;
+    cursor: pointer;
+    transition: transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.jog-wheel:active {
+    box-shadow: 0 2px 5px rgba(0,0,0,0.9), inset 0 1px 1px rgba(255,255,255,0.1);
+}
+
+.jog-finger-indent {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #090a0c;
+    border: 2px solid #363a45;
+    position: absolute;
+    top: 6px;
+    left: 17px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.8);
+}
+
+/* PCM Card Expansion Slot Container */
+.pcm-slot-container {
+    background: #0f1014;
+    border: 2px solid #282b35;
+    border-radius: 6px;
+    padding: 16px;
+    box-shadow: inset 0 3px 6px rgba(0,0,0,0.85), 0 1px 0 rgba(255,255,255,0.05);
+    margin-bottom: 20px;
+}
+
+.pcm-slot-bezel {
+    border: 3px solid #191b22;
+    border-radius: 4px;
+    background: #000;
+    padding: 4px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.6);
+}
+
+.pcm-slot-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 12px;
+    padding: 0 2px;
+}
+
+.pcm-status-led {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.68rem;
+    color: #7f8a9e;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+}
+
+.led-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #2b0c0c;
+    border: 1px solid #000;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.8);
+    position: relative;
+}
+
+.led-dot::after {
+    content: '';
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 2px;
+    height: 2px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.6);
+}
+
+.led-dot.green.active {
+    background: #00ff66;
+    box-shadow: 0 0 8px #00ff66, inset 0 1px 1px rgba(255,255,255,0.6);
+}
+
+.led-dot.red.active {
+    background: #ff3344;
+    box-shadow: 0 0 8px #ff3344, inset 0 1px 1px rgba(255,255,255,0.6);
+}
+
+.led-dot.amber.active {
+    background: #ffaa00;
+    box-shadow: 0 0 8px #ffaa00, inset 0 1px 1px rgba(255,255,255,0.6);
+}
+
+.pcm-eject-btn, .floppy-eject-btn {
+    background: linear-gradient(180deg, #5a5f6e 0%, #30333d 100%);
+    border-top: 1px solid #828a9c;
+    border-left: 1px solid #828a9c;
+    border-right: 1px solid #14161b;
+    border-bottom: 1px solid #14161b;
+    color: #d1d5db;
+    font-family: var(--font-family);
+    font-size: 0.58rem;
+    font-weight: 900;
+    padding: 4px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    text-transform: uppercase;
+}
+
+.pcm-eject-btn:hover, .floppy-eject-btn:hover {
+    color: #fff;
+    background: linear-gradient(180deg, #64697a 0%, #373b47 100%);
+}
+
+.pcm-eject-btn:active, .floppy-eject-btn:active {
+    border-top: 1px solid #14161b;
+    border-left: 1px solid #14161b;
+    border-right: 1px solid #7c8394;
+    border-bottom: 1px solid #7c8394;
+    background: linear-gradient(180deg, #202229 0%, #2b2e38 100%);
+    transform: translateY(1px);
+    box-shadow: inset 0 2px 3px rgba(0,0,0,0.8);
+}
+
+/* 3.5" Floppy Disk Drive Container */
+.floppy-drive-container {
+    background: #0f1014;
+    border: 2px solid #282b35;
+    border-radius: 6px;
+    padding: 16px;
+    box-shadow: inset 0 3px 6px rgba(0,0,0,0.85), 0 1px 0 rgba(255,255,255,0.05);
+}
+
+.floppy-bezel {
+    border: 3px solid #191b22;
+    border-radius: 4px;
+    background: #000;
+    padding: 4px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.6);
+}
+
+.floppy-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 12px;
+    padding: 0 2px;
+}
+
+.floppy-status-led {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.68rem;
+    color: #7f8a9e;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+}
