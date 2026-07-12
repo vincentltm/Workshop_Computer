@@ -116,7 +116,7 @@ struct ChorusBlock {
         hp_x1L = hp_y1L = hp_x1R = hp_y1R = 0;
     }
 
-    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t rate, int32_t depthFeedback,
                  int32_t cv1Warp)
     {
@@ -351,7 +351,7 @@ struct CodecDemolisherBlock {
         return (int16_t)(sign * reconstructed);
     }
 
-    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t strength, int32_t downsample, int32_t ringingXor,
                  int32_t cv2Corruption, uint32_t &rand_seed, int32_t globalNoiseScale = 16384)
     {
@@ -737,9 +737,9 @@ struct CodecDemolisherBlock {
 //   freeze   — When true: write pointer frozen; buffer loops without new input.
 // ============================================================================
 struct MultiTapDelayBlock {
-    // Stereo ring buffer — 28672 samples ≈ 1194 ms @ 24 kHz
-    int16_t  bufL[28672];
-    int16_t  bufR[28672];
+    // Stereo ring buffer — 20480 samples ≈ 853 ms @ 24 kHz
+    int16_t  bufL[20480];
+    int16_t  bufR[20480];
     uint16_t wr = 0;
 
     // IIR-smoothed delay time (prevents zipper on rapid changes)
@@ -774,7 +774,7 @@ struct MultiTapDelayBlock {
         lp_outR       = 0;
     }
 
-    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t time, int32_t feedback,
                  bool freeze, int32_t cv1Warp, int32_t cv2Corruption, int32_t globalNoiseScale = 16384)
     {
@@ -817,19 +817,19 @@ struct MultiTapDelayBlock {
                 bufL[wr] = inL;
                 bufR[wr] = inR;
                 wr = wr + 1;
-                if (wr >= 28672) wr = 0;
+                if (wr >= 20480) wr = 0;
             }
-        int32_t mapped_time = 128 + ((time * 27872) >> 15);
+        int32_t mapped_time = 128 + ((time * 19700) >> 15);
             int32_t target_t = mapped_time + (cv1Warp * 4);
-            target_t = clamp_i32(target_t, 128, 28500);
+            target_t = clamp_i32(target_t, 128, 20350);
             IIR_SMOOTH(smooth_t, target_t, 12);
             return;
         }
 
         // Slew delay time with CV1 pitch-warp
-        int32_t mapped_time = 128 + ((time * 27872) >> 15);
+        int32_t mapped_time = 128 + ((time * 19700) >> 15);
         int32_t target_t = mapped_time + (cv1Warp * 4);
-        target_t = clamp_i32(target_t, 128, 28500);
+        target_t = clamp_i32(target_t, 128, 20350);
 
         IIR_SMOOTH(smooth_t, target_t, 12);
 
@@ -843,14 +843,14 @@ struct MultiTapDelayBlock {
                                int16_t &rL, int16_t &rR) {
             int32_t rp_i = (int32_t)wr - (delay_q16 >> 16);
             if (rp_i < 0) {
-                rp_i += 28672;
+                rp_i += 20480;
                 if (rp_i < 0) rp_i = 0;
-            } else if (rp_i >= 28672) {
-                rp_i -= 28672;
-                if (rp_i >= 28672) rp_i = 0;
+            } else if (rp_i >= 20480) {
+                rp_i -= 20480;
+                if (rp_i >= 20480) rp_i = 0;
             }
             int32_t rp_n = rp_i + 1;
-            if (rp_n >= 28672) rp_n = 0;
+            if (rp_n >= 20480) rp_n = 0;
             uint16_t frac = (uint16_t)(delay_q16 & 0xFFFF);
             {
                 int16_t y0 = bufL[rp_i], y1 = bufL[rp_n];
@@ -911,7 +911,7 @@ struct MultiTapDelayBlock {
             bufL[wr] = wrL;
             bufR[wr] = wrR;
             wr = wr + 1;
-            if (wr >= 28672) wr = 0;
+            if (wr >= 20480) wr = 0;
         }
 
         last_outL = mixL;
@@ -1096,7 +1096,7 @@ struct GlitcherBlock {
         evolve_samples_left = 0;
     }
 
-    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainProb, int32_t size, int32_t speedQuant,
                  bool glitchInjector, bool freezeGate, int32_t cv1Warp, int32_t cv2Corruption,
                  uint32_t &rand_seed, int32_t scrubOffset = 0, int32_t glitchFeedback = 0, int32_t globalNoiseScale = 16384)
@@ -1350,6 +1350,14 @@ struct GlitcherBlock {
                             }
                         }
                     }
+                    if (speedQuant >= 26214) {
+                        // Chaotic size jitter in Zone 3 (up to 25% of loop size)
+                        int32_t jitter_range = final_size >> 2;
+                        if (jitter_range > 0) {
+                            int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
+                            final_size += offset;
+                        }
+                    }
                     current_loop_len = clamp_i32(final_size, 128, 16384);
                     
                     // Determine initial speed/direction for this glitch grain
@@ -1455,6 +1463,14 @@ struct GlitcherBlock {
                                     int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
                                     final_size += offset;
                                 }
+                            }
+                        }
+                        if (speedQuant >= 26214) {
+                            // Chaotic size jitter in Zone 3 (up to 25% of loop size)
+                            int32_t jitter_range = final_size >> 2;
+                            if (jitter_range > 0) {
+                                int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
+                                final_size += offset;
                             }
                         }
                         current_loop_len = clamp_i32(final_size, 128, 16384);
@@ -1623,7 +1639,7 @@ struct FilterBlock {
         f_dec_ctr = 0;
     }
 
-    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t cutoff, int32_t resonance, int32_t morph, int32_t cv1Warp)
     {
         // ── 1. CV1 manual sweep modulation ───────────────────────────────────
@@ -1929,7 +1945,7 @@ struct ReverbBlock {
         }
     };
 
-    int16_t mem[28672];
+    int16_t mem[27648];
     AP apIn[4], apTankL, apTankR;
     Delay modL, d1L, d2L, modR, d1R, d2R;
     int32_t lpL = 0, lpR = 0, lpIn = 0;
@@ -1987,7 +2003,7 @@ struct ReverbBlock {
         lp_size_scale = 32767;
     }
 
-    __attribute__((noinline)) void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
+    void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
         // Map Size (X) to scale factor: [0..32767] -> [4915..32767] (0.15x to 1.0x)
         int32_t size_scale = 4915 + (((int32_t)size * 27852) >> 15);
 
