@@ -23,6 +23,8 @@
 #include "fixed_math.h"
 #include <string.h>   // memset
 
+extern uint32_t rand_seed;
+
 // ============================================================================
 // Fixed-Point DC Blocker (High-Pass Filter with cutoff at ~10 Hz @ 48 kHz)
 // Prevents feedback DC accumulation in feedback loops.
@@ -110,8 +112,8 @@ struct ChorusBlock {
         int32_t eff_rate = rate + (cv1Warp * 4);
         eff_rate = clamp_i32(eff_rate, 0, 32767);
 
-        // Phase increment
-        uint16_t phase_inc = (uint16_t)(1 + (eff_rate >> 11));
+        // Phase increment (doubled for 24kHz)
+        uint16_t phase_inc = (uint16_t)(1 + (eff_rate >> 10));
         lfo_phase += phase_inc;
 
         // Decode depth / feedback from unified knob
@@ -122,7 +124,8 @@ struct ChorusBlock {
             feedback = 0;
         } else {
             depth    = 32767;
-            feedback = (int16_t)((depthFeedback - 16384) * 2); // 0 → 32767
+            // Cap maximum feedback at 60% (19660 in Q15) to prevent harsh metallic ringing / self-oscillation
+            feedback = (int16_t)(((int32_t)(depthFeedback - 16384) * 2 * 19660) >> 15);
         }
 
         // Classic dual-phase triangle LFO (L = 0°, R = 180° for deep stereo spread)
@@ -133,10 +136,11 @@ struct ChorusBlock {
         int16_t lfoL = get_tri(lfo_phase);
         int16_t lfoR = get_tri((uint16_t)(lfo_phase + 32768u));
 
-        // Base delay: 350 samples (~7.3 ms). Modulation range: ±200 samples (~4.2 ms).
-        int32_t depth_samples = (int32_t)depth * 200 >> 15;
-        int32_t delay_L_q16 = (350 << 16) + (((int32_t)lfoL * depth_samples) >> (15 - 16 + 1));
-        int32_t delay_R_q16 = (350 << 16) + (((int32_t)lfoR * depth_samples) >> (15 - 16 + 1));
+        // Base delay: 180 samples (~7.5 ms @ 24 kHz). Max modulation range: ±28 samples (~1.1 ms @ 24 kHz).
+        // This tightens the time window to achieve a lush, warm BBD chorus instead of a wide, seasick vibrato.
+        int32_t depth_samples = (int32_t)depth * 28 >> 15;
+        int32_t delay_L_q16 = (180 << 16) + (((int32_t)lfoL * depth_samples) << 1);
+        int32_t delay_R_q16 = (180 << 16) + (((int32_t)lfoR * depth_samples) << 1);
         
         if (delay_L_q16 < (1 << 16)) delay_L_q16 = (1 << 16);
         if (delay_R_q16 < (1 << 16)) delay_R_q16 = (1 << 16);
@@ -162,6 +166,10 @@ struct ChorusBlock {
         int32_t damp = 32767 - ((mainMix * 24000) >> 15);
         lp_stateL += ((int32_t)wetL - lp_stateL) * damp >> 15;
         lp_stateR += ((int32_t)wetR - lp_stateR) * damp >> 15;
+        if (lp_stateL >  32767) lp_stateL =  32767;
+        if (lp_stateL < -32768) lp_stateL = -32768;
+        if (lp_stateR >  32767) lp_stateR =  32767;
+        if (lp_stateR < -32768) lp_stateR = -32768;
         wetL = (int16_t)lp_stateL;
         wetR = (int16_t)lp_stateR;
 
@@ -186,8 +194,8 @@ struct ChorusBlock {
 
         write_ptr = (write_ptr + 1) & 0x3FF;
 
-        outL = lerp_q15(inL, wetL, (int16_t)mainMix);
-        outR = lerp_q15(inR, wetR, (int16_t)mainMix);
+        outL = split_mix_q15(inL, wetL, (int16_t)mainMix);
+        outR = split_mix_q15(inR, wetR, (int16_t)mainMix);
     }
 };
 
@@ -227,6 +235,7 @@ struct CodecDemolisherBlock {
     uint16_t trans_frame_size = 320;
     bool trans_dropped = false;
     uint16_t trans_loop_size = 128;
+    uint16_t trans_loop_ctr = 0;
 
     // Sample-hold (decimator) state
     int16_t  decL = 0, decR = 0;
@@ -255,6 +264,7 @@ struct CodecDemolisherBlock {
         trans_frame_size = 320;
         trans_dropped = false;
         trans_loop_size = 128;
+        trans_loop_ctr = 0;
         
         decL = decR = 0;
         dec_ctr = 0;
@@ -336,36 +346,43 @@ struct CodecDemolisherBlock {
         }
 
         // ── 1. Temporal Breathing / Vibe LFO (breathes at ~1.4 Hz) ─────────────
-        vibe_lfo += 2;
+        vibe_lfo += 4; // doubled for 24kHz
         int16_t vibe_sine = lookup_sine(vibe_lfo); // [-32768, 32767]
 
-        // ── 2. Engine Mix Scaling by Strength & Y Knob ────────────────────────
+        // ── 2. Series Degradation Chain based on Y Knob ──────────────────────
         int32_t Y = ringingXor + (cv2Corruption * 8);
         Y = clamp_i32(Y, 0, 32767);
 
+        // Map Y to series engine levels
+        // Fuzz level: rises from 0 to 32767 over the first 12000 units, stays at max, then fades to 0 above 24000 to save CPU during scramble
         int32_t fuzz_level = 0;
-        int32_t bad_conn_level = 0;
-        int32_t scramble_level = 0;
-
-        if (Y < 19660) { // 0% to 60%
-            fuzz_level = (Y * 32767) / 19660;
-            bad_conn_level = 0;
-            scramble_level = 0;
-        } else if (Y < 27852) { // 60% to 85%
-            int32_t range = 27852 - 19660;
-            int32_t diff = Y - 19660;
-            fuzz_level = 32767 - ((diff * 32767) / range);
-            bad_conn_level = (diff * 32767) / range;
-            scramble_level = 0;
-        } else { // 85% to 100% (circuit-bent scramble)
-            int32_t range = 32767 - 27852;
-            int32_t diff = Y - 27852;
-            fuzz_level = 0;
-            bad_conn_level = 32767 - ((diff * 16383) / range); // drops to 16384 at the end so dropouts remain active
-            scramble_level = (diff * 32767) / range;
+        if (Y < 12000) {
+            fuzz_level = (Y * 178956) >> 16; // Y * 32767 / 12000
+        } else if (Y < 24000) {
+            fuzz_level = 32767;
+        } else {
+            fuzz_level = 32767 - ((Y - 24000) << 2);
+            if (fuzz_level < 0) fuzz_level = 0;
         }
 
-        // Scale engine levels by Main knob (strength)
+        // Bad Connection level: rises from 0 to 32767 between 12000 and 24000, then stays at max
+        int32_t bad_conn_level = 0;
+        if (Y >= 12000) {
+            if (Y < 24000) {
+                bad_conn_level = ((Y - 12000) * 174762) >> 16;
+            } else {
+                bad_conn_level = 32767;
+            }
+        }
+
+        // Scramble level: rises from 0 to 32767 between 24000 and 32767
+        int32_t scramble_level = 0;
+        if (Y >= 24000) {
+            scramble_level = (Y - 24000) << 2;
+            if (scramble_level > 32767) scramble_level = 32767;
+        }
+
+        // Scale levels by Main knob (strength)
         fuzz_level = (fuzz_level * strength) >> 15;
         bad_conn_level = (bad_conn_level * strength) >> 15;
         scramble_level = (scramble_level * strength) >> 15;
@@ -379,35 +396,41 @@ struct CodecDemolisherBlock {
         if (bad_conn_level > 32767) bad_conn_level = 32767;
         if (scramble_level > 32767) scramble_level = 32767;
 
-        // Apply vibe modulation (dynamic breathing)
-        int32_t mod_factor = 32768 + (vibe_sine >> 3); // 0.9x to 1.1x scaling
-        fuzz_level = clamp_i32(((int64_t)fuzz_level * mod_factor) >> 15, 0, 32767);
-        bad_conn_level = clamp_i32(((int64_t)bad_conn_level * mod_factor) >> 15, 0, 32767);
-        scramble_level = clamp_i32(((int64_t)scramble_level * mod_factor) >> 15, 0, 32767);
+        // Apply vibe modulation — mod_factor in [28672, 36864]
+        int32_t mod_factor = 32768 + (vibe_sine >> 3);
+        fuzz_level     = clamp_i32(((int32_t)fuzz_level     * mod_factor) >> 15, 0, 32767);
+        bad_conn_level = clamp_i32(((int32_t)bad_conn_level * mod_factor) >> 15, 0, 32767);
+        scramble_level = clamp_i32(((int32_t)scramble_level * mod_factor) >> 15, 0, 32767);
 
-        int16_t wetL = inL;
-        int16_t wetR = inR;
-        int16_t wet_codec_L = wetL, wet_codec_R = wetR;
-        int16_t wet_trans_L = wetL, wet_trans_R = wetR;
-        int16_t wet_new_L = wetL, wet_new_R = wetR;
+        // We process the signal sequentially!
+        int16_t sigL = inL;
+        int16_t sigR = inR;
 
-        // ── Engine 1: Warm Fuzz (Logarithmic Mu-law + Bitcrusher + Saturation + Bandpass) ────
+        // ── Stage 1: Warm Fuzz ───────────────────────────────────────────────
         if (fuzz_level > 0) {
-            int16_t compL = compress_expand_mulaw_variable(wetL, fuzz_level);
-            int16_t compR = compress_expand_mulaw_variable(wetR, fuzz_level);
+            int16_t compL = compress_expand_mulaw_variable(sigL, fuzz_level);
+            int16_t compR = compress_expand_mulaw_variable(sigR, fuzz_level);
 
             // Continuous fractional bitcrusher for fuzz
-            int32_t shift_q15 = (fuzz_level * 10);
+            // fuzz_level max = 32767; 32767^2 = 1,073M < 2,147M INT32_MAX — safe in int32
+            int32_t fuzz_sq = ((int32_t)fuzz_level * fuzz_level) >> 15;
+            int32_t shift_q15 = (fuzz_sq * 10);
             int32_t int_shift = shift_q15 >> 15;
             int32_t frac_shift = shift_q15 & 0x7FFF;
             if (int_shift > 0 || frac_shift > 0) {
-                int16_t q1L = (compL >> int_shift) << int_shift;
-                int16_t q2L = (compL >> (int_shift + 1)) << (int_shift + 1);
-                compL = lerp_q15(q1L, q2L, frac_shift);
+                // Left channel symmetric bitcrushing
+                int32_t signL = compL < 0 ? -1 : 1;
+                int32_t absL = compL < 0 ? -compL : compL;
+                int32_t q1L = (absL >> int_shift) << int_shift;
+                int32_t q2L = (absL >> (int_shift + 1)) << (int_shift + 1);
+                compL = signL * lerp_q15(q1L, q2L, frac_shift);
 
-                int16_t q1R = (compR >> int_shift) << int_shift;
-                int16_t q2R = (compR >> (int_shift + 1)) << (int_shift + 1);
-                compR = lerp_q15(q1R, q2R, frac_shift);
+                // Right channel symmetric bitcrushing
+                int32_t signR = compR < 0 ? -1 : 1;
+                int32_t absR = compR < 0 ? -compR : compR;
+                int32_t q1R = (absR >> int_shift) << int_shift;
+                int32_t q2R = (absR >> (int_shift + 1)) << (int_shift + 1);
+                compR = signR * lerp_q15(q1R, q2R, frac_shift);
             }
 
             // Warm fuzz saturation
@@ -432,21 +455,20 @@ struct CodecDemolisherBlock {
             codec_v2R = codec_v2R + ((rg_c * codec_v1R) >> 15);
             codec_v2R = soft_limit_q15(codec_v2R);
 
-            // Mix full-range saturated fuzz with the bandpass filter output (64% / 36% blend) to keep it bright and full
-            wet_codec_L = lerp_q15((int16_t)compL, saturate_q15(bp_cL), 12000);
-            wet_codec_R = lerp_q15((int16_t)compR, saturate_q15(bp_cR), 12000);
+            sigL = lerp_q15((int16_t)compL, saturate_q15(bp_cL), 12000);
+            sigR = lerp_q15((int16_t)compR, saturate_q15(bp_cR), 12000);
         }
 
-        // ── Engine 2: Bad Connection (Packet Drops & Stutter Repetition) ──────
+        // ── Stage 2: Bad Connection (Packet Drops & Stutter Repetition) ──────
         if (bad_conn_level > 0) {
             if (!trans_dropped) {
-                trans_historyL[trans_wr] = wetL;
-                trans_historyR[trans_wr] = wetR;
+                trans_historyL[trans_wr] = sigL;
+                trans_historyR[trans_wr] = sigR;
             }
 
             if (trans_frame_ctr >= trans_frame_size) {
                 trans_frame_ctr = 0;
-                trans_frame_size = 240 + (fast_rand(rand_seed) % 720);
+                trans_frame_size = 240 + (((fast_rand(rand_seed) & 0xFFFF) * 720) >> 16);
 
                 int32_t drop_thresh = 300 + ((bad_conn_level * 14000) >> 15);
                 uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
@@ -459,40 +481,43 @@ struct CodecDemolisherBlock {
             }
             trans_frame_ctr++;
 
-            int16_t out_tL = wetL;
-            int16_t out_tR = wetR;
-
             if (trans_dropped) {
-                out_tL = trans_historyL[trans_drop_rd];
-                out_tR = trans_historyR[trans_drop_rd];
-                trans_drop_rd = (trans_drop_rd + 1) & 0xFF;
+                sigL = trans_historyL[trans_drop_rd];
+                sigR = trans_historyR[trans_drop_rd];
+                
+                trans_loop_ctr++;
+                if (trans_loop_ctr >= trans_loop_size) {
+                    trans_loop_ctr = 0;
+                    trans_drop_rd = (trans_wr - trans_loop_size) & 0xFF;
+                } else {
+                    trans_drop_rd = (trans_drop_rd + 1) & 0xFF;
+                }
             } else {
                 trans_wr = (trans_wr + 1) & 0xFF;
+                trans_loop_ctr = 0;
             }
 
             int32_t scramble_prob = (bad_conn_level * 4000) >> 15; 
             if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < scramble_prob) {
                 uint32_t limit = 1 + (bad_conn_level >> 11);
-                uint16_t mask = (uint16_t)(((uint64_t)fast_rand(rand_seed) * limit) >> 32);
-                out_tL ^= mask;
-                out_tR ^= mask;
+                // limit max = 1 + (32767 >> 11) = 17; use >> 27 instead of >> 32 (same bit-count effect at smaller scale)
+                uint16_t mask = (uint16_t)((fast_rand(rand_seed) >> (32 - 4)) & (limit - 1));
+                sigL ^= mask;
+                sigR ^= mask;
             }
-
-            wet_trans_L = out_tL;
-            wet_trans_R = out_tR;
         }
 
-        // ── Engine 3: Circuit-Bent Scramble ──
+        // ── Stage 3: Circuit-Bent Scramble ──
         if (scramble_level > 0) {
             carrier_phase += 150 + (scramble_level >> 5);
-
             int16_t carrier = (carrier_phase & 0x8000) ? 0xFFFF : 0x0000;
 
-            int16_t modL = wetL ^ carrier;
-            int16_t modR = wetR ^ carrier;
+            int16_t modL = sigL ^ carrier;
+            int16_t modR = sigR ^ carrier;
 
             // Continuous fractional bitcrusher for scramble
-            int32_t shift_q15 = (scramble_level * 12);
+            int32_t scram_sq = ((int32_t)scramble_level * scramble_level) >> 15;
+            int32_t shift_q15 = (scram_sq * 10);
             int32_t int_shift = shift_q15 >> 15;
             int32_t frac_shift = shift_q15 & 0x7FFF;
 
@@ -504,40 +529,36 @@ struct CodecDemolisherBlock {
             int16_t q2R = (modR >> (int_shift + 1)) << (int_shift + 1);
             modR = lerp_q15(q1R, q2R, frac_shift);
 
-            int32_t foldL = modL * 2;
-            int32_t foldR = modR * 2;
+            // Continuous wavefolder gain: scale from 1.0x to 2.0x based on scramble_level
+            int32_t fold_gain = 32768 + scramble_level;
+            int32_t foldL = ((int32_t)modL * fold_gain) >> 15;
+            int32_t foldR = ((int32_t)modR * fold_gain) >> 15;
 
             if (foldL > 32767) foldL = 32767 - (foldL - 32767);
             if (foldL < -32768) foldL = -32768 - (foldL + 32768);
             if (foldR > 32767) foldR = 32767 - (foldR - 32767);
             if (foldR < -32768) foldR = -32768 - (foldR + 32768);
 
-            int16_t foldL_sat = saturate_q15(foldL);
-            int16_t foldR_sat = saturate_q15(foldR);
+            // Scale down by 75% to balance RMS volume boost
+            int16_t foldL_sat = saturate_q15((foldL * 24576) >> 15);
+            int16_t foldR_sat = saturate_q15((foldR * 24576) >> 15);
 
-            // Open up scramble LPF cutoff (minimum coefficient 10000 instead of 2000) to keep it bright
             int32_t scram_coef = 24000 - ((scramble_level * 14000) >> 15);
             lp_newL += (((int32_t)foldL_sat - lp_newL) * scram_coef) >> 15;
             lp_newR += (((int32_t)foldR_sat - lp_newR) * scram_coef) >> 15;
-            wet_new_L = (int16_t)lp_newL;
-            wet_new_R = (int16_t)lp_newR;
+            if (lp_newL >  32767) lp_newL =  32767;
+            if (lp_newL < -32768) lp_newL = -32768;
+            if (lp_newR >  32767) lp_newR =  32767;
+            if (lp_newR < -32768) lp_newR = -32768;
+            sigL = (int16_t)lp_newL;
+            sigR = (int16_t)lp_newR;
         } else {
-            lp_newL = wetL;
-            lp_newR = wetR;
+            lp_newL = sigL;
+            lp_newR = sigR;
         }
 
-        // Mix the engines continuously
-        int32_t total_w = fuzz_level + bad_conn_level + scramble_level;
-        if (total_w > 0) {
-            int32_t mixedL = ((int32_t)wet_codec_L * fuzz_level + 
-                              (int32_t)wet_trans_L * bad_conn_level + 
-                              (int32_t)wet_new_L * scramble_level) / total_w;
-            int32_t mixedR = ((int32_t)wet_codec_R * fuzz_level + 
-                              (int32_t)wet_trans_R * bad_conn_level + 
-                              (int32_t)wet_new_R * scramble_level) / total_w;
-            wetL = saturate_q15(mixedL);
-            wetR = saturate_q15(mixedR);
-        }
+        int16_t wetL = sigL;
+        int16_t wetR = sigR;
 
         // ── 3. VCA Compression & Analog Saturation (scaled by Strength) ───────
         int32_t absL = wetL < 0 ? -wetL : wetL;
@@ -546,36 +567,39 @@ struct CodecDemolisherBlock {
         if (peak > 32767) peak = 32767;
 
         // Envelope follower (Vibe LFO creates breathing release fluctuations)
-        int32_t attack_shift = 5;
-        int32_t release_shift = 11 + (vibe_sine >> 13);
+        int32_t attack_shift = 4; // sped up for 24kHz
+        int32_t release_shift = 10 + (vibe_sine >> 13); // sped up for 24kHz
         if (peak > env) env += (peak - env) >> attack_shift;
         else env += (peak - env) >> release_shift;
 
-        int32_t thresh = 28000 - ((strength * 25000) >> 15);
+        // Threshold matched to 6dB input headroom scaling
+        int32_t thresh = 14000 - ((strength * 12500) >> 15);
         int32_t slope = (strength * 27000) >> 15;
 
         int32_t gain_coef = 32768;
         if (env > thresh) {
             int32_t overshoot = env - thresh;
-            int32_t gain_reduction = ((int64_t)overshoot * slope) >> 15;
+            int32_t gain_reduction = ((int32_t)overshoot * slope) >> 15;
             gain_coef = 32768 - gain_reduction;
-            if (gain_coef < 3000) gain_coef = 3000;
+            if (gain_coef < 4096) gain_coef = 4096; // limit GR to -18dB
         }
 
-        int32_t drive_gain = 32768 + ((strength * 27232) >> 15); 
-        int32_t compL = ((int32_t)wetL * drive_gain) >> 15;
-        int32_t compR = ((int32_t)wetR * drive_gain) >> 15;
-        
-        compL = (compL * gain_coef) >> 15;
-        compR = (compR * gain_coef) >> 15;
+        // Clamp to int16 range before makeup so the multiply stays 32-bit safe
+        // Drive gain: max 1.35x (44236/32768)
+        int32_t drive_gain = 32768 + ((strength * 11468) >> 15);
+        int32_t compLi = soft_limit_q15(((int32_t)wetL * drive_gain) >> 15);
+        int32_t compRi = soft_limit_q15(((int32_t)wetR * drive_gain) >> 15);
+        compLi = (compLi * gain_coef) >> 15;
+        compRi = (compRi * gain_coef) >> 15;
 
-        // Apply makeup gain to compensate for compression gain reduction
-        int32_t makeup_gain = 32768 + ((strength * 40000) >> 15); // up to 2.22x makeup
-        compL = (int32_t)(((int64_t)compL * makeup_gain) >> 15);
-        compR = (int32_t)(((int64_t)compR * makeup_gain) >> 15);
+        // Makeup gain: max 1.35x (44236/32768)
+        // Keeps total block gain at max 1.8x (drive * makeup) instead of 3.6x!
+        int32_t makeup_gain = 32768 + ((strength * 11468) >> 15);
+        compLi = (compLi * makeup_gain) >> 15;
+        compRi = (compRi * makeup_gain) >> 15;
 
-        wetL = tape_saturate(soft_limit_q15(compL));
-        wetR = tape_saturate(soft_limit_q15(compR));
+        wetL = tape_saturate(soft_limit_q15(compLi));
+        wetR = tape_saturate(soft_limit_q15(compRi));
 
         // ── 4. Downsampling (from X Knob) ─────────────────────────────────────
         if (downsample > 150) {
@@ -584,14 +608,14 @@ struct CodecDemolisherBlock {
                 decR    = wetR;
                 dec_ctr = 0;
 
-                // Calculate next interval step size with jitter
-                uint32_t base_step = 1 + ((uint32_t)downsample >> 9);
-                // Jitter scale depends on strength and downsample
+                // Quadratic scaling for ds_sq: fits 32-bit (32767^2 = 1,073,676,289 < INT32_MAX)
+                uint32_t ds_sq = ((uint32_t)downsample * downsample) >> 15;
+                uint32_t base_step = 1 + ((ds_sq * 23) >> 15);
                 uint32_t jitter_range = ((strength >> 11) * (downsample >> 11)) >> 4;
-                if (jitter_range < 2) jitter_range = 2; // minimum range
-                uint32_t jitter = ((uint64_t)fast_rand(rand_seed) * jitter_range) >> 32;
+                if (jitter_range < 2) jitter_range = 2;
+                uint32_t jitter = (((fast_rand(rand_seed) >> 16) * jitter_range) >> 16);
                 current_dec_step = base_step + jitter;
-                if (current_dec_step > 48) current_dec_step = 48;
+                if (current_dec_step > 32) current_dec_step = 32;
             } else {
                 wetL = decL;
                 wetR = decR;
@@ -599,12 +623,21 @@ struct CodecDemolisherBlock {
             dec_ctr++;
 
             // Continuous LPF to smooth out downsampling steps (scaled to preserve crunch/aliasing highs, min cutoff ~700Hz)
-            int32_t dec_coef = 32768 / (1 + (current_dec_step >> 2));
-            if (dec_coef > 32767) dec_coef = 32767;
-            if (dec_coef < 3000) dec_coef = 3000;
+            // LUT replaces 32768 / (1 + (current_dec_step >> 2)) — no division
+            // dec_idx = 1 + (step >> 2) ranges from 1 to 9
+            static const int32_t dec_coef_lut[10] = {
+                32767, 32767, 16384, 10922, 8192, 6553, 5461, 4681, 4096, 3640
+            };
+            int32_t dec_idx = 1 + (current_dec_step >> 2);
+            if (dec_idx > 9) dec_idx = 9;
+            int32_t dec_coef = dec_coef_lut[dec_idx];
 
             dec_lpL += (((int32_t)wetL - dec_lpL) * dec_coef) >> 15;
             dec_lpR += (((int32_t)wetR - dec_lpR) * dec_coef) >> 15;
+            if (dec_lpL >  32767) dec_lpL =  32767;
+            if (dec_lpL < -32768) dec_lpL = -32768;
+            if (dec_lpR >  32767) dec_lpR =  32767;
+            if (dec_lpR < -32768) dec_lpR = -32768;
             wetL = (int16_t)dec_lpL;
             wetR = (int16_t)dec_lpR;
         } else {
@@ -637,8 +670,8 @@ struct CodecDemolisherBlock {
             } else {
                 sputter_active = false;
                 if ((int32_t)roll < sputter_prob) {
-                    sputter_timer = 5 + (fast_rand(rand_seed) % 115);
-                    sputter_active = (fast_rand(rand_seed) % 10 < 3);
+                    sputter_timer = 5 + (((fast_rand(rand_seed) & 0xFFFF) * 115) >> 16);
+                    sputter_active = ((fast_rand(rand_seed) & 0x7FFF) < 9830);
                     if (!sputter_active) {
                         out_wetL = 0;
                         out_wetR = 0;
@@ -677,7 +710,7 @@ struct CodecDemolisherBlock {
 //   freeze   — When true: write pointer frozen; buffer loops without new input.
 // ============================================================================
 struct MultiTapDelayBlock {
-    // Stereo ring buffer — 28672 samples ≈ 597 ms @ 48 kHz
+    // Stereo ring buffer — 28672 samples ≈ 1194 ms @ 24 kHz
     int16_t  bufL[28672];
     int16_t  bufR[28672];
     uint16_t wr = 0;
@@ -722,13 +755,16 @@ struct MultiTapDelayBlock {
         uint32_t clk_inc = 65536;
         if (time > 16384) {
             int32_t diff = time - 16384;
-            clk_inc = 65536 - ((diff * (65536 - 3276)) / 16383);
+            // Division-free scaling (62260 / 16383 ≈ 124528 / 32768)
+            // diff max = 16383; 124528 * 16383 = 2,039M < 2,147M INT32_MAX — safe
+            clk_inc = 65536 - ((diff * 124528) >> 15);
         }
 
         // Calculate filter coefficient for continuous reconstruction filter
         int32_t filter_coef = 32767;
         if (clk_inc < 65536) {
-            filter_coef = 3000 + (((int32_t)(clk_inc - 3276) * (32767 - 3000)) / (65536 - 3276));
+            // Division-free scaling (29767 / 62260 ≈ 15666 / 32768)
+            filter_coef = 3000 + (((int32_t)(clk_inc - 3276) * 15666) >> 15);
         }
 
         clk_phase += clk_inc;
@@ -737,8 +773,8 @@ struct MultiTapDelayBlock {
             lp_outL += (((int32_t)last_outL - lp_outL) * filter_coef) >> 15;
             lp_outR += (((int32_t)last_outR - lp_outR) * filter_coef) >> 15;
 
-            outL = lerp_q15(inL, (int16_t)lp_outL, (int16_t)mainMix);
-            outR = lerp_q15(inR, (int16_t)lp_outR, (int16_t)mainMix);
+            outL = split_mix_q15(inL, (int16_t)lp_outL, (int16_t)mainMix);
+            outR = split_mix_q15(inR, (int16_t)lp_outR, (int16_t)mainMix);
             return;
         }
         clk_phase -= 65536;
@@ -756,7 +792,7 @@ struct MultiTapDelayBlock {
                 wr = wr + 1;
                 if (wr >= 28672) wr = 0;
             }
-            int32_t mapped_time = 128 + (((int64_t)time * 27872) >> 15);
+        int32_t mapped_time = 128 + ((time * 27872) >> 15);
             int32_t target_t = mapped_time + (cv1Warp * 4);
             target_t = clamp_i32(target_t, 128, 28500);
             IIR_SMOOTH(smooth_t, target_t, 12);
@@ -764,14 +800,14 @@ struct MultiTapDelayBlock {
         }
 
         // Slew delay time with CV1 pitch-warp
-        int32_t mapped_time = 128 + (((int64_t)time * 27872) >> 15);
+        int32_t mapped_time = 128 + ((time * 27872) >> 15);
         int32_t target_t = mapped_time + (cv1Warp * 4);
         target_t = clamp_i32(target_t, 128, 28500);
 
         IIR_SMOOTH(smooth_t, target_t, 12);
 
-        // Increment wow & flutter LFO (~2.2 Hz)
-        flutter_phase += 3;
+        // Increment wow & flutter LFO (~2.2 Hz) (doubled for 24kHz)
+        flutter_phase += 6;
         int16_t lfo = lookup_sine_fast(flutter_phase);
         int32_t flutter = (lfo * 8) >> 15; // up to ±8 samples of flutter
 
@@ -802,7 +838,7 @@ struct MultiTapDelayBlock {
         // Apply wow & flutter directly to panned tap read pointers
         int32_t t1_q16 = (smooth_t + flutter) << 16;
         int32_t t2_q16 = ((smooth_t + flutter) * 3) << 14;
-        int32_t t3_q16 = (int32_t)((int64_t)(smooth_t + flutter) * 40503);
+        int32_t t3_q16 = (smooth_t + flutter) * 40503;
 
         int16_t w1L, w1R, w2L, w2R, w3L, w3R;
         read_stereo(t1_q16, w1L, w1R);
@@ -829,8 +865,9 @@ struct MultiTapDelayBlock {
             int32_t feedR = (int32_t)inR + (((int32_t)mixL * feedback) >> 15);
             
             // 1-pole low-pass filter on feedback loops (analog decay warmth)
-            lp_feedback_L += ((feedL - lp_feedback_L) * 8000) >> 15;
-            lp_feedback_R += ((feedR - lp_feedback_R) * 8000) >> 15;
+            // Coefficient 15000 ≈ 0.46 → ~3 kHz @ 24 kHz sample rate
+            lp_feedback_L += ((feedL - lp_feedback_L) * 15000) >> 15;
+            lp_feedback_R += ((feedR - lp_feedback_R) * 15000) >> 15;
 
             int16_t wrL = soft_limit_q15(lp_feedback_L);
             int16_t wrR = soft_limit_q15(lp_feedback_R);
@@ -857,8 +894,8 @@ struct MultiTapDelayBlock {
         lp_outL += (((int32_t)last_outL - lp_outL) * filter_coef) >> 15;
         lp_outR += (((int32_t)last_outR - lp_outR) * filter_coef) >> 15;
 
-        outL = lerp_q15(inL, (int16_t)lp_outL, (int16_t)mainMix);
-        outR = lerp_q15(inR, (int16_t)lp_outR, (int16_t)mainMix);
+        outL = split_mix_q15(inL, (int16_t)lp_outL, (int16_t)mainMix);
+        outR = split_mix_q15(inR, (int16_t)lp_outR, (int16_t)mainMix);
     }
 };
 
@@ -881,16 +918,38 @@ struct MultiTapDelayBlock {
 //   gateTrigger — Pulse 1 jack: stutter gate (momentary).
 //   switchFreeze — Switch UP: latched freeze.
 // ============================================================================
+// Fast G.711 mu-law encoder
+inline uint8_t encode_mulaw(int16_t sample) {
+    int32_t x = sample;
+    int32_t sign = (x < 0) ? 0x80 : 0x00;
+    if (x < 0) x = -x;
+    x += 132;
+    if (x > 32767) x = 32767;
+    int32_t exponent = 31 - __builtin_clz(x);
+    if (exponent < 7) {
+        return (uint8_t)(sign | ((x - 132) >> 3));
+    }
+    int32_t mantissa = (x >> (exponent - 4)) & 0x0F;
+    return (uint8_t)(sign | ((exponent - 7) << 4) | mantissa);
+}
+
+extern int16_t mulaw_decode_table[256];
+
+// G.711 mu-law decoder optimized to a single memory lookup
+inline int16_t decode_mulaw(uint8_t u_val) {
+    return mulaw_decode_table[u_val];
+}
+
 struct GlitcherBlock {
-    int16_t  bufL[16384];
-    int16_t  bufR[16384];
+    uint8_t  bufL[32768];
+    uint8_t  bufR[32768];
     uint16_t wr = 0;
 
     bool     active     = false;
     uint16_t freeze_wr  = 0;       // write pointer at moment of freeze
 
     // Playback pointer (Q16: integer + 16-bit fraction relative to loop_start)
-    int32_t  rd_q16     = 0;
+    int64_t  rd_q16     = 0;
 
     // Crossfade for click-free loop boundaries
     int32_t  xfade_ctr  = 0;       // countdown: xfade_len → 0
@@ -918,6 +977,18 @@ struct GlitcherBlock {
 
     // Latched playback speed (for random timings and reverses probability field)
     int32_t  current_speed_q16 = 65536;
+    
+    // Active offset of loop_start relative to freeze_wr
+    int32_t  active_offset = 0;
+
+    // Clustering and probability warping states
+    int32_t  cluster_state = 16384;
+    uint16_t cluster_timer = 0;
+
+    // Evolve freeze states
+    uint32_t freeze_evolve_ctr = 0;
+    bool     evolve_active = false;
+    int32_t  evolve_samples_left = 0;
 
     void init() {
         memset(bufL, 0, sizeof(bufL));
@@ -943,6 +1014,12 @@ struct GlitcherBlock {
         onset_fade_phase = 0;
         onset_fade_step  = 0;
         current_speed_q16 = 65536;
+        active_offset = 0;
+        cluster_state = 16384;
+        cluster_timer = 0;
+        freeze_evolve_ctr = 0;
+        evolve_active = false;
+        evolve_samples_left = 0;
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -951,33 +1028,33 @@ struct GlitcherBlock {
                  uint32_t &rand_seed, int32_t scrubOffset = 0, int32_t glitchFeedback = 0, int32_t globalNoiseScale = 16384)
     {
         bool want_active = glitchInjector || freezeGate;
+        int32_t speed_q16 = 65536;
 
         if (mainProb < 50 && !want_active && !active && dry_fade_ctr == 0) {
             outL = inL;
             outR = inR;
-            bufL[wr] = inL;
-            bufR[wr] = inR;
-            wr = (wr + 1) & 0x3FFF;
+            bufL[wr] = encode_mulaw(inL);
+            bufR[wr] = encode_mulaw(inR);
+            wr = (wr + 1) & 0x7FFF;
             return;
         }
 
-        // ── Loop size snap (rhythmic power-of-two subdivisions if CV1 unplugged)
-        int32_t loop_size;
-        if (cv1Warp == 0) {
-            // Snaps to 8 distinct rhythmic sizes: 128, 256, 512, 1024, 2048, 4096, 8192, 16384 samples
-            int32_t step = size / 4100;
-            if (step < 0) step = 0;
-            if (step > 7) step = 7;
-            loop_size = 128 << step;
-        } else {
-            // CV1 is plugged: allow continuous sweep / circuit-bent size warping
-            int32_t base_size = 128 + (size >> 1);
-            loop_size = base_size + (cv1Warp * 4);
+        // Update slow-moving cluster state (cutoff ~3Hz at 24kHz)
+        cluster_timer++;
+        if (cluster_timer >= 256) {
+            cluster_timer = 0;
+            cluster_state += (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - cluster_state) >> 5;
         }
-        loop_size = clamp_i32(loop_size, 128, 16384);
 
-        int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
-        if (cur_xfade < 4) cur_xfade = 4;
+        // Warp input probability curve quadratically for finer control on the left side of the knob
+        int32_t warpedProb = (mainProb * mainProb) >> 15;
+
+        // Modulate probability with cluster state, scaling down depth near 0% and 100% knob
+        int32_t mod_depth = (mainProb * (32767 - mainProb)) >> 14;
+        int32_t cluster_mod = ((cluster_state - 16384) * mod_depth) >> 15;
+        int32_t finalProb = warpedProb + cluster_mod;
+        if (finalProb < 0) finalProb = 0;
+        if (finalProb > 32767) finalProb = 32767;
 
         // ── Playback speed probability helper ──────────────────────────────────
         auto determine_random_speed = [globalNoiseScale](int32_t sq, int32_t cv2_corr, uint32_t &seed) -> int32_t {
@@ -989,7 +1066,7 @@ struct GlitcherBlock {
 
             uint32_t roll = fast_rand(seed) & 0x7FFF;
             if ((int32_t)roll < eff_sq) {
-                uint32_t choice = fast_rand(seed) % 6;
+                uint32_t choice = ((fast_rand(seed) & 0xFFFF) * 6) >> 16;
                 switch (choice) {
                     case 0: base_speed = 65536;    // 1x forward
                             break;
@@ -1013,175 +1090,411 @@ struct GlitcherBlock {
             return speed;
         };
 
-        // Determine current playback speed
-        int32_t speed_q16 = 65536;
+        // ── FREEZE MODE ──────────────────────────────────────────────────────
         if (freezeGate) {
-            // Direct quantized speed control on Freeze Scrub manual pages
-            int32_t base_speed = 65536;
-            if (speedQuant < 5461)       base_speed = 65536;
-            else if (speedQuant < 10922)  base_speed = 131072;
-            else if (speedQuant < 16383)  base_speed = 32768;
-            else if (speedQuant < 21844)  base_speed = -65536;
-            else if (speedQuant < 27305)  base_speed = -131072;
-            else                          base_speed = -32768;
-            
-            int32_t cv2_mod = cv2Corruption * 32;
-            speed_q16 = base_speed + cv2_mod;
-            if (speed_q16 == 0) speed_q16 = 3277;
-        } else {
-            // Use the speed latched at loop boundary
-            speed_q16 = current_speed_q16;
-        }
-
-        // ── State Machine: trigger/check stutter ──────────────────────────────
-        if (!active) {
-            bufL[wr] = inL;
-            bufR[wr] = inR;
-
-            bool trigger = want_active || ((wr % (uint16_t)loop_size) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)mainProb);
-
-            if (trigger) {
+            // 1. Lock recording and initialize freeze on transition
+            if (!active) {
                 active = true;
                 freeze_wr = wr;
-                current_loop_len = loop_size;
-                
-                // Determine initial speed/direction for this glitch loop
-                current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
-                speed_q16 = current_speed_q16;
-                
-                rd_q16 = (speed_q16 >= 0) ? 0 : (current_loop_len << 16);
+                current_loop_len = 128 + size;
+                active_offset = ((32767 - scrubOffset) * 32760) >> 15;
+                rd_q16 = 0;
                 xfade_ctr = 0;
                 dry_fade_ctr = 0;
-                sample_ctr = 0; // Initialize sample_ctr to 0 on trigger
+                sample_ctr = 0;
                 
+                int32_t cur_xfade = current_loop_len < 512 ? (current_loop_len >> 1) : 256;
+                if (cur_xfade < 4) cur_xfade = 4;
                 onset_fade_len = cur_xfade;
                 onset_fade_ctr = cur_xfade;
                 onset_fade_step = (32767 << 15) / cur_xfade;
                 onset_fade_phase = 0;
             }
-            wr = (wr + 1) & 0x3FFF;
-        }
 
-        if (active) {
-            auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
-                int32_t  idx  = (ptr >> 16) & 0x3FFF;
-                int32_t  nxt  = (idx + 1)   & 0x3FFF;
-                uint16_t frac = (uint16_t)(ptr & 0xFFFF);
-                {
-                    int16_t y0 = bufL[idx], y1 = bufL[nxt];
-                    sL = (int16_t)(y0 + (((int64_t)(y1 - y0) * frac) >> 16));
-                }
-                {
-                    int16_t y0 = bufR[idx], y1 = bufR[nxt];
-                    sR = (int16_t)(y0 + (((int64_t)(y1 - y0) * frac) >> 16));
-                }
-            };
+            int32_t loop_size = 128 + size;
+            loop_size = clamp_i32(loop_size, 128, 32760);
+            int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
+            if (cur_xfade < 4) cur_xfade = 4;
 
-            int32_t offset_samples = (scrubOffset * 16384) >> 15;
-            int32_t loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x3FFF) << 16;
+            int32_t target_offset = ((32767 - scrubOffset) * 32760) >> 15;
+            
+            // Linear speed mapping: [0..32767] -> [0..131068] Q16 (0x to 2.0x, center is 1.0x)
+            int32_t base_speed = speedQuant << 2;
+            int32_t cv2_mod = cv2Corruption * 32;
+            speed_q16 = base_speed + cv2_mod;
+            if (speed_q16 < 0) speed_q16 = 0;
+
+            int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
 
             rd_q16 += speed_q16;
             sample_ctr++;
 
-            // ── Boundary detection ────────────────────────────────────────────
-            bool crossed = false;
-            if (speed_q16 >= 0) {
-                if (rd_q16 >= (current_loop_len << 16)) {
-                    crossed = true;
+            // Natural boundary check
+            bool crossed = (rd_q16 >= ((int64_t)current_loop_len << 16));
+
+            if (crossed) {
+                // Spawn next grain repeat at updated position/length targets
+                xfade_rd = loop_start + rd_q16;
+                rd_q16 = 0;
+                xfade_len = cur_xfade;
+                xfade_ctr = cur_xfade;
+                xfade_step = (32767 << 15) / xfade_len;
+                xfade_phase = 0;
+
+                current_loop_len = loop_size;
+                
+                // Evolve freeze logic based on Main knob (scrubOffset):
+                if (scrubOffset < 1500) {
+                    // Fully Left: Structured evolution (exactly every 8 cycles, full loop capture)
+                    if (!evolve_active) {
+                        freeze_evolve_ctr++;
+                        if (freeze_evolve_ctr >= 8) {
+                            freeze_evolve_ctr = 0;
+                            evolve_active = true;
+                            evolve_samples_left = current_loop_len;
+                        }
+                    }
+                } else if (scrubOffset > 31200) {
+                    // Fully Right: Chaotic evolution (random triggers, random partial capture lengths)
+                    if (!evolve_active) {
+                        uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
+                        if (roll < 4096) { // 12.5% probability per cycle (averages every 8 cycles but random)
+                            evolve_active = true;
+                            int32_t max_len = current_loop_len - 128;
+                            if (max_len < 1) max_len = 1;
+                            // Capture between 128 samples and the full loop length
+                            evolve_samples_left = 128 + (((fast_rand(rand_seed) & 0x7FFF) * max_len) >> 15);
+                        }
+                    }
+                } else {
+                    // Middle: Standard locked manual freeze scrub
+                    freeze_evolve_ctr = 0;
+                    evolve_active = false;
                 }
-            } else {
-                if (rd_q16 < 0) {
-                    crossed = true;
+                
+                // Update active_offset with a 16-sample hysteresis filter for stability
+                int32_t diff = target_offset - active_offset;
+                if (diff < 0) diff = -diff;
+                if (diff > 16) {
+                    active_offset = target_offset;
+                }
+                
+                loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
+            }
+
+            int16_t sL = 0, sR = 0;
+            auto read_buf = [&](int32_t ptr, int16_t &valL, int16_t &valR) {
+                int32_t  idx  = (ptr >> 16) & 0x7FFF;
+                int32_t  nxt  = (idx + 1)   & 0x7FFF;
+                uint16_t frac = (uint16_t)(ptr & 0xFFFF);
+                int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                valL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                valR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
+            };
+
+            read_buf(loop_start + rd_q16, sL, sR);
+
+            // If evolving, overwrite current buffer index with live incoming audio
+            if (evolve_active) {
+                int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
+                bufL[idx] = encode_mulaw(inL);
+                bufR[idx] = encode_mulaw(inR);
+                evolve_samples_left--;
+                if (evolve_samples_left <= 0) {
+                    evolve_active = false;
                 }
             }
 
-            if (crossed) {
-                uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
-                bool keep_looping = (roll < (uint32_t)mainProb) || want_active;
+            // Smooth loop boundary crossfade
+            if (xfade_ctr > 0) {
+                int16_t xL, xR;
+                xfade_rd += speed_q16;
+                read_buf(xfade_rd, xL, xR);
 
-                if (keep_looping) {
-                    xfade_rd = loop_start + rd_q16;
+                xfade_phase += xfade_step;
+                int32_t val = xfade_phase >> 15;
+                if (val > 32767) val = 32767;
+                int16_t t = (int16_t)val;
+                sL = lerp_q15(xL, sL, t);
+                sR = lerp_q15(xR, sR, t);
+                xfade_ctr--;
+            }
+
+            // Smooth onset crossfade (fading from live dry to loop playback)
+            if (onset_fade_ctr > 0) {
+                onset_fade_phase += onset_fade_step;
+                int32_t val = onset_fade_phase >> 15;
+                if (val > 32767) val = 32767;
+                int16_t t = (int16_t)val;
+                sL = lerp_q15(inL, sL, t);
+                sR = lerp_q15(inR, sR, t);
+                onset_fade_ctr--;
+            }
+
+            // Glitcher Feedback Loop
+            if (glitchFeedback > 0) {
+                int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
+                int32_t scaled_fb = (glitchFeedback * 29491) >> 15;
+                int16_t oldL = decode_mulaw(bufL[idx]);
+                int16_t oldR = decode_mulaw(bufR[idx]);
+                int16_t newL = soft_limit_q15(((int32_t)oldL * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
+                int16_t newR = soft_limit_q15(((int32_t)oldR * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
+                bufL[idx] = encode_mulaw(newL);
+                bufR[idx] = encode_mulaw(newR);
+            }
+
+            outL = lerp_q15(inL, sL, (int16_t)mainProb);
+            outR = lerp_q15(inR, sR, (int16_t)mainProb);
+            return;
+        }
+
+        // ── NORMAL GLITCH MODE ───────────────────────────────────────────────
+        else {
+            // NOTE: No per-sample deactivation here — grains play their full loop
+            // and only decide to stop at the boundary (keep_looping check below).
+
+            int32_t norm_loop_size;
+            if (cv1Warp == 0) {
+                // Snap to 8 rhythmic power-of-2 sizes: 128..16384
+                // LUT replaces size/4100 division
+                static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                int32_t step = (size * 8) >> 15; // maps [0..32767] -> [0..7]
+                if (step < 0) step = 0;
+                if (step > 7) step = 7;
+                norm_loop_size = size_lut[step];
+            } else {
+                // CV1 plugged: continuous sweep
+                int32_t base_size = 128 + (size >> 1);
+                norm_loop_size = base_size + (cv1Warp * 4);
+            }
+            norm_loop_size = clamp_i32(norm_loop_size, 128, 16384);
+
+            int32_t cur_xfade = norm_loop_size < 512 ? (norm_loop_size >> 1) : 256;
+            if (cur_xfade < 4) cur_xfade = 4;
+
+            if (!active) {
+                bufL[wr] = encode_mulaw(inL);
+                bufR[wr] = encode_mulaw(inR);
+
+                // Use finalProb (quad-warped + cluster-modulated) for trigger check
+                bool trigger = ((wr & (uint16_t)(norm_loop_size - 1)) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector;
+
+                if (trigger) {
+                    active = true;
+                    freeze_wr = wr;
                     
-                    // Boundary crossed: select next speed/timing from probability field
-                    // Only change speed if enough samples (1024) have elapsed to prevent alien bubble noise at short loops.
-                    if (sample_ctr >= 1024) {
-                        current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
-                        sample_ctr = 0;
+                    // Add size randomness centered around the middle of the main knob range
+                    int32_t final_size = norm_loop_size;
+                    int32_t mid_amount = 16384 - abs(mainProb - 16384); // peak 16384 in middle
+                    if (cv1Warp == 0) {
+                        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                            int32_t step = (size * 8) >> 15;
+                            uint32_t r = fast_rand(rand_seed) & 3;
+                            if (r == 3) r = 0;
+                            int32_t offset = (int32_t)r - 1; // -1, 0, 1
+                            step += offset;
+                            if (step < 0) step = 0;
+                            if (step > 7) step = 7;
+                            static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                            final_size = size_lut[step];
+                        }
+                    } else {
+                        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                            int32_t range = final_size >> 2;
+                            if (range > 0) {
+                                int32_t double_range = range * 2;
+                                if (double_range < 1) double_range = 1;
+                                int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
+                                final_size += offset;
+                            }
+                        }
                     }
+                    current_loop_len = clamp_i32(final_size, 128, 16384);
+                    
+                    // Determine initial speed/direction for this glitch loop
+                    current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
                     speed_q16 = current_speed_q16;
                     
-                    if (speed_q16 >= 0) {
-                        rd_q16 = 0;
-                    } else {
-                        rd_q16 = loop_size << 16;
-                    }
-                    xfade_len = cur_xfade;
-                    xfade_ctr = cur_xfade;
-                    xfade_step = (32767 << 15) / cur_xfade;
-                    xfade_phase = 0;
+                    rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
+                    xfade_ctr = 0;
+                    dry_fade_ctr = 0;
+                    sample_ctr = 0;
                     
-                    current_loop_len = loop_size;
-                    loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x3FFF) << 16;
-                } else {
-                    active = false;
-                    dry_fade_rd = loop_start + rd_q16;
-                    dry_fade_len = cur_xfade;
-                    dry_fade_ctr = cur_xfade;
-                    dry_fade_step = (32767 << 15) / cur_xfade;
-                    dry_fade_phase = 32767 << 15;
+                    onset_fade_len = cur_xfade;
+                    onset_fade_ctr = cur_xfade;
+                    onset_fade_step = (32767 << 15) / cur_xfade;
+                    onset_fade_phase = 0;
                 }
+                wr = (wr + 1) & 0x7FFF;
             }
 
             if (active) {
-                int16_t sL, sR;
-                read_buf(loop_start + rd_q16, sL, sR);
+                auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
+                    int32_t  idx  = (ptr >> 16) & 0x7FFF;
+                    int32_t  nxt  = (idx + 1)   & 0x7FFF;
+                    uint16_t frac = (uint16_t)(ptr & 0xFFFF);
+                    int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                    sL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                    int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                    sR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
+                };
 
-                if (xfade_ctr > 0) {
-                    int16_t xL, xR;
-                    xfade_rd += speed_q16;
-                    read_buf(xfade_rd, xL, xR);
+                int32_t offset_samples = (scrubOffset * 16384) >> 15;
+                int32_t loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x7FFF) << 16;
 
-                    xfade_phase += xfade_step;
-                    int32_t val = xfade_phase >> 15;
-                    if (val > 32767) val = 32767;
-                    int16_t t = (int16_t)val;
-                    sL = lerp_q15(xL, sL, t);
-                    sR = lerp_q15(xR, sR, t);
-                    xfade_ctr--;
+                speed_q16 = current_speed_q16;
+                rd_q16 += speed_q16;
+                sample_ctr++;
+
+                bool crossed = false;
+                if (speed_q16 >= 0) {
+                    if (rd_q16 >= ((int64_t)current_loop_len << 16)) {
+                        crossed = true;
+                    }
+                } else {
+                    if (rd_q16 < 0) {
+                        crossed = true;
+                    }
                 }
 
-                if (onset_fade_ctr > 0) {
-                    onset_fade_phase += onset_fade_step;
-                    int32_t val = onset_fade_phase >> 15;
-                    if (val > 32767) val = 32767;
-                    int16_t t = (int16_t)val;
-                    sL = lerp_q15(inL, sL, t);
-                    sR = lerp_q15(inR, sR, t);
-                    onset_fade_ctr--;
+                if (crossed) {
+                    uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
+
+                    // Short grains loop aggressively; long grains respect finalProb.
+                    // log2(norm_loop_size) is free — it's always a power of 2.
+                    // log2 ranges: 128=7, 256=8, ..., 16384=14 (7 steps).
+                    // size_factor: 1.0 at size 128 (always loop), 0.0 at size 16384 (use finalProb).
+                    int32_t log2_size  = 31 - __builtin_clz((uint32_t)current_loop_len);
+                    int32_t size_steps = log2_size - 7;  // 0 (tiny) → 7 (huge)
+                    if (size_steps < 0) size_steps = 0;
+                    if (size_steps > 7) size_steps = 7;
+                    // size_factor LUT: replaces ((7-size_steps)*32767)/7, no division
+                    // index 0 (tiny) → 32767, index 7 (huge) → 0
+                    static const int32_t sf_lut[8] = {32767, 28086, 23405, 18724, 14043, 9362, 4681, 0};
+                    int32_t size_factor = sf_lut[size_steps];
+                    // Boost loop probability toward 32767 for small loops (uses finalProb for clustering)
+                    int32_t loop_prob = finalProb + (((32767 - finalProb) * size_factor) >> 15);
+                    if (loop_prob > 32767) loop_prob = 32767;
+
+                    bool keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
+
+                    if (keep_looping) {
+                        xfade_rd = loop_start + rd_q16;
+                        
+                        // Boundary crossed: select next speed/timing from probability field
+                        if (sample_ctr >= 1024) {
+                            current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
+                            sample_ctr = 0;
+                        }
+                        speed_q16 = current_speed_q16;
+                        
+                        // Recalculate loop length with mid-randomness for the next iteration
+                        int32_t final_size = norm_loop_size;
+                        int32_t mid_amount = 16384 - abs(mainProb - 16384);
+                        if (cv1Warp == 0) {
+                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                int32_t step = (size * 8) >> 15;
+                                uint32_t r = fast_rand(rand_seed) & 3;
+                                if (r == 3) r = 0;
+                                int32_t offset = (int32_t)r - 1; // -1, 0, 1
+                                step += offset;
+                                if (step < 0) step = 0;
+                                if (step > 7) step = 7;
+                                static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                                final_size = size_lut[step];
+                            }
+                        } else {
+                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                int32_t range = final_size >> 2;
+                                if (range > 0) {
+                                    int32_t double_range = range * 2;
+                                    if (double_range < 1) double_range = 1;
+                                    int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
+                                    final_size += offset;
+                                }
+                            }
+                        }
+                        current_loop_len = clamp_i32(final_size, 128, 16384);
+
+                        if (speed_q16 >= 0) {
+                            rd_q16 = 0;
+                        } else {
+                            rd_q16 = ((int64_t)current_loop_len << 16);
+                        }
+                        xfade_len = cur_xfade;
+                        xfade_ctr = cur_xfade;
+                        xfade_step = (32767 << 15) / cur_xfade;
+                        xfade_phase = 0;
+                        
+                        loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x7FFF) << 16;
+                    } else {
+                        active = false;
+                        dry_fade_rd = loop_start + rd_q16;
+                        dry_fade_len = cur_xfade;
+                        dry_fade_ctr = cur_xfade;
+                        dry_fade_step = (32767 << 15) / cur_xfade;
+                        dry_fade_phase = 32767 << 15;
+                    }
                 }
 
-                // --- NEW: Glitcher Feedback Loop ---
-                if (glitchFeedback > 0) {
-                    int32_t idx = ((loop_start + rd_q16) >> 16) & 0x3FFF;
-                    int32_t scaled_fb = (glitchFeedback * 29491) >> 15; // cap at ~90% feedback
-                    bufL[idx] = soft_limit_q15(((int32_t)bufL[idx] * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
-                    bufR[idx] = soft_limit_q15(((int32_t)bufR[idx] * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
-                }
+                if (active) {
+                    int16_t sL, sR;
+                    read_buf(loop_start + rd_q16, sL, sR);
 
-                outL = lerp_q15(inL, sL, (int16_t)mainProb);
-                outR = lerp_q15(inR, sR, (int16_t)mainProb);
-                return;
+                    if (xfade_ctr > 0) {
+                        int16_t xL, xR;
+                        xfade_rd += speed_q16;
+                        read_buf(xfade_rd, xL, xR);
+
+                        xfade_phase += xfade_step;
+                        int32_t val = xfade_phase >> 15;
+                        if (val > 32767) val = 32767;
+                        int16_t t = (int16_t)val;
+                        sL = lerp_q15(xL, sL, t);
+                        sR = lerp_q15(xR, sR, t);
+                        xfade_ctr--;
+                    }
+
+                    if (onset_fade_ctr > 0) {
+                        onset_fade_phase += onset_fade_step;
+                        int32_t val = onset_fade_phase >> 15;
+                        if (val > 32767) val = 32767;
+                        int16_t t = (int16_t)val;
+                        sL = lerp_q15(inL, sL, t);
+                        sR = lerp_q15(inR, sR, t);
+                        onset_fade_ctr--;
+                    }
+
+                    if (glitchFeedback > 0) {
+                        int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
+                        int32_t scaled_fb = (glitchFeedback * 29491) >> 15; // cap at ~90% feedback
+                        int16_t oldL = decode_mulaw(bufL[idx]);
+                        int16_t oldR = decode_mulaw(bufR[idx]);
+                        int16_t newL = soft_limit_q15(((int32_t)oldL * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
+                        int16_t newR = soft_limit_q15(((int32_t)oldR * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
+                        bufL[idx] = encode_mulaw(newL);
+                        bufR[idx] = encode_mulaw(newR);
+                    }
+
+                    // Active grain always outputs full wet — mainProb controls density, not level
+                    outL = sL;
+                    outR = sR;
+                    return;
+                }
             }
         }
 
         // ── Dry throughput / de-clicked fade out ──────────────────────────────
         if (dry_fade_ctr > 0) {
             auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
-                int32_t  idx  = (ptr >> 16) & 0x3FFF;
-                int32_t  nxt  = (idx + 1)   & 0x3FFF;
+                int32_t  idx  = (ptr >> 16) & 0x7FFF;
+                int32_t  nxt  = (idx + 1)   & 0x7FFF;
                 uint16_t frac = (uint16_t)(ptr & 0xFFFF);
-                sL = (int16_t)(bufL[idx] + (((int64_t)(bufL[nxt] - bufL[idx]) * frac) >> 16));
-                sR = (int16_t)(bufR[idx] + (((int64_t)(bufR[nxt] - bufR[idx]) * frac) >> 16));
+                int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                sL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                sR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
             };
 
             int16_t sL, sR;
@@ -1193,10 +1506,10 @@ struct GlitcherBlock {
             if (val < 0) val = 0;
             if (val > 32767) val = 32767;
             int16_t t = (int16_t)val;
-            int16_t wetL = lerp_q15(inL, sL, (int16_t)mainProb);
-            int16_t wetR = lerp_q15(inR, sR, (int16_t)mainProb);
-            outL = lerp_q15(inL, wetL, t);
-            outR = lerp_q15(inR, wetR, t);
+            int16_t wetL = lerp_q15(inL, sL, t);
+            int16_t wetR = lerp_q15(inR, sR, t);
+            outL = wetL;
+            outR = wetR;
             dry_fade_ctr--;
         } else {
             outL = inL;
@@ -1249,13 +1562,15 @@ struct FilterBlock {
     int32_t f_dec_ctr = 0;
 
     inline int32_t filter_saturate(int32_t x) {
-        int32_t abs_x = x < 0 ? -x : x;
-        if (abs_x > 16384) {
-            int32_t diff = abs_x - 16384;
-            int32_t compressed = 16384 + ((diff * 12288) / (diff + 12288));
-            return x < 0 ? -compressed : compressed;
-        }
-        return x;
+        // Stabilize and soft-saturate using a division-free cubic curve: y = x - x^3 / 6
+        int32_t clamped_x = x;
+        if (clamped_x > 32767) clamped_x = 32767;
+        else if (clamped_x < -32768) clamped_x = -32768;
+        
+        int32_t x3 = (((clamped_x * clamped_x) >> 15) * clamped_x) >> 15;
+        // x3 * 5461 >> 15 is x^3 / 6 (since 5461/32768 ≈ 1/6)
+        int32_t y = clamped_x - ((x3 * 5461) >> 15);
+        return y;
     }
 
     void init() {
@@ -1307,20 +1622,26 @@ struct FilterBlock {
             int32_t diff_q15 = (diff * 72710) >> 15;
             if (diff_q15 > 32767) diff_q15 = 32767;
             
-            // Damping sweeps up to 28000 to eliminate self-oscillation ringing
-            target_r = 1000 + ((diff_q15 * 27000) >> 15);
+            // Damping sweeps up to 32000 (fully damped) to suppress high-pitched resonant squelch
+            target_r = 1000 + ((diff_q15 * 31000) >> 15);
+            
+            // Quadratic scaling for a softer, more musical wavefolder fade-in
+            int32_t diff_sq = (diff_q15 * diff_q15) >> 15;
             
             // Input drive sweeps from 1.0x to 2.37x
-            drive = 32768 + ((diff_q15 * 45000) >> 15);
+            drive = 32768 + ((diff_sq * 45000) >> 15);
 
             // Fold threshold sweeps down from 32767 to 4000
-            fold_thresh = 32767 - ((diff_q15 * 28767) >> 15);
+            fold_thresh = 32767 - ((diff_sq * 28767) >> 15);
 
-            // Output makeup gain sweeps from 1.0x to 4.0x
-            makeup = 32768 + ((diff_q15 * 98304) >> 15);
+            // Output makeup gain sweeps from 1.0x to 1.35x (prevents volume jump)
+            makeup = 32768 + ((diff_sq * 11468) >> 15);
 
-            dec_step = (diff * 16) / (32767 - 18000);
-            xor_mask = (diff * 127) / (32767 - 18000);
+            // Division-free scaling (range is 14767):
+            // 16 / 14767 ≈ 36 / 32768
+            // 127 / 14767 ≈ 282 / 32768
+            dec_step = (diff * 36) >> 15;
+            xor_mask = (diff * 282) >> 15;
         }
         target_r = clamp_i32(target_r, 400, 32000);
 
@@ -1571,6 +1892,7 @@ struct ReverbBlock {
     Delay modL, d1L, d2L, modR, d1R, d2R;
     int32_t lpL = 0, lpR = 0, lpIn = 0;
     uint32_t lfo = 0;
+    int32_t lp_size_scale = 32767;
 
     // Decimation state for glitch effect
     uint16_t decimate_phase = 0;
@@ -1620,44 +1942,68 @@ struct ReverbBlock {
         dec_lpR = 0;
         dc_loopL.init();
         dc_loopR.init();
+        lp_size_scale = 32767;
     }
 
     void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
-        if (mix < 50) {
-            return;
-        }
-
         // Map Size (X) to scale factor: [0..32767] -> [4915..32767] (0.15x to 1.0x)
         int32_t size_scale = 4915 + (((int32_t)size * 27852) >> 15);
 
         // Max decay limit is dynamic based on size to prevent self-oscillation explosion
         // [4915..32767] size_scale maps to [18000..28672] max_decay (0.55x to 0.875x decay coefficient)
-        int32_t max_decay = 18000 + (((size_scale - 4915) * 10672) / (32767 - 4915));
+        // (size_scale - 4915) * 10672 / 27852 ≈ (size_scale - 4915) * 38429 >> 20
+        int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
 
-        // Map Feedback/Glitch (Y):
-        // - 0 to 50% (0..16384): clean decay [0..max_decay], no lofi, no circuit-bend
-        // - 50% to 80% (16384..26214): decay stays at max_decay, scale lofi_level [0..32767] (bitcrush + LPF damp)
-        // - 80% to 100% (26215..32767): decay drops slightly, lofi_level = 32767, scale circuit_bent_level [0..32767] (XOR + decimation)
+        // Map Feedback/Glitch (Y) to smooth overlapping morph curves:
+        // - Decay time rises cleanly from 0 to max_decay over 0..20000.
+        // - Lo-fi bitcrush fuzz starts rising at 12000.
+        // - Sparkle (XOR sizzle) starts rising at 14000 (stable high-fidelity digital crackle).
+        // - Circuit-bent address jitter + decimation starts rising at 20000 (introducing pitch-warping).
         int32_t decay = 0;
         int32_t lofi_level = 0;
+        int32_t sparkle_level = 0;
         int32_t circuit_bent_level = 0;
-        if (fb_glitch < 16384) {
-            decay = (fb_glitch * max_decay) / 16384;
-            lofi_level = 0;
-            circuit_bent_level = 0;
-        } else if (fb_glitch < 26214) {
-            decay = max_decay;
-            lofi_level = ((fb_glitch - 16384) * 32767) / 9830;
-            circuit_bent_level = 0;
+
+        // Decay
+        if (fb_glitch < 20000) {
+            int32_t val = (fb_glitch * 107374) >> 16; // scales [0..20000] -> [0..32767]
+            decay = (val * max_decay) >> 15;
         } else {
-            int32_t diff = fb_glitch - 26214;
-            decay = max_decay - ((diff * 4000) / 6553);
-            lofi_level = 32767;
-            circuit_bent_level = (diff * 32767) / 6553;
+            decay = max_decay;
         }
 
-        // LFO Chorus: constant slow speed for high-fidelity lushness (no fast warbles)
-        lfo += 128;
+        // Lo-fi Level (bitcrush fuzz)
+        if (fb_glitch < 12000) {
+            lofi_level = 0;
+        } else if (fb_glitch < 26000) {
+            int32_t diff = fb_glitch - 12000;
+            int32_t raw_lofi = (diff * 153391) >> 16;
+            lofi_level = (raw_lofi * raw_lofi) >> 15; // quadratic curve for fine control of subtle fuzz
+        } else {
+            lofi_level = 32767;
+        }
+
+        // Sparkle Level (XOR sizzle)
+        if (fb_glitch < 14000) {
+            sparkle_level = 0;
+        } else if (fb_glitch < 28000) {
+            int32_t diff = fb_glitch - 14000;
+            sparkle_level = (diff * 153391) >> 16; // 14000 width
+        } else {
+            sparkle_level = 32767;
+        }
+
+        // Circuit-Bent Level (Jitter + Decimation)
+        if (fb_glitch < 20000) {
+            circuit_bent_level = 0;
+        } else {
+            int32_t diff = fb_glitch - 20000;
+            circuit_bent_level = (diff * 168188) >> 16;
+            if (circuit_bent_level > 32767) circuit_bent_level = 32767;
+        }
+
+        // LFO Chorus: constant slow speed for high-fidelity lushness (no fast warbles) (doubled for 24kHz)
+        lfo += 256;
         int16_t mod = (lfo >> 16) & 0x7FFF;
         if (lfo & 0x80000000) mod = 32767 - mod;
 
@@ -1668,79 +2014,99 @@ struct ReverbBlock {
         if (modulated_size_scale < 3276) modulated_size_scale = 3276;
         if (modulated_size_scale > 32767) modulated_size_scale = 32767;
 
-        // Input mono summing and low-pass filtering (fixed damping)
-        int16_t mono = (int16_t)(((int32_t)L + (int32_t)R) >> 1);
-        lpIn += (((int32_t)mono - lpIn) * 16000) >> 15;
-        mono = (int16_t)(lpIn >> 1);
+        // Smooth size scale slowly to eliminate pitch-glide howling when changing room sizes
+        lp_size_scale += (modulated_size_scale - lp_size_scale) >> 11; // ~85ms time constant
 
-        // Input all-passes
-        for (int i = 0; i < 4; i++) {
-            mono = apIn[i].process(mono, modulated_size_scale);
+        // Apply Address Jitter / Read Head Flutter in circuit-bent mode to left/right channels
+        int32_t scaleL = lp_size_scale;
+        int32_t scaleR = lp_size_scale;
+        if (circuit_bent_level > 0) {
+            uint32_t r = fast_rand(rand_seed);
+            int32_t scale_jitterL = ((r & 0xFF) * circuit_bent_level) >> 13; // max ~1019 (~3.1% size)
+            int32_t scale_jitterR = (((r >> 8) & 0xFF) * circuit_bent_level) >> 13;
+            scaleL -= scale_jitterL;
+            scaleR -= scale_jitterR;
+            if (scaleL < 3276) scaleL = 3276;
+            if (scaleR < 3276) scaleR = 3276;
         }
 
-        // Read tank loop outputs
-        int16_t tOutL = d2L.read(modulated_size_scale);
-        int16_t tOutR = d2R.read(modulated_size_scale);
+        // Input mono summing — no pre-filter, keep full bandwidth into the tank
+        int16_t mono = (int16_t)(((int32_t)L + (int32_t)R) >> 1);
 
+        // Input all-passes are kept at fixed scale to prevent pitch-glide in the diffusion network
+        for (int i = 0; i < 4; i++) {
+            mono = apIn[i].process(mono, 32767);
+        }
+
+        // Read tank loop outputs using jittered scales
+        int16_t tOutL = d2L.read(scaleL);
+        int16_t tOutR = d2R.read(scaleR);
+
+        // Tank HF damping: bright and transparent at Y=0, warms up as lofi_level rises.
+        // Base = 30000/32768 ≈ 0.91 (~25 kHz); max = 24000/32768 ≈ 0.73 (~12 kHz) at full Y.
+        int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
+
+        // Left Tank
+        int32_t iL = (int32_t)mono + (((int32_t)decay * tOutR) >> 15);
+        iL = soft_limit_q15(iL);
+        int16_t sL = (int16_t)iL + (int16_t)((16384 * modL.read(scaleL)) >> 15);
+        modL.write(soft_limit_q15((int32_t)iL - (int16_t)((16384 * sL) >> 15)));
+        d1L.write(sL);
+        sL = d1L.read(scaleL);
+        lpL += (((int32_t)sL - lpL) * damp) >> 15;
+        if (lpL >  32767) lpL =  32767;
+        if (lpL < -32768) lpL = -32768;
+        sL = (int16_t)lpL;
+        sL = apTankL.process(sL, 32767);
+        d2L.write(sL);
+
+        // Right Tank
+        int32_t iR = (int32_t)mono + (((int32_t)decay * tOutL) >> 15);
+        iR = soft_limit_q15(iR);
+        int16_t sR = (int16_t)iR + (int16_t)((16384 * modR.read(scaleR)) >> 15);
+        modR.write(soft_limit_q15((int32_t)iR - (int16_t)((16384 * sR) >> 15)));
+        d1R.write(sR);
+        sR = d1R.read(scaleR);
+        lpR += (((int32_t)sR - lpR) * damp) >> 15;
+        if (lpR >  32767) lpR =  32767;
+        if (lpR < -32768) lpR = -32768;
+        sR = (int16_t)lpR;
+        sR = apTankR.process(sR, 32767);
+        d2R.write(sR);
+
+        int32_t wetL = sL;
+        int32_t wetR = sR;
+
+        // Apply Bitcrushing and XOR Scrambling OUTSIDE the feedback loop to keep the reverb tail natural and long
         // 1. Continuous Bitcrushing (word-length truncation) based on lofi_level
         if (lofi_level > 0) {
             int32_t shift_q15 = (lofi_level * 6); // scale from 0 to 6 in Q15
             int32_t int_shift = shift_q15 >> 15;
             int32_t frac_shift = shift_q15 & 0x7FFF;
 
-            int16_t q1L = (tOutL >> int_shift) << int_shift;
-            int16_t q2L = (tOutL >> (int_shift + 1)) << (int_shift + 1);
-            tOutL = lerp_q15(q1L, q2L, frac_shift);
+            int16_t q1L = (wetL >> int_shift) << int_shift;
+            int16_t q2L = (wetL >> (int_shift + 1)) << (int_shift + 1);
+            wetL = lerp_q15(q1L, q2L, frac_shift);
 
-            int16_t q1R = (tOutR >> int_shift) << int_shift;
-            int16_t q2R = (tOutR >> (int_shift + 1)) << (int_shift + 1);
-            tOutR = lerp_q15(q1R, q2R, frac_shift);
+            int16_t q1R = (wetR >> int_shift) << int_shift;
+            int16_t q2R = (wetR >> (int_shift + 1)) << (int_shift + 1);
+            wetR = lerp_q15(q1R, q2R, frac_shift);
         }
 
-        // 2. XOR Scrambling (only in the last 20% circuit-bent range)
-        if (circuit_bent_level > 0) {
-            int16_t xor_mask = (int16_t)((circuit_bent_level * 255) >> 15);
-            tOutL ^= xor_mask;
-            tOutR ^= xor_mask;
+        // 2. XOR Scrambling (controls the sparkle)
+        if (sparkle_level > 0) {
+            int16_t xor_mask = (int16_t)((sparkle_level * 31) >> 15);
+            wetL ^= xor_mask;
+            wetR ^= xor_mask;
         }
 
-        // Run loop DC blockers to eliminate DC accumulation from bit scrambling
-        tOutL = dc_loopL.process(tOutL);
-        tOutR = dc_loopR.process(tOutR);
-
-        // Warm High-Frequency Damping: increase damping filter from 16384 to 24000 as lofi_level rises
-        int32_t damp = 16384 + ((lofi_level * 7616) >> 15);
-
-        // Left Tank
-        int32_t iL = (int32_t)mono + (((int32_t)decay * tOutR) >> 15);
-        iL = soft_limit_q15(iL);
-        int16_t sL = (int16_t)iL + (int16_t)((16384 * modL.read(modulated_size_scale)) >> 15);
-        modL.write(soft_limit_q15((int32_t)iL - (int16_t)((16384 * sL) >> 15)));
-        d1L.write(sL);
-        sL = d1L.read(modulated_size_scale);
-        lpL += (((int32_t)sL - lpL) * damp) >> 15;
-        sL = (int16_t)lpL;
-        sL = apTankL.process(sL, modulated_size_scale);
-        d2L.write(sL);
-
-        // Right Tank
-        int32_t iR = (int32_t)mono + (((int32_t)decay * tOutL) >> 15);
-        iR = soft_limit_q15(iR);
-        int16_t sR = (int16_t)iR + (int16_t)((16384 * modR.read(modulated_size_scale)) >> 15);
-        modR.write(soft_limit_q15((int32_t)iR - (int16_t)((16384 * sR) >> 15)));
-        d1R.write(sR);
-        sR = d1R.read(modulated_size_scale);
-        lpR += (((int32_t)sR - lpR) * damp) >> 15;
-        sR = (int16_t)lpR;
-        sR = apTankR.process(sR, modulated_size_scale);
-        d2R.write(sR);
-
-        int32_t wetL = sL;
-        int32_t wetR = sR;
+        // Run loop DC blockers to eliminate DC accumulation
+        wetL = dc_loopL.process(wetL);
+        wetR = dc_loopR.process(wetR);
 
         // Heavy Decimation glitch (only in the last 20% circuit-bent range)
         if (circuit_bent_level > 0) {
-            int32_t dec_factor = 1 + ((circuit_bent_level * 15) >> 15); // up to 16x decimation
+            int32_t dec_factor = 1 + ((circuit_bent_level * 3) >> 15); // up to 4x decimation to prevent piercing squeals
             decimate_phase++;
             if (decimate_phase >= dec_factor) {
                 decimate_phase = 0;
@@ -1750,10 +2116,11 @@ struct ReverbBlock {
             wetL = last_outL;
             wetR = last_outR;
 
-            // Apply 1-pole LPF to smooth out decimation steps
-            int32_t dec_coef = 32768 / dec_factor;
-            if (dec_coef > 32767) dec_coef = 32767;
-            if (dec_coef < 1000) dec_coef = 1000;
+            // Apply 1-pole LPF to smooth out decimation steps (use division-free lookup table)
+            static const int16_t dec_coef_table[17] = {
+                0, 32767, 16384, 10922, 8192, 6553, 5461, 4681, 4096, 3640, 3276, 2978, 2730, 2520, 2340, 2184, 2048
+            };
+            int32_t dec_coef = dec_coef_table[dec_factor <= 16 ? (dec_factor >= 1 ? dec_factor : 1) : 16];
 
             dec_lpL += (((int32_t)wetL - dec_lpL) * dec_coef) >> 15;
             dec_lpR += (((int32_t)wetR - dec_lpR) * dec_coef) >> 15;
@@ -1764,9 +2131,9 @@ struct ReverbBlock {
             dec_lpR = wetR;
         }
 
-        // Wet/Dry mix
-        L = (int16_t)(((int32_t)L * (32767 - mix) + wetL * mix) >> 15);
-        R = (int16_t)(((int32_t)R * (32767 - mix) + wetR * mix) >> 15);
+        // Wet/Dry mix using split_mix_q15 to prevent volume drops
+        L = split_mix_q15(L, wetL, (int16_t)mix);
+        R = split_mix_q15(R, wetR, (int16_t)mix);
     }
 };
 
