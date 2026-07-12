@@ -144,14 +144,23 @@ struct ChorusBlock {
 
         // Decode depth / feedback from unified knob
         int16_t depth    = 0;
-        int16_t feedback = 0;
+        int32_t feedback = 0;
+        bool destroy = false;
         if (depthFeedback < 16384) {
             depth    = (int16_t)(depthFeedback * 2); // 0 → 32767
             feedback = 0;
         } else {
             depth    = 32767;
-            // Cap maximum feedback at 60% (19660 in Q15) to prevent harsh metallic ringing / self-oscillation
-            feedback = (int16_t)(((int32_t)(depthFeedback - 16384) * 2 * 19660) >> 15);
+            if (depthFeedback < 26214) {
+                // Standard range (Y < 80%): feedback rises up to 60% (19660)
+                // 26214 - 16384 = 9830. 19660 * 32768 / 9830 = 65536
+                feedback = ((depthFeedback - 16384) * 65536) >> 15;
+            } else {
+                // Destruction range (80% to 100% knob): feedback rises up to 95% (31128)
+                destroy = true;
+                // 32767 - 26214 = 6553. (31128 - 19660) * 32768 / 6553 = 57343
+                feedback = 19660 + (((depthFeedback - 26214) * 57343) >> 15);
+            }
         }
 
         // Classic dual-phase triangle LFO (L = 0°, R = 180° for deep stereo spread)
@@ -215,8 +224,19 @@ struct ChorusBlock {
         if (feedback > 0) {
             int32_t fbL = (int32_t)inL + (((int32_t)wetL * feedback) >> 15);
             int32_t fbR = (int32_t)inR + (((int32_t)wetR * feedback) >> 15);
-            delayL[write_ptr] = soft_limit_q15(fbL);
-            delayR[write_ptr] = soft_limit_q15(fbR);
+            
+            int16_t wrL = soft_limit_q15(fbL);
+            int16_t wrR = soft_limit_q15(fbR);
+            
+            if (destroy) {
+                // Inject XOR bit corruption into Chorus BBD line (scale with destruction intensity)
+                uint16_t xor_mask = (uint16_t)((depthFeedback - 26214) >> 9); // up to ~12 bits of mask
+                wrL ^= xor_mask;
+                wrR ^= xor_mask;
+            }
+            
+            delayL[write_ptr] = wrL;
+            delayR[write_ptr] = wrR;
         }
 
         write_ptr = (write_ptr + 1) & 0x3FF;
@@ -759,6 +779,9 @@ struct MultiTapDelayBlock {
     int32_t  lp_outL = 0;
     int32_t  lp_outR = 0;
 
+    DCBlocker dcL;
+    DCBlocker dcR;
+
     void init() {
         memset(bufL, 0, sizeof(bufL));
         memset(bufR, 0, sizeof(bufR));
@@ -772,6 +795,8 @@ struct MultiTapDelayBlock {
         last_outR     = 0;
         lp_outL       = 0;
         lp_outR       = 0;
+        dcL.init();
+        dcR.init();
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -819,17 +844,17 @@ struct MultiTapDelayBlock {
                 wr = wr + 1;
                 if (wr >= 20480) wr = 0;
             }
-        int32_t mapped_time = 128 + ((time * 19700) >> 15);
+        int32_t mapped_time = 24 + ((time * 19700) >> 15);
             int32_t target_t = mapped_time + (cv1Warp * 4);
-            target_t = clamp_i32(target_t, 128, 20350);
+            target_t = clamp_i32(target_t, 24, 20350);
             IIR_SMOOTH(smooth_t, target_t, 12);
             return;
         }
 
         // Slew delay time with CV1 pitch-warp
-        int32_t mapped_time = 128 + ((time * 19700) >> 15);
+        int32_t mapped_time = 24 + ((time * 19700) >> 15);
         int32_t target_t = mapped_time + (cv1Warp * 4);
-        target_t = clamp_i32(target_t, 128, 20350);
+        target_t = clamp_i32(target_t, 24, 20350);
 
         IIR_SMOOTH(smooth_t, target_t, 12);
 
@@ -887,17 +912,23 @@ struct MultiTapDelayBlock {
 
         // Write to buffer (unless frozen)
         if (!freeze) {
-            // Cross-feedback: L is fed back by R's output, R is fed back by L's output
-            int32_t feedL = (int32_t)inL + (((int32_t)mixR * feedback) >> 15);
-            int32_t feedR = (int32_t)inR + (((int32_t)mixL * feedback) >> 15);
+            // Direct loop feedback (L->L, R->R) for stable Karplus-Strong string synthesis
+            int32_t feedL = (int32_t)inL + (((int32_t)w1L * feedback) >> 15);
+            int32_t feedR = (int32_t)inR + (((int32_t)w1R * feedback) >> 15);
             
-            // 1-pole low-pass filter on feedback loops (analog decay warmth)
-            // Coefficient 15000 ≈ 0.46 → ~3 kHz @ 24 kHz sample rate
-            lp_feedback_L += ((feedL - lp_feedback_L) * 15000) >> 15;
-            lp_feedback_R += ((feedR - lp_feedback_R) * 15000) >> 15;
+            // Dynamic 1-pole damping: roll off high frequencies more aggressively at short times
+            // to stabilize extreme high-pitched ringing and model acoustic losses
+            int32_t damp_coef = 15000; // standard damping
+            if (smooth_t < 500) {
+                // scale damping down (more HF roll-off) for short delay times
+                damp_coef = 6000 + ((smooth_t * 9000) / 500);
+            }
+            lp_feedback_L += ((feedL - lp_feedback_L) * damp_coef) >> 15;
+            lp_feedback_R += ((feedR - lp_feedback_R) * damp_coef) >> 15;
 
-            int16_t wrL = soft_limit_q15(lp_feedback_L);
-            int16_t wrR = soft_limit_q15(lp_feedback_R);
+            // DC blocking + soft-clipper to prevent digital overflow blowout
+            int16_t wrL = dcL.process(soft_limit_q15(lp_feedback_L));
+            int16_t wrR = dcR.process(soft_limit_q15(lp_feedback_R));
             
             // Bipolar CV2 controls feedback XOR corruption (circuit bend!) scaled by global noise scale
             int32_t cv2_abs = cv2Corruption < 0 ? -cv2Corruption : cv2Corruption;
@@ -969,34 +1000,30 @@ inline int16_t decode_mulaw(uint8_t u_val) {
 
 // Zoned speed determination helper. Placed in FLASH (not RAM) to save memory,
 // since it is only called on grain boundaries/initialization, not per-sample.
-__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed) {
+__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed, uint8_t arp_step) {
     int32_t base_speed;
 
-    if (sq < 8192) {
+    if (sq < 6554) {
         // Zone 0: always 1x forward — pure rhythmic stutter, no pitch change
         base_speed = 65536;
-    } else if (sq < 18022) {
+    } else if (sq < 13107) {
         // Zone 1: tonal octave family {0.5x, 1x, 2x} — 1x stays dominant
-        // alt_thresh: 0 at Y=8192 → ~16383 at Y=18022 (0% → ~50% alt probability)
-        int32_t alt_thresh = ((sq - 8192) * 54609) >> 15;
-        if ((int32_t)(fast_rand(seed) & 0x7FFF) < alt_thresh) {
+        if ((int32_t)(fast_rand(seed) & 0x7FFF) < 16384) {
             base_speed = (fast_rand(seed) & 1) ? 131072 : 32768; // 2x or 0.5x
         } else {
             base_speed = 65536; // 1x
         }
+    } else if (sq < 19661) {
+        // Zone 2: Melodic Pentatonic Slices (static pitch per stutter event)
+        static const int32_t penta[6] = {65536, 81920, 98304, 131072, 32768, 49152};
+        uint32_t choice = ((fast_rand(seed) & 0xFFFF) * 6) >> 16;
+        base_speed = penta[choice];
     } else if (sq < 26214) {
-        // Zone 2: adds reverse {-1x, -0.5x}; reverse prob rises 10%→40%
-        int32_t rev_thresh = 3276 + (((sq - 18022) * 9831) >> 13);
-        if (rev_thresh > 13107) rev_thresh = 13107;
-        if ((int32_t)(fast_rand(seed) & 0x7FFF) < rev_thresh) {
-            base_speed = (fast_rand(seed) & 1) ? -65536 : -32768; // -1x or -0.5x
-        } else {
-            // Forward octave family — pick 1 of 3 via inline switch
-            uint32_t c = ((fast_rand(seed) & 0xFFFF) * 3) >> 16; // 0,1,2
-            base_speed = (c == 0) ? 32768 : (c == 1) ? 65536 : 131072;
-        }
+        // Zone 3: Melodic Arpeggiator Sequencer (advances step on every repeat)
+        static const int32_t arp_seq[8] = {65536, 81920, 98304, 131072, 32768, 49152, -65536, -32768};
+        base_speed = arp_seq[arp_step & 7];
     } else {
-        // Zone 3: full chaos — all 6 speeds equally weighted
+        // Zone 4: full chaos — all 6 speeds equally weighted
         uint32_t c = ((fast_rand(seed) & 0xFFFF) * 6) >> 16; // 0..5
         switch (c) {
             case 0:  base_speed =  65536;  break; // 1x fwd
@@ -1064,6 +1091,8 @@ struct GlitcherBlock {
     bool     evolve_active = false;
     int32_t  evolve_samples_left = 0;
 
+    uint8_t  arpeggio_step = 0;
+
     void init() {
         memset(bufL, 0, sizeof(bufL));
         memset(bufR, 0, sizeof(bufR));
@@ -1094,6 +1123,7 @@ struct GlitcherBlock {
         freeze_evolve_ctr = 0;
         evolve_active = false;
         evolve_samples_left = 0;
+        arpeggio_step = 0;
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -1350,8 +1380,8 @@ struct GlitcherBlock {
                             }
                         }
                     }
-                    if (speedQuant >= 26214) {
-                        // Chaotic size jitter in Zone 3 (up to 25% of loop size)
+                    if (speedQuant >= 19661) {
+                        // Chaotic size jitter in Zone 3 and 4 (up to 25% of loop size)
                         int32_t jitter_range = final_size >> 2;
                         if (jitter_range > 0) {
                             int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
@@ -1361,7 +1391,8 @@ struct GlitcherBlock {
                     current_loop_len = clamp_i32(final_size, 128, 16384);
                     
                     // Determine initial speed/direction for this glitch grain
-                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed);
+                    arpeggio_step = 0;
+                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step);
                     speed_q16 = current_speed_q16;
                     
                     rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
@@ -1430,11 +1461,12 @@ struct GlitcherBlock {
                     if (keep_looping) {
                         xfade_rd = loop_start + rd_q16;
                         
-                        // Boundary crossed: re-roll speed every boundary in zones 2-3 (Y >= 55%),
-                        // sticky in zones 0-1 — only refresh if grain has been very long.
-                        bool reroll_every_boundary = (speedQuant >= 18022);
+                        // Boundary crossed: re-roll speed every boundary in zones 3-4 (Y >= 60%),
+                        // sticky in zones 0-2 — only refresh if grain has been very long.
+                        bool reroll_every_boundary = (speedQuant >= 19661);
                         if (reroll_every_boundary || sample_ctr >= 1024) {
-                            current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed);
+                            arpeggio_step++;
+                            current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step);
                             sample_ctr = 0;
                         }
                         speed_q16 = current_speed_q16;
@@ -1465,8 +1497,8 @@ struct GlitcherBlock {
                                 }
                             }
                         }
-                        if (speedQuant >= 26214) {
-                            // Chaotic size jitter in Zone 3 (up to 25% of loop size)
+                        if (speedQuant >= 19661) {
+                            // Chaotic size jitter in Zone 3 and 4 (up to 25% of loop size)
                             int32_t jitter_range = final_size >> 2;
                             if (jitter_range > 0) {
                                 int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
