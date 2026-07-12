@@ -116,7 +116,7 @@ struct ChorusBlock {
         hp_x1L = hp_y1L = hp_x1R = hp_y1R = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t rate, int32_t depthFeedback,
                  int32_t cv1Warp)
     {
@@ -351,7 +351,7 @@ struct CodecDemolisherBlock {
         return (int16_t)(sign * reconstructed);
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t strength, int32_t downsample, int32_t ringingXor,
                  int32_t cv2Corruption, uint32_t &rand_seed, int32_t globalNoiseScale = 16384)
     {
@@ -774,7 +774,7 @@ struct MultiTapDelayBlock {
         lp_outR       = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t time, int32_t feedback,
                  bool freeze, int32_t cv1Warp, int32_t cv2Corruption, int32_t globalNoiseScale = 16384)
     {
@@ -967,6 +967,53 @@ inline int16_t decode_mulaw(uint8_t u_val) {
     return mulaw_decode_table[u_val];
 }
 
+// Zoned speed determination helper. Placed in FLASH (not RAM) to save memory,
+// since it is only called on grain boundaries/initialization, not per-sample.
+__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed) {
+    int32_t base_speed;
+
+    if (sq < 8192) {
+        // Zone 0: always 1x forward — pure rhythmic stutter, no pitch change
+        base_speed = 65536;
+    } else if (sq < 18022) {
+        // Zone 1: tonal octave family {0.5x, 1x, 2x} — 1x stays dominant
+        // alt_thresh: 0 at Y=8192 → ~16383 at Y=18022 (0% → ~50% alt probability)
+        int32_t alt_thresh = ((sq - 8192) * 54609) >> 15;
+        if ((int32_t)(fast_rand(seed) & 0x7FFF) < alt_thresh) {
+            base_speed = (fast_rand(seed) & 1) ? 131072 : 32768; // 2x or 0.5x
+        } else {
+            base_speed = 65536; // 1x
+        }
+    } else if (sq < 26214) {
+        // Zone 2: adds reverse {-1x, -0.5x}; reverse prob rises 10%→40%
+        int32_t rev_thresh = 3276 + (((sq - 18022) * 9831) >> 13);
+        if (rev_thresh > 13107) rev_thresh = 13107;
+        if ((int32_t)(fast_rand(seed) & 0x7FFF) < rev_thresh) {
+            base_speed = (fast_rand(seed) & 1) ? -65536 : -32768; // -1x or -0.5x
+        } else {
+            // Forward octave family — pick 1 of 3 via inline switch
+            uint32_t c = ((fast_rand(seed) & 0xFFFF) * 3) >> 16; // 0,1,2
+            base_speed = (c == 0) ? 32768 : (c == 1) ? 65536 : 131072;
+        }
+    } else {
+        // Zone 3: full chaos — all 6 speeds equally weighted
+        uint32_t c = ((fast_rand(seed) & 0xFFFF) * 6) >> 16; // 0..5
+        switch (c) {
+            case 0:  base_speed =  65536;  break; // 1x fwd
+            case 1:  base_speed =  131072; break; // 2x fwd
+            case 2:  base_speed =  32768;  break; // 0.5x fwd
+            case 3:  base_speed = -65536;  break; // 1x rev
+            case 4:  base_speed = -131072; break; // 2x rev
+            default: base_speed = -32768;  break; // 0.5x rev
+        }
+    }
+
+    int32_t cv2_mod = cv2_corr * 32;
+    int32_t speed = base_speed + cv2_mod;
+    if (speed == 0) speed = 3277;
+    return speed;
+}
+
 struct GlitcherBlock {
     uint8_t  bufL[32768];
     uint8_t  bufR[32768];
@@ -1049,7 +1096,7 @@ struct GlitcherBlock {
         evolve_samples_left = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainProb, int32_t size, int32_t speedQuant,
                  bool glitchInjector, bool freezeGate, int32_t cv1Warp, int32_t cv2Corruption,
                  uint32_t &rand_seed, int32_t scrubOffset = 0, int32_t glitchFeedback = 0, int32_t globalNoiseScale = 16384)
@@ -1082,40 +1129,6 @@ struct GlitcherBlock {
         int32_t finalProb = warpedProb + cluster_mod;
         if (finalProb < 0) finalProb = 0;
         if (finalProb > 32767) finalProb = 32767;
-
-        // ── Playback speed probability helper ──────────────────────────────────
-        auto determine_random_speed = [globalNoiseScale](int32_t sq, int32_t cv2_corr, uint32_t &seed) -> int32_t {
-            int32_t base_speed = 65536; // 1.0x in Q16
-            
-            // sq represents the probability of choosing a random speed/direction.
-            int32_t eff_sq = (sq * globalNoiseScale) >> 14;
-            if (eff_sq > 32767) eff_sq = 32767;
-
-            uint32_t roll = fast_rand(seed) & 0x7FFF;
-            if ((int32_t)roll < eff_sq) {
-                uint32_t choice = ((fast_rand(seed) & 0xFFFF) * 6) >> 16;
-                switch (choice) {
-                    case 0: base_speed = 65536;    // 1x forward
-                            break;
-                    case 1: base_speed = 131072;   // 2x forward (octave up)
-                            break;
-                    case 2: base_speed = 32768;    // 0.5x forward (octave down)
-                            break;
-                    case 3: base_speed = -65536;   // 1x reverse
-                            break;
-                    case 4: base_speed = -131072;  // 2x reverse (reverse octave up)
-                            break;
-                    case 5: base_speed = -32768;   // 0.5x reverse (reverse octave down)
-                }
-            } else {
-                base_speed = 65536; // default 1x
-            }
-            
-            int32_t cv2_mod = cv2_corr * 32;
-            int32_t speed = base_speed + cv2_mod;
-            if (speed == 0) speed = 3277;
-            return speed;
-        };
 
         // ── FREEZE MODE ──────────────────────────────────────────────────────
         if (freezeGate) {
@@ -1339,8 +1352,8 @@ struct GlitcherBlock {
                     }
                     current_loop_len = clamp_i32(final_size, 128, 16384);
                     
-                    // Determine initial speed/direction for this glitch loop
-                    current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
+                    // Determine initial speed/direction for this glitch grain
+                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed);
                     speed_q16 = current_speed_q16;
                     
                     rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
@@ -1409,9 +1422,11 @@ struct GlitcherBlock {
                     if (keep_looping) {
                         xfade_rd = loop_start + rd_q16;
                         
-                        // Boundary crossed: select next speed/timing from probability field
-                        if (sample_ctr >= 1024) {
-                            current_speed_q16 = determine_random_speed(speedQuant, cv2Corruption, rand_seed);
+                        // Boundary crossed: re-roll speed every boundary in zones 2-3 (Y >= 55%),
+                        // sticky in zones 0-1 — only refresh if grain has been very long.
+                        bool reroll_every_boundary = (speedQuant >= 18022);
+                        if (reroll_every_boundary || sample_ctr >= 1024) {
+                            current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed);
                             sample_ctr = 0;
                         }
                         speed_q16 = current_speed_q16;
@@ -1608,7 +1623,7 @@ struct FilterBlock {
         f_dec_ctr = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((noinline)) void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t cutoff, int32_t resonance, int32_t morph, int32_t cv1Warp)
     {
         // ── 1. CV1 manual sweep modulation ───────────────────────────────────
@@ -1972,7 +1987,7 @@ struct ReverbBlock {
         lp_size_scale = 32767;
     }
 
-    void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
+    __attribute__((noinline)) void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
         // Map Size (X) to scale factor: [0..32767] -> [4915..32767] (0.15x to 1.0x)
         int32_t size_scale = 4915 + (((int32_t)size * 27852) >> 15);
 

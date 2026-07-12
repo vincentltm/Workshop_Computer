@@ -66,6 +66,8 @@ public:
   void EnableNormalisationProbe() { useNormProbe = true; }
 
   static ComputerCard *ThisPtr() { return thisptr; }
+  uint8_t GetAdcDmaChannel() const { return adc_dma; }
+  uint8_t GetSpiDmaChannel() const { return spi_dma; }
 
 protected:
   class NotchFilter {
