@@ -1118,6 +1118,7 @@ struct GlitcherBlock {
     uint8_t  arpeggio_step = 0;
     bool     trig_out1 = false;
     bool     trig_out2 = false;
+    uint8_t  current_g711_sample = 128;
 
     void init() {
         memset(bufL, 0, sizeof(bufL));
@@ -1152,6 +1153,7 @@ struct GlitcherBlock {
         arpeggio_step = 0;
         trig_out1 = false;
         trig_out2 = false;
+        current_g711_sample = 128;
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -1298,6 +1300,7 @@ struct GlitcherBlock {
             };
 
             read_buf(loop_start + rd_q16, sL, sR);
+            current_g711_sample = bufL[((loop_start + rd_q16) >> 16) & 0x7FFF];
 
             if (evolve_active) {
                 int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
@@ -1592,6 +1595,7 @@ struct GlitcherBlock {
                 if (active) {
                     int16_t sL, sR;
                     read_buf(loop_start + rd_q16, sL, sR);
+                    current_g711_sample = bufL[((loop_start + rd_q16) >> 16) & 0x7FFF];
 
                     if (xfade_ctr > 0) {
                         int16_t xL, xR;

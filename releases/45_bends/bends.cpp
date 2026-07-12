@@ -344,19 +344,54 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         PulseOut1(false);
     }
 
-    // Pulse 2 outputs raw glitchy square-wave audio when active for Eurorack mixing/filtering
-    static uint32_t square_phase = 0;
+    // Pulse 2 outputs raw glitchy square-wave / 1-bit audio when active for Eurorack mixing/filtering
     if (glitcher.active) {
-        int32_t abs_speed = glitcher.current_speed_q16 < 0 ? -glitcher.current_speed_q16 : glitcher.current_speed_q16;
-        square_phase += (abs_speed * 11) / 1200; // maps 1.0x speed to 220Hz
-        bool sq_val = (square_phase & 0x80000000) != 0;
-        
-        // In Zone 4 (Chaos), inject high-frequency digital XOR static/noise
-        if (eff_glitch_speed >= 26214) {
-            if ((fast_rand(rand_seed) & 0x7FFF) < 4096) {
-                sq_val = !sq_val;
-            }
+        uint8_t g711 = glitcher.current_g711_sample;
+        bool sq_val = false;
+
+        if (eff_glitch_speed < 6554) {
+            // Zone 0 (0-20% Y): Clean 1-bit comparator fuzz (sign bit)
+            sq_val = (g711 & 0x80) != 0;
+        } else if (eff_glitch_speed < 13107) {
+            // Zone 1 (20-40% Y): Sub-harmonic bitcrushed fuzz (bit 6)
+            sq_val = (g711 & 0x40) != 0;
+        } else if (eff_glitch_speed < 19661) {
+            // Zone 2 (40-60% Y): Ring-mod texture bit (bit 5)
+            sq_val = (g711 & 0x20) != 0;
+        } else if (eff_glitch_speed < 26214) {
+            // Zone 3 (60-80% Y): Arpeggiator frequency ring modulator
+            static uint32_t arp_phase = 0;
+            static const int8_t semitone_offsets[8] = {0, 4, 7, 12, -12, -5, 0, -12};
+            int32_t note = 60 + semitone_offsets[glitcher.arpeggio_step & 7];
+            static const int32_t chromatic_scale_q16[25] = {
+                32768, 34716, 36780, 38967, 41284, 43739, 46340, 49096, 52016, 55109, 58386, 61858,
+                65536,
+                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116772, 123715, 131072
+            };
+            int32_t semitones = note - 60;
+            int32_t scale_factor = chromatic_scale_q16[semitones + 12];
+            int32_t abs_speed = ((int64_t)65536 * scale_factor) >> 16;
+            arp_phase += (abs_speed * 11) / 1200;
+            bool arp_sq = (arp_phase & 0x80000000) != 0;
+            sq_val = ((g711 & 0x80) != 0) ^ arp_sq;
+        } else {
+            // Zone 4 (80-100% Y): Chaotic digital noise/static XOR
+            bool raw_bit = (g711 & 0x80) != 0;
+            bool noise_bit = (fast_rand(rand_seed) & 1) != 0;
+            sq_val = raw_bit ^ noise_bit;
         }
+
+        // Overlay a sharp 2ms click burst on every loop boundary crossing (trig_out1)
+        static int16_t click_timer = 0;
+        if (glitcher.trig_out1) {
+            click_timer = 48; // 2 ms click burst at 24kHz
+        }
+        if (click_timer > 0) {
+            click_timer--;
+            // Toggles at 12 kHz to generate a bright, scratchy vinyl pop / CD skip click
+            sq_val = (click_timer & 2) != 0;
+        }
+
         PulseOut2(sq_val);
     } else {
         PulseOut2(false);
