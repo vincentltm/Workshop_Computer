@@ -28,4 +28,4 @@ pico_add_extra_outputs(bends)
 target_compile_options(bends PRIVATE -Wdouble-promotion -Wfloat-conversion -Wall -Wextra)
 target_link_options(bends PRIVATE -Wl,--print-memory-usage)
 	
-target_link_libraries(bends pico_unique_id pico_stdlib hardware_dma hardware_i2c hardware_pwm hardware_adc hardware_spi hardware_timer pico_multicore hardware_flash hardware_vreg hardware_clocks)
+target_link_libraries(bends pico_unique_id pico_stdlib hardware_dma hardware_i2c hardware_pwm hardware_adc hardware_spi hardware_timer pico_multicore hardware_flash hardware_vreg hardware_clocks hardware_interp)

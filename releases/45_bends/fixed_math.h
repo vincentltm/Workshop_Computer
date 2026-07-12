@@ -27,11 +27,13 @@ inline int32_t multiply_q31(int32_t a, int32_t b) { return mul_q31(a, b); }
 // Clamping & Saturation
 // ============================================================================
 
-// Hard saturation to Q15 range
+// Hard saturation to Q15 range via hardware INTERP1 clamp (branch-free, 2 cycles).
+// Requires init_hardware_interp() to have been called once on Core 1.
+// Bounds BASE0=-32768 / BASE1=32767 are loaded at init and never change.
+#include "hardware/interp.h"
 inline int16_t saturate_q15(int32_t x) {
-    if (x >  32767) return  32767;
-    if (x < -32768) return -32768;
-    return (int16_t)x;
+    interp1->accum[0] = (uint32_t)x;
+    return (int16_t)(int32_t)interp1->peek[0];
 }
 
 // Clamp int32_t to arbitrary range
@@ -69,6 +71,18 @@ inline int16_t lerp_q15(int16_t a, int16_t b, int16_t t) {
 
 inline int32_t lerp_q31(int32_t a, int32_t b, int32_t t) {
     return a + (int32_t)(((int64_t)(b - a) * (int64_t)t) >> 31);
+}
+
+// lerp_delay_q15: hardware-accelerated linear interpolation using INTERP0 blend mode.
+// Requires init_hardware_interp() called once on Core 1.
+// Blend mode: LANE1_RESULT = BASE0 + (ACCUM0[7:0] / 256) * (BASE1 - BASE0)
+// frac16 is a uint16_t [0..65535]; we use the top 8 bits as the blend weight.
+// Accuracy: 1/256 sample (~0.04% of delay) — completely inaudible at 24 kHz.
+inline int16_t lerp_delay_q15(int16_t y0, int16_t y1, uint16_t frac16) {
+    interp0->base[0] = (uint32_t)(int32_t)y0;
+    interp0->base[1] = (uint32_t)(int32_t)y1;
+    interp0->accum[0] = frac16 >> 8; // blend uses bottom 8 bits of accum0
+    return (int16_t)(int32_t)interp0->peek[1];
 }
 
 // ============================================================================
@@ -136,28 +150,55 @@ inline int16_t lookup_sine_fast(uint16_t phase) {
 struct KnobLock {
     bool    locked = true;
     int32_t ref    = 0;
+    int32_t val    = 0;
 
     // Engage lock: call on every page change.
-    void engage(int32_t current_hw_value) {
+    // saved_value is the virtual parameter value for this page.
+    void engage(int32_t current_hw_value, int32_t saved_value = 0) {
         locked = true;
         ref    = current_hw_value;
+        val    = saved_value;
     }
 
     // Call every UI tick with the smoothed hardware knob value.
-    // Returns true when unlocked (parameter should be written).
-    bool update(int32_t v) {
+    // Returns the new virtual value (either locked saved value or slewing towards physical).
+    int32_t update(int32_t v) {
         if (locked) {
             int32_t d = v - ref;
             if (d < 0) d = -d;
-            if (d > 1638) locked = false; // ~5% threshold
+            if (d > 1638) {
+                locked = false; // Unlocked!
+            }
         }
-        return !locked;
+        
+        if (!locked) {
+            int32_t dist = v - val;
+            if (dist < 0) dist = -dist;
+            
+            // Dynamic slew speed: if physical knob is far, slide slowly. If close, track fast.
+            // dist range is [0, 32767].
+            int32_t shift = 4; // fast tracking for small jumps (~16ms)
+            if (dist > 20000)      shift = 7; // very slow slide for full-scale jumps (~128ms)
+            else if (dist > 10000) shift = 6; // medium-slow for half-scale (~64ms)
+            else if (dist > 3000)  shift = 5; // standard slew (~32ms)
+            
+            val += (v - val) >> shift;
+            
+            // Snap to physical value when extremely close
+            int32_t diff = v - val;
+            if (diff < 0) diff = -diff;
+            if (diff < 32) {
+                val = v;
+            }
+        }
+        return val;
     }
 
     // Force re-lock at a new reference (e.g. if param was externally changed)
-    void relock(int32_t v) {
+    void relock(int32_t v, int32_t saved_value = 0) {
         locked = true;
         ref    = v;
+        val    = saved_value;
     }
 };
 
@@ -184,6 +225,24 @@ inline int32_t pow2_q15(int16_t raw_val) {
         int32_t shift = -oct;
         if (shift > 15) return 0;
         return frac_mult >> shift;
+    }
+}
+
+// ============================================================================
+// Split-Mix (Constant-Volume / Eurorack Dry-Wet Curve)
+// Keeps dry signal at 100% in the first half of the knob (as wet rises to 100%).
+// Keeps wet signal at 100% in the second half of the knob (as dry decays).
+// Completely eliminates the -3dB volume drop in the middle of the knob.
+// ============================================================================
+inline int16_t split_mix_q15(int16_t dry, int16_t wet, int16_t mix) {
+    if (mix < 16384) {
+        // First half: dry is 100%, wet rises from 0% to 100%
+        int32_t wet_gain = mix << 1;
+        return soft_limit_q15(dry + (((int32_t)wet * wet_gain) >> 15));
+    } else {
+        // Second half: wet is 100%, dry decays from 100% to 0%
+        int32_t dry_gain = (32767 - mix) << 1;
+        return soft_limit_q15(wet + (((int32_t)dry * dry_gain) >> 15));
     }
 }
 

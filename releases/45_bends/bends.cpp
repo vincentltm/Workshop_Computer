@@ -279,7 +279,13 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 }
 
 // Core 1 entry point
-void core1_entry() { card.Run(); }
+void core1_entry() {
+    // Configure hardware interpolators for Core 1's audio ISR:
+    //   INTERP0 = blend mode  → lerp_delay_q15() (1-cycle delay interpolation)
+    //   INTERP1 = clamp mode  → saturate_q15()   (branch-free Q15 saturation)
+    init_hardware_interp();
+    card.Run();
+}
 
 // ============================================================================
 // Core 0: UI State

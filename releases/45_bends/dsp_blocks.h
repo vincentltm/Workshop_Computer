@@ -22,8 +22,34 @@
 
 #include "fixed_math.h"
 #include <string.h>   // memset
+#include "hardware/interp.h"
 
 extern uint32_t rand_seed;
+
+// ============================================================================
+// Hardware Interpolator Setup (Core 1 only — must be called once from Core 1)
+// INTERP0 → BLEND mode  : single-cycle linear interpolation for delay reads
+// INTERP1 → CLAMP mode  : branch-free Q15 saturation (replaces saturate_q15)
+// ============================================================================
+inline void init_hardware_interp() {
+    // INTERP0: blend mode (INTERP0 lane 0 only supports BLEND bit)
+    interp_config c0 = interp_default_config();
+    interp_config_set_blend(&c0, true);   // lane1 result = lerp(BASE0, BASE1, frac8)
+    interp_config_set_signed(&c0, true);  // signed audio samples
+    interp_set_config(interp0, 0, &c0);
+    // Lane 1: default pass-through (blend reads from lane 0 automatically)
+    interp_config c0l1 = interp_default_config();
+    interp_config_set_signed(&c0l1, true);
+    interp_set_config(interp0, 1, &c0l1);
+
+    // INTERP1: clamp mode (INTERP1 lane 0 only supports CLAMP bit)
+    interp_config c1 = interp_default_config();
+    interp_config_set_clamp(&c1, true);
+    interp_config_set_signed(&c1, true);
+    interp_set_config(interp1, 0, &c1);
+    interp1->base[0] = (uint32_t)(int32_t)(-32768); // lower clamp bound
+    interp1->base[1] = (uint32_t)(int32_t)(32767);  // upper clamp bound
+}
 
 // ============================================================================
 // Fixed-Point DC Blocker (High-Pass Filter with cutoff at ~10 Hz @ 48 kHz)
@@ -155,7 +181,8 @@ struct ChorusBlock {
             uint16_t frac   = (uint16_t)(rp_q16 & 0xFFFF);
             int16_t  y0     = buf[idx];
             int16_t  y1     = buf[nxt];
-            return (int16_t)(y0 + (((int64_t)(y1 - y0) * (int64_t)frac) >> 16));
+            // int32_t safe: (y1-y0) in [-65535,65535], frac in [0,65535]; product fits int32
+            return lerp_delay_q15(y0, y1, frac);
         };
 
         int32_t wp_q16 = (int32_t)write_ptr << 16;
@@ -827,11 +854,11 @@ struct MultiTapDelayBlock {
             uint16_t frac = (uint16_t)(delay_q16 & 0xFFFF);
             {
                 int16_t y0 = bufL[rp_i], y1 = bufL[rp_n];
-                rL = (int16_t)(y0 + (((int64_t)(y1 - y0) * frac) >> 16));
+                rL = lerp_delay_q15(y0, y1, frac);
             }
             {
                 int16_t y0 = bufR[rp_i], y1 = bufR[rp_n];
-                rR = (int16_t)(y0 + (((int64_t)(y1 - y0) * frac) >> 16));
+                rR = lerp_delay_q15(y0, y1, frac);
             }
         };
 
@@ -1188,9 +1215,9 @@ struct GlitcherBlock {
                 int32_t  nxt  = (idx + 1)   & 0x7FFF;
                 uint16_t frac = (uint16_t)(ptr & 0xFFFF);
                 int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
-                valL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                valL = lerp_delay_q15(y0L, y1L, frac);
                 int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
-                valR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
+                valR = lerp_delay_q15(y0R, y1R, frac);
             };
 
             read_buf(loop_start + rd_q16, sL, sR);
@@ -1335,9 +1362,9 @@ struct GlitcherBlock {
                     int32_t  nxt  = (idx + 1)   & 0x7FFF;
                     uint16_t frac = (uint16_t)(ptr & 0xFFFF);
                     int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
-                    sL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                    sL = lerp_delay_q15(y0L, y1L, frac);
                     int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
-                    sR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
+                    sR = lerp_delay_q15(y0R, y1R, frac);
                 };
 
                 int32_t offset_samples = (scrubOffset * 16384) >> 15;
@@ -1492,9 +1519,9 @@ struct GlitcherBlock {
                 int32_t  nxt  = (idx + 1)   & 0x7FFF;
                 uint16_t frac = (uint16_t)(ptr & 0xFFFF);
                 int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
-                sL = (int16_t)(y0L + (((int32_t)(y1L - y0L) * (int32_t)frac) >> 16));
+                sL = lerp_delay_q15(y0L, y1L, frac);
                 int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
-                sR = (int16_t)(y0R + (((int32_t)(y1R - y0R) * (int32_t)frac) >> 16));
+                sR = lerp_delay_q15(y0R, y1R, frac);
             };
 
             int16_t sL, sR;
@@ -1832,9 +1859,9 @@ struct ReverbBlock {
             uint16_t rd1 = (ptr - scaled_len_int) & mask;
             uint16_t rd2 = (ptr - (scaled_len_int + 1)) & mask;
 
-            // Linear interpolation of both bufIn and bufOut
-            int16_t dIn = (int16_t)(bufIn[rd1] + (((int32_t)(bufIn[rd2] - bufIn[rd1]) * frac) >> 16));
-            int16_t dOut = (int16_t)(bufOut[rd1] + (((int32_t)(bufOut[rd2] - bufOut[rd1]) * frac) >> 16));
+            // Hardware-accelerated linear interpolation via INTERP0 blend mode
+            int16_t dIn  = lerp_delay_q15(bufIn[rd1],  bufIn[rd2],  frac);
+            int16_t dOut = lerp_delay_q15(bufOut[rd1], bufOut[rd2], frac);
 
             int32_t interm = ((int32_t)(g * in) >> 15) + dIn - ((int32_t)(dOut * g) >> 15);
             if (interm > 32767) interm = 32767;
@@ -1883,7 +1910,7 @@ struct ReverbBlock {
 
             int16_t val1 = buf[rd1];
             int16_t val2 = buf[rd2];
-            return (int16_t)(val1 + (((int32_t)(val2 - val1) * frac) >> 16));
+            return lerp_delay_q15(val1, val2, frac);
         }
     };
 
