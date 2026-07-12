@@ -2040,7 +2040,7 @@ struct ReverbBlock {
         }
     };
 
-    int16_t mem[27648];
+    int16_t mem[28672];
     AP apIn[4], apTankL, apTankR;
     Delay modL, d1L, d2L, modR, d1R, d2R;
     int32_t lpL = 0, lpR = 0, lpIn = 0;

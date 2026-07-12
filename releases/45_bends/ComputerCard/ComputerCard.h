@@ -1107,7 +1107,7 @@ void ComputerCard::CalcCalCoeffs(int channel) {
   calCoeffs[channel].bi = int32_t(calCoeffs[channel].b + 0.5f);
 }
 
-uint32_t ComputerCard::MIDIToDAC(int midiNote, int channel) {
+uint32_t __not_in_flash_func(ComputerCard::MIDIToDAC)(int midiNote, int channel) {
   int32_t dacValue =
       ((calCoeffs[channel].mi * (midiNote - 60)) >> 4) + calCoeffs[channel].bi;
   if (dacValue > 524287)
