@@ -1048,8 +1048,19 @@ __attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_
         }
     }
 
-    int32_t cv2_mod = cv2_corr * 32;
-    int32_t speed = base_speed + cv2_mod;
+    // Quantize CV2 to ±12 chromatic semitones using a lookup table
+    // CV2 ranges -2048 to 2047. 2048 / 170 ≈ 12
+    static const int32_t chromatic_scale_q16[25] = {
+        32768, 34716, 36780, 38967, 41284, 43739, 46340, 49096, 52016, 55109, 58386, 61858,
+        65536,
+        69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116772, 123715, 131072
+    };
+    int32_t semitones = cv2_corr / 170;
+    if (semitones < -12) semitones = -12;
+    if (semitones > 12) semitones = 12;
+    int32_t scale_factor = chromatic_scale_q16[semitones + 12];
+
+    int32_t speed = ((int64_t)base_speed * scale_factor) >> 16;
     if (speed == 0) speed = 3277;
     return speed;
 }
@@ -1105,6 +1116,8 @@ struct GlitcherBlock {
     int32_t  evolve_samples_left = 0;
 
     uint8_t  arpeggio_step = 0;
+    bool     trig_out1 = false;
+    bool     trig_out2 = false;
 
     void init() {
         memset(bufL, 0, sizeof(bufL));
@@ -1137,14 +1150,22 @@ struct GlitcherBlock {
         evolve_active = false;
         evolve_samples_left = 0;
         arpeggio_step = 0;
+        trig_out1 = false;
+        trig_out2 = false;
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainProb, int32_t size, int32_t speedQuant,
                  bool glitchInjector, bool freezeGate, int32_t cv1Warp, int32_t cv2Corruption,
-                 uint32_t &rand_seed, int32_t scrubOffset = 0, int32_t glitchFeedback = 0, int32_t globalNoiseScale = 16384)
+                 uint32_t &rand_seed, int32_t scrubOffset, int32_t glitchFeedback, int32_t globalNoiseScale,
+                 bool pulse1_live, bool p1_rising, bool p1_gate,
+                 bool pulse2_live, bool p2_rising, bool p2_gate,
+                 uint32_t clk_period_samples)
     {
         bool want_active = glitchInjector || freezeGate;
+        if (pulse1_live) {
+            want_active = p1_gate || freezeGate;
+        }
         int32_t speed_q16 = 65536;
 
         if (mainProb < 50 && !want_active && !active && dry_fade_ctr == 0) {
@@ -1174,7 +1195,7 @@ struct GlitcherBlock {
         if (finalProb > 32767) finalProb = 32767;
 
         // ── FREEZE MODE ──────────────────────────────────────────────────────
-        if (freezeGate) {
+        if (freezeGate || (pulse2_live && p2_gate)) {
             // 1. Lock recording and initialize freeze on transition
             if (!active) {
                 active = true;
@@ -1199,12 +1220,14 @@ struct GlitcherBlock {
             int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
             if (cur_xfade < 4) cur_xfade = 4;
 
+            // CV1 scrubs loop position when frozen:
+            int32_t cv1_offset = cv1Warp * 6; // sweeps ~±12288 samples
             int32_t target_offset = ((32767 - scrubOffset) * 32760) >> 15;
+            target_offset = clamp_i32(target_offset + cv1_offset, 0, 32760);
             
             // Linear speed mapping: [0..32767] -> [0..131068] Q16 (0x to 2.0x, center is 1.0x)
             int32_t base_speed = speedQuant << 2;
-            int32_t cv2_mod = cv2Corruption * 32;
-            speed_q16 = base_speed + cv2_mod;
+            speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
             if (speed_q16 < 0) speed_q16 = 0;
 
             int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
@@ -1216,6 +1239,8 @@ struct GlitcherBlock {
             bool crossed = (rd_q16 >= ((int64_t)current_loop_len << 16));
 
             if (crossed) {
+                trig_out1 = true; // Output loop sync pulse
+
                 // Spawn next grain repeat at updated position/length targets
                 xfade_rd = loop_start + rd_q16;
                 rd_q16 = 0;
@@ -1228,7 +1253,6 @@ struct GlitcherBlock {
                 
                 // Evolve freeze logic based on Main knob (scrubOffset):
                 if (scrubOffset < 1500) {
-                    // Fully Left: Structured evolution (exactly every 8 cycles, full loop capture)
                     if (!evolve_active) {
                         freeze_evolve_ctr++;
                         if (freeze_evolve_ctr >= 8) {
@@ -1238,19 +1262,16 @@ struct GlitcherBlock {
                         }
                     }
                 } else if (scrubOffset > 31200) {
-                    // Fully Right: Chaotic evolution (random triggers, random partial capture lengths)
                     if (!evolve_active) {
                         uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
-                        if (roll < 4096) { // 12.5% probability per cycle (averages every 8 cycles but random)
+                        if (roll < 4096) {
                             evolve_active = true;
                             int32_t max_len = current_loop_len - 128;
                             if (max_len < 1) max_len = 1;
-                            // Capture between 128 samples and the full loop length
                             evolve_samples_left = 128 + (((fast_rand(rand_seed) & 0x7FFF) * max_len) >> 15);
                         }
                     }
                 } else {
-                    // Middle: Standard locked manual freeze scrub
                     freeze_evolve_ctr = 0;
                     evolve_active = false;
                 }
@@ -1278,7 +1299,6 @@ struct GlitcherBlock {
 
             read_buf(loop_start + rd_q16, sL, sR);
 
-            // If evolving, overwrite current buffer index with live incoming audio
             if (evolve_active) {
                 int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
                 bufL[idx] = encode_mulaw(inL);
@@ -1304,7 +1324,7 @@ struct GlitcherBlock {
                 xfade_ctr--;
             }
 
-            // Smooth onset crossfade (fading from live dry to loop playback)
+            // Smooth onset crossfade
             if (onset_fade_ctr > 0) {
                 onset_fade_phase += onset_fade_step;
                 int32_t val = onset_fade_phase >> 15;
@@ -1334,22 +1354,33 @@ struct GlitcherBlock {
 
         // ── NORMAL GLITCH MODE ───────────────────────────────────────────────
         else {
-            // NOTE: No per-sample deactivation here — grains play their full loop
-            // and only decide to stop at the boundary (keep_looping check below).
-
-            int32_t norm_loop_size;
-            if (cv1Warp == 0) {
-                // Snap to 8 rhythmic power-of-2 sizes: 128..16384
-                // LUT replaces size/4100 division
-                static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
-                int32_t step = (size * 8) >> 15; // maps [0..32767] -> [0..7]
-                if (step < 0) step = 0;
-                if (step > 7) step = 7;
-                norm_loop_size = size_lut[step];
+            int32_t norm_loop_size = 512;
+            if (pulse1_live && clk_period_samples > 240) {
+                // Clock-synced division based on Size knob
+                if (size < 6000) {
+                    norm_loop_size = clk_period_samples / 16;
+                } else if (size < 12000) {
+                    norm_loop_size = clk_period_samples / 8;
+                } else if (size < 18000) {
+                    norm_loop_size = clk_period_samples / 4;
+                } else if (size < 24000) {
+                    norm_loop_size = clk_period_samples / 2;
+                } else {
+                    norm_loop_size = clk_period_samples;
+                }
+                if (norm_loop_size < 128) norm_loop_size = 128;
+                if (norm_loop_size > 16384) norm_loop_size = 16384;
             } else {
-                // CV1 plugged: continuous sweep
-                int32_t base_size = 128 + (size >> 1);
-                norm_loop_size = base_size + (cv1Warp * 4);
+                if (cv1Warp == 0) {
+                    static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                    int32_t step = (size * 8) >> 15;
+                    if (step < 0) step = 0;
+                    if (step > 7) step = 7;
+                    norm_loop_size = size_lut[step];
+                } else {
+                    int32_t base_size = 128 + (size >> 1);
+                    norm_loop_size = base_size + (cv1Warp * 4);
+                }
             }
             norm_loop_size = clamp_i32(norm_loop_size, 128, 16384);
 
@@ -1360,41 +1391,45 @@ struct GlitcherBlock {
                 bufL[wr] = encode_mulaw(inL);
                 bufR[wr] = encode_mulaw(inR);
 
-                // Use finalProb (quad-warped + cluster-modulated) for trigger check
-                bool trigger = ((wr & (uint16_t)(norm_loop_size - 1)) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector;
+                bool trigger = false;
+                if (pulse1_live) {
+                    trigger = p1_rising;
+                } else {
+                    trigger = ((wr & (uint16_t)(norm_loop_size - 1)) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector;
+                }
 
                 if (trigger) {
                     active = true;
                     freeze_wr = wr;
                     
-                    // Add size randomness centered around the middle of the main knob range
                     int32_t final_size = norm_loop_size;
-                    int32_t mid_amount = 16384 - abs(mainProb - 16384); // peak 16384 in middle
-                    if (cv1Warp == 0) {
-                        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
-                            int32_t step = (size * 8) >> 15;
-                            uint32_t r = fast_rand(rand_seed) & 3;
-                            if (r == 3) r = 0;
-                            int32_t offset = (int32_t)r - 1; // -1, 0, 1
-                            step += offset;
-                            if (step < 0) step = 0;
-                            if (step > 7) step = 7;
-                            static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
-                            final_size = size_lut[step];
-                        }
-                    } else {
-                        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
-                            int32_t range = final_size >> 2;
-                            if (range > 0) {
-                                int32_t double_range = range * 2;
-                                if (double_range < 1) double_range = 1;
-                                int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
-                                final_size += offset;
+                    int32_t mid_amount = 16384 - abs(mainProb - 16384);
+                    if (!pulse1_live) {
+                        if (cv1Warp == 0) {
+                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                int32_t step = (size * 8) >> 15;
+                                uint32_t r = fast_rand(rand_seed) & 3;
+                                if (r == 3) r = 0;
+                                int32_t offset = (int32_t)r - 1;
+                                step += offset;
+                                if (step < 0) step = 0;
+                                if (step > 7) step = 7;
+                                static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                                final_size = size_lut[step];
+                            }
+                        } else {
+                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                int32_t range = final_size >> 2;
+                                if (range > 0) {
+                                    int32_t double_range = range * 2;
+                                    if (double_range < 1) double_range = 1;
+                                    int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
+                                    final_size += offset;
+                                }
                             }
                         }
                     }
                     if (speedQuant >= 19661) {
-                        // Chaotic size jitter in Zone 3 and 4 (up to 25% of loop size)
                         int32_t jitter_range = final_size >> 2;
                         if (jitter_range > 0) {
                             int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
@@ -1403,7 +1438,6 @@ struct GlitcherBlock {
                     }
                     current_loop_len = clamp_i32(final_size, 128, 16384);
                     
-                    // Determine initial speed/direction for this glitch grain
                     arpeggio_step = 0;
                     current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
                     speed_q16 = current_speed_q16;
@@ -1435,6 +1469,15 @@ struct GlitcherBlock {
                 int32_t offset_samples = (scrubOffset * 16384) >> 15;
                 int32_t loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x7FFF) << 16;
 
+                // Step arpeggiator on Pulse 2 rising edge
+                if (pulse2_live && p2_rising) {
+                    if (speedQuant >= 19661 && speedQuant < 26214) {
+                        arpeggio_step++;
+                        current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+                        trig_out2 = true;
+                    }
+                }
+
                 speed_q16 = current_speed_q16;
                 rd_q16 += speed_q16;
                 sample_ctr++;
@@ -1450,68 +1493,73 @@ struct GlitcherBlock {
                     }
                 }
 
-                if (crossed) {
-                    uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
+                // Force re-trigger on Pulse 1 clock sync trigger
+                if (pulse1_live && p1_rising) {
+                    crossed = true;
+                }
 
-                    // Short grains loop aggressively; long grains respect finalProb.
-                    // log2(norm_loop_size) is free — it's always a power of 2.
-                    // log2 ranges: 128=7, 256=8, ..., 16384=14 (7 steps).
-                    // size_factor: 1.0 at size 128 (always loop), 0.0 at size 16384 (use finalProb).
+                if (crossed) {
+                    trig_out1 = true; // Output loop sync trigger
+
+                    uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
                     int32_t log2_size  = 31 - __builtin_clz((uint32_t)current_loop_len);
-                    int32_t size_steps = log2_size - 7;  // 0 (tiny) → 7 (huge)
+                    int32_t size_steps = log2_size - 7;
                     if (size_steps < 0) size_steps = 0;
                     if (size_steps > 7) size_steps = 7;
-                    // size_factor LUT: replaces ((7-size_steps)*32767)/7, no division
-                    // index 0 (tiny) → 32767, index 7 (huge) → 0
                     static const int32_t sf_lut[8] = {32767, 28086, 23405, 18724, 14043, 9362, 4681, 0};
                     int32_t size_factor = sf_lut[size_steps];
-                    // Boost loop probability toward 32767 for small loops (uses finalProb for clustering)
                     int32_t loop_prob = finalProb + (((32767 - finalProb) * size_factor) >> 15);
                     if (loop_prob > 32767) loop_prob = 32767;
 
-                    bool keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
+                    bool keep_looping = false;
+                    if (pulse1_live) {
+                        keep_looping = p1_gate;
+                    } else {
+                        keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
+                    }
 
                     if (keep_looping) {
                         xfade_rd = loop_start + rd_q16;
                         
-                        // Boundary crossed: re-roll speed every boundary in zones 3-4 (Y >= 60%),
-                        // sticky in zones 0-2 — only refresh if grain has been very long.
                         bool reroll_every_boundary = (speedQuant >= 19661);
                         if (reroll_every_boundary || sample_ctr >= 1024) {
-                            arpeggio_step++;
+                            if (!pulse2_live) {
+                                arpeggio_step++;
+                                trig_out2 = true;
+                            }
                             current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
                             sample_ctr = 0;
                         }
                         speed_q16 = current_speed_q16;
                         
-                        // Recalculate loop length with mid-randomness for the next iteration
                         int32_t final_size = norm_loop_size;
                         int32_t mid_amount = 16384 - abs(mainProb - 16384);
-                        if (cv1Warp == 0) {
-                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
-                                int32_t step = (size * 8) >> 15;
-                                uint32_t r = fast_rand(rand_seed) & 3;
-                                if (r == 3) r = 0;
-                                int32_t offset = (int32_t)r - 1; // -1, 0, 1
-                                step += offset;
-                                if (step < 0) step = 0;
-                                if (step > 7) step = 7;
-                                static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
-                                final_size = size_lut[step];
-                            }
-                        } else {
-                            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
-                                int32_t range = final_size >> 2;
-                                if (range > 0) {
-                                    int32_t double_range = range * 2;
-                                    if (double_range < 1) double_range = 1;
-                                    int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
-                                    final_size += offset;
+                        if (!pulse1_live) {
+                            if (cv1Warp == 0) {
+                                if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                    int32_t step = (size * 8) >> 15;
+                                    uint32_t r = fast_rand(rand_seed) & 3;
+                                    if (r == 3) r = 0;
+                                    int32_t offset = (int32_t)r - 1;
+                                    step += offset;
+                                    if (step < 0) step = 0;
+                                    if (step > 7) step = 7;
+                                    static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
+                                    final_size = size_lut[step];
+                                }
+                            } else {
+                                if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < mid_amount) {
+                                    int32_t range = final_size >> 2;
+                                    if (range > 0) {
+                                        int32_t double_range = range * 2;
+                                        if (double_range < 1) double_range = 1;
+                                        int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * double_range) >> 15) - range;
+                                        final_size += offset;
+                                    }
                                 }
                             }
                         }
                         if (speedQuant >= 19661) {
-                            // Chaotic size jitter in Zone 3 and 4 (up to 25% of loop size)
                             int32_t jitter_range = final_size >> 2;
                             if (jitter_range > 0) {
                                 int32_t offset = (((int32_t)(fast_rand(rand_seed) & 0x7FFF) * (jitter_range * 2)) >> 15) - jitter_range;
@@ -1571,7 +1619,7 @@ struct GlitcherBlock {
 
                     if (glitchFeedback > 0) {
                         int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
-                        int32_t scaled_fb = (glitchFeedback * 29491) >> 15; // cap at ~90% feedback
+                        int32_t scaled_fb = (glitchFeedback * 29491) >> 15;
                         int16_t oldL = decode_mulaw(bufL[idx]);
                         int16_t oldR = decode_mulaw(bufR[idx]);
                         int16_t newL = soft_limit_q15(((int32_t)oldL * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
@@ -1580,7 +1628,6 @@ struct GlitcherBlock {
                         bufR[idx] = encode_mulaw(newR);
                     }
 
-                    // Active grain always outputs full wet — mainProb controls density, not level
                     outL = sL;
                     outR = sR;
                     return;
@@ -1588,7 +1635,6 @@ struct GlitcherBlock {
             }
         }
 
-        // ── Dry throughput / de-clicked fade out ──────────────────────────────
         if (dry_fade_ctr > 0) {
             auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
                 int32_t  idx  = (ptr >> 16) & 0x7FFF;

@@ -82,6 +82,10 @@ struct Core1Params {
     bool no_audio2;
     bool is_freeze_page;
     bool flash_writing;
+    bool pulse1_live;
+    bool pulse2_live;
+    bool cv1_live;
+    bool cv2_live;
 };
 
 volatile Core1Params g_params[2];
@@ -166,14 +170,43 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const bool    stutter = p.stutter;
     const int32_t cv1    = p.cv1;
     const int32_t cv2    = p.cv2;
+    const bool    pulse1_live = p.pulse1_live;
+    const bool    pulse2_live = p.pulse2_live;
+    const bool    cv1_live    = p.cv1_live;
 
     const bool no_audio2 = p.no_audio2;
     const bool is_freeze_page = p.is_freeze_page;
     const int32_t grittiness_macro = p.grittiness_macro;
 
+    // --- Sample-Accurate Edge Detection for Eurorack Pulses ---
+    bool p1_val = PulseIn1();
+    bool p2_val = PulseIn2();
+    static bool last_p1_val = false;
+    static bool last_p2_val = false;
+    bool p1_rising = p1_val && !last_p1_val;
+    bool p2_rising = p2_val && !last_p2_val;
+    last_p1_val = p1_val;
+    last_p2_val = p2_val;
+
+    // Track clock period on Pulse 1 (Stutter Clock)
+    static uint32_t clk_timer = 0;
+    static uint32_t clk_period_samples = 0;
+    clk_timer++;
+    if (pulse1_live && p1_rising) {
+        if (clk_timer > 240) { // filter noise (>10ms)
+            clk_period_samples = clk_timer;
+        }
+        clk_timer = 0;
+    }
+
+    // --- CV1 Global Glitchiness Macro Offset ---
+    int32_t cv1_offset = 0;
+    if (cv1_live) {
+        cv1_offset = cv1 * 8; // maps -2048..2047 to -16384..16376
+    }
+    int32_t eff_grittiness = clamp_i32(grittiness_macro + cv1_offset, 0, 32767);
+
     // --- Read Audio Inputs & Attenuate for Headroom ---
-    // Attenuating by 6dB (shift right by 1) creates digital headroom for intermediate DSP blocks
-    // to prevent clipping when multiple feedback/morph parameters are driven hot
     int16_t L = (int16_t)((AudioIn1() << 4) >> 1);
     int16_t R = no_audio2 ? L : (int16_t)((AudioIn2() << 4) >> 1);
 
@@ -182,15 +215,12 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     R = dc_inR.process(R);
 
     // --- Dynamic Transient Softener for Hot/Clipping Inputs ---
-    // Instantly rounds off sharp flat-topped clipping shoulders when input is hot,
-    // transforming digital clipping harshness into smooth analog-like saturation.
-    // Threshold is scaled by half (12288) to match the input headroom attenuation.
     {
         int32_t absL = L < 0 ? -L : L;
         int32_t coefL = 32767;
         if (absL >= 12288) {
             int32_t overshoot = absL - 12288;
-            coefL = 32767 - (overshoot * 4); // drops to 16383 at full scale (16384)
+            coefL = 32767 - (overshoot * 4);
         }
         lp_inL += (((int32_t)L - lp_inL) * coefL) >> 15;
         L = (int16_t)lp_inL;
@@ -206,13 +236,13 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    chorus.process(L, L, R, R, chorus_mix, chorus_rate, chorus_depth_fb, cv1);
+    chorus.process(L, L, R, R, chorus_mix, chorus_rate, chorus_depth_fb, 0);
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
-    const int32_t eff_codec_mix         = scale_grit(codec_mix, 32767, grittiness_macro);
-    const int32_t eff_codec_downsample  = scale_grit(codec_downsample, 24000, grittiness_macro);
-    const int32_t eff_codec_ringing_xor = scale_grit(codec_ringing_xor, 32767, grittiness_macro);
-    const int32_t eff_global_noise_scale = scale_grit(global_noise_scale, 49152, grittiness_macro);
+    const int32_t eff_codec_mix         = scale_grit(codec_mix, 32767, eff_grittiness);
+    const int32_t eff_codec_downsample  = scale_grit(codec_downsample, 24000, eff_grittiness);
+    const int32_t eff_codec_ringing_xor = scale_grit(codec_ringing_xor, 32767, eff_grittiness);
+    const int32_t eff_global_noise_scale = scale_grit(global_noise_scale, 49152, eff_grittiness);
 
     codec.process(L, L, R, R,
                   eff_codec_mix, eff_codec_downsample, eff_codec_ringing_xor,
@@ -220,18 +250,18 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     // ── STAGE 3: Multi-Tap Delay ─────────────────────────────────────────────
     int32_t eff_delay_time = delay_time;
-    if (grittiness_macro < 16384) {
+    if (eff_grittiness < 16384) {
         if (delay_time > 16384) {
             int32_t diff = delay_time - 16384;
-            eff_delay_time = 16384 + ((diff * grittiness_macro) >> 14);
+            eff_delay_time = 16384 + ((diff * eff_grittiness) >> 14);
         }
     } else {
         int32_t diff = 32767 - delay_time;
-        eff_delay_time = delay_time + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
+        eff_delay_time = delay_time + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
     }
 
     delay_fx.process(L, L, R, R,
-                     delay_mix, eff_delay_time, delay_feedback, freeze, cv1, cv2, eff_global_noise_scale);
+                     delay_mix, eff_delay_time, delay_feedback, freeze, 0, cv2, eff_global_noise_scale);
 
     // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
     int32_t eff_glitch_mix   = glitch_mix;
@@ -245,32 +275,85 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         eff_glitch_speed = p.glitch_speed;
         scrub_offset     = p.glitch_mix;
     } else {
-        eff_glitch_mix   = scale_grit(glitch_mix, 32767, grittiness_macro);
-        eff_glitch_speed = scale_grit(glitch_speed, 32767, grittiness_macro);
+        eff_glitch_mix   = scale_grit(glitch_mix, 32767, eff_grittiness);
+        eff_glitch_speed = scale_grit(glitch_speed, 32767, eff_grittiness);
     }
-    const int32_t eff_glitch_feedback = scale_grit(glitch_feedback, 32767, grittiness_macro);
+    const int32_t eff_glitch_feedback = scale_grit(glitch_feedback, 32767, eff_grittiness);
 
     glitcher.process(L, L, R, R,
                      eff_glitch_mix, eff_glitch_size, eff_glitch_speed,
                      stutter, is_freeze_page || freeze,
                      cv1, cv2, rand_seed,
-                     scrub_offset, eff_glitch_feedback, eff_global_noise_scale);
+                     scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
+                     pulse1_live, p1_rising, p1_val,
+                     pulse2_live, p2_rising, p2_val,
+                     clk_period_samples);
 
     // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
     int32_t eff_filter_res = filter_res;
-    if (grittiness_macro < 16384) {
+    if (eff_grittiness < 16384) {
         if (filter_res >= 18000) {
             int32_t diff = filter_res - 18000;
-            eff_filter_res = 18000 + ((diff * grittiness_macro) >> 14);
+            eff_filter_res = 18000 + ((diff * eff_grittiness) >> 14);
         }
     } else {
         int32_t diff = 32767 - filter_res;
-        eff_filter_res = filter_res + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
+        eff_filter_res = filter_res + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
     }
-    filter.process(L, L, R, R, filter_cutoff, eff_filter_res, filter_morph, cv1);
+    filter.process(L, L, R, R, filter_cutoff, eff_filter_res, filter_morph, 0);
 
-    // ── STAGE 6: Reverb (runs directly on Core 1 — no FIFO, no blocking) ────
+    // ── STAGE 6: Reverb ──────────────────────────────────────────────────────
     reverb.process(L, R, reverb_mix, reverb_size, reverb_fb_glitch);
+
+    // --- CV Outputs (Envelope Follower and Arpeggiator CV / LFO) ---
+    // CV Out 1: envelope follower of the audio signal (fast attack, slow decay)
+    int32_t env_in = (L < 0 ? -L : L) + (R < 0 ? -R : R);
+    static int32_t env_followed = 0;
+    if (env_in > env_followed) {
+        env_followed += ((env_in - env_followed) * 8192) >> 15;
+    } else {
+        env_followed += ((env_in - env_followed) * 256) >> 15;
+    }
+    int16_t cv_out1_val = -2048 + ((env_followed * 4095) >> 15);
+    CVOut1(cv_out1_val);
+
+    // CV Out 2: calibrated 1V/Octave MIDI Note in Zone 3 arpeggiator, or slow LFO in other zones
+    if (glitcher.active && (eff_glitch_speed >= 19661 && eff_glitch_speed < 26214)) {
+        static const int8_t semitone_offsets[8] = {0, 4, 7, 12, -12, -5, 0, -12};
+        uint8_t note = 60 + semitone_offsets[glitcher.arpeggio_step & 7];
+        CVOut2MIDINote(note);
+    } else {
+        static uint16_t lfo_phase = 0;
+        lfo_phase += 16;
+        int32_t lfo_tri = (lfo_phase < 32768) ? ((lfo_phase << 1) - 32768) : (32767 - ((lfo_phase - 32768) << 1));
+        int16_t cv_out2_val = (lfo_tri * 2047) >> 15;
+        CVOut2(cv_out2_val);
+    }
+
+    // Rhythmic trigger outputs
+    static int16_t p1_trig_timer = 0;
+    static int16_t p2_trig_timer = 0;
+    if (glitcher.trig_out1) {
+        glitcher.trig_out1 = false;
+        p1_trig_timer = 48; // 2 ms pulse
+    }
+    if (glitcher.trig_out2) {
+        glitcher.trig_out2 = false;
+        p2_trig_timer = 48; // 2 ms pulse
+    }
+    
+    if (p1_trig_timer > 0) {
+        p1_trig_timer--;
+        PulseOut1(true);
+    } else {
+        PulseOut1(false);
+    }
+    if (p2_trig_timer > 0) {
+        p2_trig_timer--;
+        PulseOut2(true);
+    } else {
+        PulseOut2(false);
+    }
 
     // --- Output ---
     // Gain makeup: scale back up by 6dB (shift left by 1) to restore output levels
@@ -826,6 +909,10 @@ void BendsCard::tick_ui_once() {
         p.stutter = pulse1_live && PulseIn1();
         p.cv1 = cv1_live ? CVIn1() : 0;
         p.cv2 = cv2_live ? CVIn2() : 0;
+        p.pulse1_live = pulse1_live;
+        p.pulse2_live = pulse2_live;
+        p.cv1_live = cv1_live;
+        p.cv2_live = cv2_live;
 
         p.no_audio1 = debounced_no_audio1;
         p.no_audio2 = debounced_no_audio2;
