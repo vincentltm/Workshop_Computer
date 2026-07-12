@@ -330,16 +330,11 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         CVOut2(cv_out2_val);
     }
 
-    // Rhythmic trigger outputs
+    // Rhythmic trigger outputs & Glitchy Square-Wave Audio Output
     static int16_t p1_trig_timer = 0;
-    static int16_t p2_trig_timer = 0;
     if (glitcher.trig_out1) {
         glitcher.trig_out1 = false;
         p1_trig_timer = 48; // 2 ms pulse
-    }
-    if (glitcher.trig_out2) {
-        glitcher.trig_out2 = false;
-        p2_trig_timer = 48; // 2 ms pulse
     }
     
     if (p1_trig_timer > 0) {
@@ -348,9 +343,21 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     } else {
         PulseOut1(false);
     }
-    if (p2_trig_timer > 0) {
-        p2_trig_timer--;
-        PulseOut2(true);
+
+    // Pulse 2 outputs raw glitchy square-wave audio when active for Eurorack mixing/filtering
+    static uint32_t square_phase = 0;
+    if (glitcher.active) {
+        int32_t abs_speed = glitcher.current_speed_q16 < 0 ? -glitcher.current_speed_q16 : glitcher.current_speed_q16;
+        square_phase += (abs_speed * 11) / 1200; // maps 1.0x speed to 220Hz
+        bool sq_val = (square_phase & 0x80000000) != 0;
+        
+        // In Zone 4 (Chaos), inject high-frequency digital XOR static/noise
+        if (eff_glitch_speed >= 26214) {
+            if ((fast_rand(rand_seed) & 0x7FFF) < 4096) {
+                sq_val = !sq_val;
+            }
+        }
+        PulseOut2(sq_val);
     } else {
         PulseOut2(false);
     }
