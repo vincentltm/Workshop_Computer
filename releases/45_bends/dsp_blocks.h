@@ -1000,38 +1000,51 @@ inline int16_t decode_mulaw(uint8_t u_val) {
 
 // Zoned speed determination helper. Placed in FLASH (not RAM) to save memory,
 // since it is only called on grain boundaries/initialization, not per-sample.
-__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed, uint8_t arp_step) {
+__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed, uint8_t arp_step, int32_t loop_len) {
     int32_t base_speed;
 
-    if (sq < 6554) {
-        // Zone 0: always 1x forward — pure rhythmic stutter, no pitch change
-        base_speed = 65536;
-    } else if (sq < 13107) {
-        // Zone 1: tonal octave family {0.5x, 1x, 2x} — 1x stays dominant
-        if ((int32_t)(fast_rand(seed) & 0x7FFF) < 16384) {
-            base_speed = (fast_rand(seed) & 1) ? 131072 : 32768; // 2x or 0.5x
+    // If the loop length is short, keep it clean (stuck CD/tape scrub style) rather than chaotic metallic buzzes
+    bool force_clean = (loop_len < 768);
+
+    if (force_clean) {
+        // At short loop lengths, limit to 1x forward or 1x reverse
+        if (sq < 6554) {
+            base_speed = 65536; // 1x fwd
         } else {
-            base_speed = 65536; // 1x
+            base_speed = (fast_rand(seed) & 1) ? 65536 : -65536; // 1x fwd or 1x rev
         }
-    } else if (sq < 19661) {
-        // Zone 2: Melodic Pentatonic Slices (static pitch per stutter event)
-        static const int32_t penta[6] = {65536, 81920, 98304, 131072, 32768, 49152};
-        uint32_t choice = ((fast_rand(seed) & 0xFFFF) * 6) >> 16;
-        base_speed = penta[choice];
-    } else if (sq < 26214) {
-        // Zone 3: Melodic Arpeggiator Sequencer (advances step on every repeat)
-        static const int32_t arp_seq[8] = {65536, 81920, 98304, 131072, 32768, 49152, -65536, -32768};
-        base_speed = arp_seq[arp_step & 7];
     } else {
-        // Zone 4: full chaos — all 6 speeds equally weighted
-        uint32_t c = ((fast_rand(seed) & 0xFFFF) * 6) >> 16; // 0..5
-        switch (c) {
-            case 0:  base_speed =  65536;  break; // 1x fwd
-            case 1:  base_speed =  131072; break; // 2x fwd
-            case 2:  base_speed =  32768;  break; // 0.5x fwd
-            case 3:  base_speed = -65536;  break; // 1x rev
-            case 4:  base_speed = -131072; break; // 2x rev
-            default: base_speed = -32768;  break; // 0.5x rev
+        if (sq < 6554) {
+            // Zone 0: always 1x forward — pure rhythmic stutter, no pitch change
+            base_speed = 65536;
+        } else if (sq < 13107) {
+            // Zone 1: always 1x forward or 1x reverse (direction changes, no pitch shifts)
+            base_speed = (fast_rand(seed) & 1) ? 65536 : -65536;
+        } else if (sq < 19661) {
+            // Zone 2: tonal octave family {0.5x, 1x, 2x, -0.5x, -1x}
+            uint32_t choice = ((fast_rand(seed) & 0xFFFF) * 5) >> 16;
+            switch (choice) {
+                case 0:  base_speed =  65536;  break; // 1x fwd
+                case 1:  base_speed =  131072; break; // 2x fwd
+                case 2:  base_speed =  32768;  break; // 0.5x fwd
+                case 3:  base_speed = -65536;  break; // 1x rev
+                default: base_speed = -32768;  break; // 0.5x rev
+            }
+        } else if (sq < 26214) {
+            // Zone 3: Melodic Pentatonic Arpeggiator (advances step on every repeat)
+            static const int32_t arp_seq[8] = {65536, 81920, 98304, 131072, 32768, 49152, -65536, -32768};
+            base_speed = arp_seq[arp_step & 7];
+        } else {
+            // Zone 4: full chaos — all 6 speeds equally weighted
+            uint32_t c = ((fast_rand(seed) & 0xFFFF) * 6) >> 16; // 0..5
+            switch (c) {
+                case 0:  base_speed =  65536;  break; // 1x fwd
+                case 1:  base_speed =  131072; break; // 2x fwd
+                case 2:  base_speed =  32768;  break; // 0.5x fwd
+                case 3:  base_speed = -65536;  break; // 1x rev
+                case 4:  base_speed = -131072; break; // 2x rev
+                default: base_speed = -32768;  break; // 0.5x rev
+            }
         }
     }
 
@@ -1392,7 +1405,7 @@ struct GlitcherBlock {
                     
                     // Determine initial speed/direction for this glitch grain
                     arpeggio_step = 0;
-                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step);
+                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
                     speed_q16 = current_speed_q16;
                     
                     rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
@@ -1466,7 +1479,7 @@ struct GlitcherBlock {
                         bool reroll_every_boundary = (speedQuant >= 19661);
                         if (reroll_every_boundary || sample_ctr >= 1024) {
                             arpeggio_step++;
-                            current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step);
+                            current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
                             sample_ctr = 0;
                         }
                         speed_q16 = current_speed_q16;
