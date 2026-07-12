@@ -1238,7 +1238,7 @@ struct GlitcherBlock {
             sample_ctr++;
 
             // Natural boundary check
-            bool crossed = (rd_q16 >= ((int64_t)current_loop_len << 16));
+            bool crossed = (rd_q16 >= (int64_t)(current_loop_len << 16));
 
             if (crossed) {
                 trig_out1 = true; // Output loop sync pulse
@@ -1300,7 +1300,7 @@ struct GlitcherBlock {
             };
 
             read_buf(loop_start + rd_q16, sL, sR);
-            current_g711_sample = bufL[((loop_start + rd_q16) >> 16) & 0x7FFF];
+            current_g711_sample = bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x7FFF];
 
             if (evolve_active) {
                 int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
@@ -1445,7 +1445,7 @@ struct GlitcherBlock {
                     current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
                     speed_q16 = current_speed_q16;
                     
-                    rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
+                    rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
                     xfade_ctr = 0;
                     dry_fade_ctr = 0;
                     sample_ctr = 0;
@@ -1487,7 +1487,7 @@ struct GlitcherBlock {
 
                 bool crossed = false;
                 if (speed_q16 >= 0) {
-                    if (rd_q16 >= ((int64_t)current_loop_len << 16)) {
+                    if (rd_q16 >= (int64_t)(current_loop_len << 16)) {
                         crossed = true;
                     }
                 } else {
@@ -1574,7 +1574,7 @@ struct GlitcherBlock {
                         if (speed_q16 >= 0) {
                             rd_q16 = 0;
                         } else {
-                            rd_q16 = ((int64_t)current_loop_len << 16);
+                            rd_q16 = (int64_t)(current_loop_len << 16);
                         }
                         xfade_len = cur_xfade;
                         xfade_ctr = cur_xfade;
@@ -1595,7 +1595,7 @@ struct GlitcherBlock {
                 if (active) {
                     int16_t sL, sR;
                     read_buf(loop_start + rd_q16, sL, sR);
-                    current_g711_sample = bufL[((loop_start + rd_q16) >> 16) & 0x7FFF];
+                    current_g711_sample = bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x7FFF];
 
                     if (xfade_ctr > 0) {
                         int16_t xL, xR;
