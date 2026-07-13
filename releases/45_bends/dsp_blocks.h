@@ -801,7 +801,8 @@ struct MultiTapDelayBlock {
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t time, int32_t feedback,
-                 bool freeze, int32_t cv1Warp, int32_t cv2Corruption, int32_t globalNoiseScale = 16384)
+                 bool freeze, int32_t cv1Warp, int32_t cv2Corruption, int32_t globalNoiseScale = 16384,
+                 bool pulse1_live = false, uint32_t clk_period_samples = 0)
     {
         // ── PT2399 Slow-Clock Delay Decimation ──
         uint32_t clk_inc = 65536;
@@ -831,6 +832,17 @@ struct MultiTapDelayBlock {
         }
         clk_phase -= 65536;
 
+        int32_t target_t = 24 + ((time * 19700) >> 15);
+        if (pulse1_live && clk_period_samples > 240) {
+            static const int32_t div_num[8] = {1, 2, 3, 4, 6, 8, 12, 16};
+            int32_t step = (time * 8) >> 15;
+            if (step < 0) step = 0;
+            if (step > 7) step = 7;
+            target_t = (clk_period_samples * div_num[step]) / 16;
+        }
+        target_t = target_t + (cv1Warp * 4);
+        target_t = clamp_i32(target_t, 24, 20350);
+
         if (mainMix < 50) {
             outL = inL;
             outR = inR;
@@ -844,17 +856,9 @@ struct MultiTapDelayBlock {
                 wr = wr + 1;
                 if (wr >= 20480) wr = 0;
             }
-        int32_t mapped_time = 24 + ((time * 19700) >> 15);
-            int32_t target_t = mapped_time + (cv1Warp * 4);
-            target_t = clamp_i32(target_t, 24, 20350);
             IIR_SMOOTH(smooth_t, target_t, 12);
             return;
         }
-
-        // Slew delay time with CV1 pitch-warp
-        int32_t mapped_time = 24 + ((time * 19700) >> 15);
-        int32_t target_t = mapped_time + (cv1Warp * 4);
-        target_t = clamp_i32(target_t, 24, 20350);
 
         IIR_SMOOTH(smooth_t, target_t, 12);
 

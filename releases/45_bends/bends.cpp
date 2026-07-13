@@ -261,7 +261,8 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     delay_fx.process(L, L, R, R,
-                     delay_mix, eff_delay_time, delay_feedback, freeze, 0, cv2, eff_global_noise_scale);
+                     delay_mix, eff_delay_time, delay_feedback, freeze, 0, cv2, eff_global_noise_scale,
+                     pulse1_live, clk_period_samples);
 
     // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
     int32_t eff_glitch_mix   = glitch_mix;
