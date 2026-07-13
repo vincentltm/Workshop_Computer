@@ -1082,6 +1082,7 @@ struct GlitcherBlock {
 
     bool     active     = false;
     uint16_t freeze_wr  = 0;       // write pointer at moment of freeze
+    uint32_t frozen_clk_period = 0; // clock period captured at moment of freeze
 
     // Playback pointer (Q16: integer + 16-bit fraction relative to loop_start)
     int64_t  rd_q16     = 0;
@@ -1164,6 +1165,7 @@ struct GlitcherBlock {
         trig_out1 = false;
         trig_out2 = false;
         current_g711_sample = 128;
+        frozen_clk_period = 0;
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -1222,34 +1224,47 @@ struct GlitcherBlock {
 
         // ── FREEZE MODE ──────────────────────────────────────────────────────
         if (freezeGate || (pulse2_live && p2_gate)) {
+            // Determine active clock period to use (live clock takes priority and updates stored clock)
+            uint32_t active_clk = 0;
+            if (pulse1_live && clk_period_samples > 240) {
+                active_clk = clk_period_samples;
+                frozen_clk_period = clk_period_samples;
+            } else if (frozen_clk_period > 240) {
+                active_clk = frozen_clk_period;
+            }
+
             // 1. Lock recording and initialize freeze on transition
             if (!active) {
                 active = true;
                 int32_t target_wr = wr;
                 if (pulse1_live && clk_period_samples > 240) {
                     target_wr = wr - (int32_t)clk_timer;
+                    frozen_clk_period = clk_period_samples;
+                } else {
+                    frozen_clk_period = 0;
                 }
+                active_clk = frozen_clk_period;
                 freeze_wr = target_wr & 0x7FFF;
                 
                 int32_t init_len = 128 + size;
-                if (pulse1_live && clk_period_samples > 240) {
+                if (active_clk > 240) {
                     if (size < 6000) {
-                        init_len = clk_period_samples / 16;
+                        init_len = active_clk / 16;
                     } else if (size < 12000) {
-                        init_len = clk_period_samples / 8;
+                        init_len = active_clk / 8;
                     } else if (size < 18000) {
-                        init_len = clk_period_samples / 4;
+                        init_len = active_clk / 4;
                     } else if (size < 24000) {
-                        init_len = clk_period_samples / 2;
+                        init_len = active_clk / 2;
                     } else {
-                        init_len = clk_period_samples;
+                        init_len = active_clk;
                     }
                 }
                 current_loop_len = clamp_i32(init_len, 128, 32760);
 
                 int32_t init_offset = ((32767 - scrubOffset) * 32760) >> 15;
-                if (pulse1_live && clk_period_samples > 240) {
-                    int32_t step_size = clk_period_samples / 16;
+                if (active_clk > 240) {
+                    int32_t step_size = active_clk / 16;
                     if (step_size < 1) step_size = 1;
                     int32_t total_steps = 32760 / step_size;
                     if (total_steps < 1) total_steps = 1;
@@ -1290,17 +1305,17 @@ struct GlitcherBlock {
             }
 
             int32_t loop_size = 128 + size;
-            if (pulse1_live && clk_period_samples > 240) {
+            if (active_clk > 240) {
                 if (size < 6000) {
-                    loop_size = clk_period_samples / 16;
+                    loop_size = active_clk / 16;
                 } else if (size < 12000) {
-                    loop_size = clk_period_samples / 8;
+                    loop_size = active_clk / 8;
                 } else if (size < 18000) {
-                    loop_size = clk_period_samples / 4;
+                    loop_size = active_clk / 4;
                 } else if (size < 24000) {
-                    loop_size = clk_period_samples / 2;
+                    loop_size = active_clk / 2;
                 } else {
-                    loop_size = clk_period_samples;
+                    loop_size = active_clk;
                 }
             }
             loop_size = clamp_i32(loop_size, 128, 32760);
@@ -1311,9 +1326,9 @@ struct GlitcherBlock {
             int32_t cv1_offset = cv1Warp * 6; // sweeps ~±12288 samples
             int32_t raw_offset = ((32767 - scrubOffset) * 32760) >> 15;
             int32_t target_offset = raw_offset + cv1_offset;
-            if (pulse1_live && clk_period_samples > 240) {
+            if (active_clk > 240) {
                 // Snap scrub position to 1/16 note steps of the clock
-                int32_t step_size = clk_period_samples / 16;
+                int32_t step_size = active_clk / 16;
                 if (step_size < 1) step_size = 1;
                 int32_t total_steps = 32760 / step_size;
                 if (total_steps < 1) total_steps = 1;
