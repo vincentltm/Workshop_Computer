@@ -1531,6 +1531,9 @@ struct GlitcherBlock {
                     int32_t size_factor = sf_lut[size_steps];
                     int32_t loop_prob = finalProb + (((32767 - finalProb) * size_factor) >> 15);
                     if (loop_prob > 32767) loop_prob = 32767;
+                    if (is_clock_sync) {
+                        loop_prob = finalProb;
+                    }
 
                     bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
