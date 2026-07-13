@@ -757,6 +757,8 @@ void BendsCard::tick_ui_once() {
             if (!macro_adjusted_this_hold) {
                 if (currentPage >= 6) {
                     currentPage = 0;
+                    freeze_latched = false;
+                    is_frozen = freeze_latched || pulse2_freeze;
                 } else {
                     currentPage = (currentPage + 5) % 6;
                 }
@@ -814,6 +816,8 @@ void BendsCard::tick_ui_once() {
                     if (!macro_adjusted_this_hold) {
                         if (currentPage >= 6) {
                             currentPage = 0;
+                            freeze_latched = false;
+                            is_frozen = freeze_latched || pulse2_freeze;
                         } else {
                             currentPage = (currentPage + 1) % 6;
                         }
@@ -825,7 +829,16 @@ void BendsCard::tick_ui_once() {
                     }
                 } else if (last_debounced_sw == ComputerCard::Switch::Up) {
                     // Flick UP
-                    freeze_latched = !freeze_latched;
+                    if (currentPage != 7) {
+                        if (currentPage < 6) {
+                            pageBeforeUp = currentPage;
+                        }
+                        currentPage = 7;
+                        freeze_latched = true;
+                    } else {
+                        currentPage = pageBeforeUp;
+                        freeze_latched = false;
+                    }
                     is_frozen = freeze_latched || pulse2_freeze;
                     lockMain.engage(dzMain, vp[currentPage][0]);
                     lockX.engage(dzX, vp[currentPage][1]);
@@ -835,7 +848,9 @@ void BendsCard::tick_ui_once() {
             } else {
                 // Hold release action
                 if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Releasing Switch UP: return to the page we were on before
+                    // Releasing Switch UP: return to the page we were on before and unfreeze
+                    freeze_latched = false;
+                    is_frozen = freeze_latched || pulse2_freeze;
                     if (currentPage >= 6) {
                         currentPage = pageBeforeUp;
                         lockMain.engage(dzMain, vp[currentPage][0]);
