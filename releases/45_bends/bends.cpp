@@ -610,6 +610,20 @@ void BendsCard::tick_ui_once() {
     bool pulse2_freeze = pulse2_live && PulseIn2();
     bool is_frozen = freeze_latched || pulse2_freeze;
 
+    static bool last_is_frozen = false;
+    if (is_frozen && !last_is_frozen) {
+        // Reset Freeze Page parameters to sensible defaults on freeze transition
+        vp[7][0] = 0;     // Scrub position = 0 (start of beat)
+        vp[7][1] = 16384; // Playback speed = 1.0x (center)
+        vp[7][2] = 32767; // Loop size = maximum (1/1 full beat)
+        
+        // Re-engage knob locks to prevent sudden physical knob jumps
+        lockMain.engage(dzMain, vp[currentPage][0]);
+        lockX.engage(dzX, vp[currentPage][1]);
+        lockY.engage(dzY, vp[currentPage][2]);
+    }
+    last_is_frozen = is_frozen;
+
     // Debounce Audio 1 and Audio 2 connection states
     static int audio1_connected_ctr = 0;
     static int audio2_connected_ctr = 0;
@@ -910,7 +924,7 @@ void BendsCard::tick_ui_once() {
         p.delay_feedback = vp[2][2];
 
         bool is_freeze_page = (currentPage == 7);
-        if (is_freeze_page) {
+        if (is_freeze_page || is_frozen) {
             p.glitch_mix   = vp[7][0]; // scrub offset
             p.glitch_speed = vp[7][1]; // speed
             p.glitch_size  = vp[7][2]; // loop size
