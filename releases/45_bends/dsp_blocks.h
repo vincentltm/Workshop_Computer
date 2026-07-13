@@ -1396,7 +1396,7 @@ struct GlitcherBlock {
 
                 bool trigger = false;
                 if (pulse1_live) {
-                    trigger = p1_rising;
+                    trigger = (p1_rising && (((fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector)) || glitchInjector;
                 } else {
                     trigger = ((wr & (uint16_t)(norm_loop_size - 1)) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector;
                 }
@@ -1514,11 +1514,9 @@ struct GlitcherBlock {
                     int32_t loop_prob = finalProb + (((32767 - finalProb) * size_factor) >> 15);
                     if (loop_prob > 32767) loop_prob = 32767;
 
-                    bool keep_looping = false;
+                    bool keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
                     if (pulse1_live) {
-                        keep_looping = p1_gate;
-                    } else {
-                        keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
+                        keep_looping = keep_looping || p1_gate;
                     }
 
                     if (keep_looping) {
