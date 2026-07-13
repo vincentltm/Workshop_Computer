@@ -1255,7 +1255,22 @@ struct GlitcherBlock {
                 active_offset = clamp_i32(init_offset, 0, 32760);
 
                 // Determine initial speed and rd_q16 direction
-                speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+                int32_t init_speed = 65536;
+                if (speedQuant > 18000) {
+                    init_speed = 65536 + (((speedQuant - 18000) * 65536) / 14767);
+                } else if (speedQuant < 14000) {
+                    init_speed = -65536 + ((speedQuant * 131072) / 14000);
+                }
+                const int32_t pitch_ratio_lut[25] = {
+                    32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
+                    69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
+                };
+                int32_t semitones = cv2Corruption / 170;
+                semitones = clamp_i32(semitones, -12, 12);
+                int32_t ratio = pitch_ratio_lut[semitones + 12];
+                init_speed = ((int64_t)init_speed * ratio) >> 16;
+                
+                speed_q16 = init_speed;
                 rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
 
                 xfade_ctr = 0;
@@ -1303,9 +1318,25 @@ struct GlitcherBlock {
             }
             target_offset = clamp_i32(target_offset, 0, 32760);
             
-            // Linear speed mapping: [0..32767] -> [0..131068] Q16 (0x to 2.0x, center is 1.0x)
-            int32_t base_speed = speedQuant << 2;
-            speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+            // Continuous tape speed mapping with a wide 1.0x center deadzone [14000..18000]
+            int32_t active_speed = 65536;
+            if (speedQuant > 18000) {
+                active_speed = 65536 + (((speedQuant - 18000) * 65536) / 14767);
+            } else if (speedQuant < 14000) {
+                active_speed = -65536 + ((speedQuant * 131072) / 14000);
+            }
+
+            // CV2 pitch ratio tracking
+            const int32_t pitch_ratio_lut[25] = {
+                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
+                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
+            };
+            int32_t semitones = cv2Corruption / 170;
+            semitones = clamp_i32(semitones, -12, 12);
+            int32_t ratio = pitch_ratio_lut[semitones + 12];
+            active_speed = ((int64_t)active_speed * ratio) >> 16;
+            
+            speed_q16 = active_speed;
 
             int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
 
