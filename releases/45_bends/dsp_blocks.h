@@ -1216,8 +1216,34 @@ struct GlitcherBlock {
             if (!active) {
                 active = true;
                 freeze_wr = wr;
-                current_loop_len = 128 + size;
-                active_offset = ((32767 - scrubOffset) * 32760) >> 15;
+                
+                int32_t init_len = 128 + size;
+                if (pulse1_live && clk_period_samples > 240) {
+                    if (size < 6000) {
+                        init_len = clk_period_samples / 16;
+                    } else if (size < 12000) {
+                        init_len = clk_period_samples / 8;
+                    } else if (size < 18000) {
+                        init_len = clk_period_samples / 4;
+                    } else if (size < 24000) {
+                        init_len = clk_period_samples / 2;
+                    } else {
+                        init_len = clk_period_samples;
+                    }
+                }
+                current_loop_len = clamp_i32(init_len, 128, 32760);
+
+                int32_t init_offset = ((32767 - scrubOffset) * 32760) >> 15;
+                if (pulse1_live && clk_period_samples > 240) {
+                    int32_t step_size = clk_period_samples / 16;
+                    if (step_size < 1) step_size = 1;
+                    int32_t total_steps = 32760 / step_size;
+                    if (total_steps < 1) total_steps = 1;
+                    int32_t step = (init_offset + (step_size / 2)) / step_size;
+                    init_offset = step * step_size;
+                }
+                active_offset = clamp_i32(init_offset, 0, 32760);
+
                 rd_q16 = 0;
                 xfade_ctr = 0;
                 dry_fade_ctr = 0;
@@ -1232,14 +1258,37 @@ struct GlitcherBlock {
             }
 
             int32_t loop_size = 128 + size;
+            if (pulse1_live && clk_period_samples > 240) {
+                if (size < 6000) {
+                    loop_size = clk_period_samples / 16;
+                } else if (size < 12000) {
+                    loop_size = clk_period_samples / 8;
+                } else if (size < 18000) {
+                    loop_size = clk_period_samples / 4;
+                } else if (size < 24000) {
+                    loop_size = clk_period_samples / 2;
+                } else {
+                    loop_size = clk_period_samples;
+                }
+            }
             loop_size = clamp_i32(loop_size, 128, 32760);
             int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
             if (cur_xfade < 4) cur_xfade = 4;
 
             // CV1 scrubs loop position when frozen:
             int32_t cv1_offset = cv1Warp * 6; // sweeps ~±12288 samples
-            int32_t target_offset = ((32767 - scrubOffset) * 32760) >> 15;
-            target_offset = clamp_i32(target_offset + cv1_offset, 0, 32760);
+            int32_t raw_offset = ((32767 - scrubOffset) * 32760) >> 15;
+            int32_t target_offset = raw_offset + cv1_offset;
+            if (pulse1_live && clk_period_samples > 240) {
+                // Snap scrub position to 1/16 note steps of the clock
+                int32_t step_size = clk_period_samples / 16;
+                if (step_size < 1) step_size = 1;
+                int32_t total_steps = 32760 / step_size;
+                if (total_steps < 1) total_steps = 1;
+                int32_t step = (target_offset + (step_size / 2)) / step_size;
+                target_offset = step * step_size;
+            }
+            target_offset = clamp_i32(target_offset, 0, 32760);
             
             // Linear speed mapping: [0..32767] -> [0..131068] Q16 (0x to 2.0x, center is 1.0x)
             int32_t base_speed = speedQuant << 2;
@@ -1253,6 +1302,9 @@ struct GlitcherBlock {
 
             // Natural boundary check
             bool crossed = (rd_q16 >= (int64_t)(current_loop_len << 16));
+            if (pulse1_live && p1_rising) {
+                crossed = true;
+            }
 
             if (crossed) {
                 trig_out1 = true; // Output loop sync pulse
