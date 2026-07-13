@@ -270,14 +270,21 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     int32_t eff_glitch_speed = glitch_speed;
     int32_t scrub_offset     = 0;
 
-    if (is_freeze_page || freeze) {
+    if (is_freeze_page) {
         eff_glitch_mix   = 32767;
         eff_glitch_size  = p.glitch_size;
         eff_glitch_speed = p.glitch_speed;
         scrub_offset     = p.glitch_mix;
+    } else if (freeze) {
+        eff_glitch_mix   = scale_grit(glitch_mix, 32767, eff_grittiness);
+        eff_glitch_size  = p.glitch_size;
+        eff_glitch_speed = p.glitch_speed;
+        scrub_offset     = 0;
     } else {
         eff_glitch_mix   = scale_grit(glitch_mix, 32767, eff_grittiness);
+        eff_glitch_size  = p.glitch_size;
         eff_glitch_speed = scale_grit(glitch_speed, 32767, eff_grittiness);
+        scrub_offset     = 0;
     }
     const int32_t eff_glitch_feedback = scale_grit(glitch_feedback, 32767, eff_grittiness);
 
@@ -903,7 +910,7 @@ void BendsCard::tick_ui_once() {
         p.delay_feedback = vp[2][2];
 
         bool is_freeze_page = (currentPage == 7);
-        if (is_freeze_page || is_frozen) {
+        if (is_freeze_page) {
             p.glitch_mix   = vp[7][0]; // scrub offset
             p.glitch_speed = vp[7][1]; // speed
             p.glitch_size  = vp[7][2]; // loop size

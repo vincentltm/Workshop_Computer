@@ -834,13 +834,13 @@ struct MultiTapDelayBlock {
 
         int32_t target_t = 24 + ((time * 19700) >> 15);
         if (pulse1_live && clk_period_samples > 240) {
-            if (time < 4096) {
-                // Karplus-Strong micro-delay range: 24 to 300 samples (non-synced)
-                target_t = 24 + ((time * 276) >> 12);
+            if (time < 8192) {
+                // Karplus-Strong micro-delay range: 24 to 400 samples (non-synced)
+                target_t = 24 + ((time * 376) >> 13);
             } else {
                 // Rhythmic clock sync subdivisions (1/16, 1/8, 3/16, 1/4, 3/8, 1/2, 1/1)
                 static const int32_t div_num[7] = {1, 2, 3, 4, 6, 8, 16};
-                int32_t step = ((time - 4096) * 7) / 28672;
+                int32_t step = ((time - 8192) * 7) / 24576;
                 if (step < 0) step = 0;
                 if (step > 6) step = 6;
                 target_t = (clk_period_samples * div_num[step]) / 16;
@@ -1254,7 +1254,10 @@ struct GlitcherBlock {
                 }
                 active_offset = clamp_i32(init_offset, 0, 32760);
 
-                rd_q16 = 0;
+                // Determine initial speed and rd_q16 direction
+                speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+                rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
+
                 xfade_ctr = 0;
                 dry_fade_ctr = 0;
                 sample_ctr = 0;
@@ -1303,7 +1306,6 @@ struct GlitcherBlock {
             // Linear speed mapping: [0..32767] -> [0..131068] Q16 (0x to 2.0x, center is 1.0x)
             int32_t base_speed = speedQuant << 2;
             speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
-            if (speed_q16 < 0) speed_q16 = 0;
 
             int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
 
@@ -1311,7 +1313,16 @@ struct GlitcherBlock {
             sample_ctr++;
 
             // Natural boundary check
-            bool crossed = (rd_q16 >= (int64_t)(current_loop_len << 16));
+            bool crossed = false;
+            if (speed_q16 >= 0) {
+                if (rd_q16 >= (int64_t)(current_loop_len << 16)) {
+                    crossed = true;
+                }
+            } else {
+                if (rd_q16 < 0) {
+                    crossed = true;
+                }
+            }
             if (pulse1_live && p1_rising) {
                 crossed = true;
             }
@@ -1321,7 +1332,7 @@ struct GlitcherBlock {
 
                 // Spawn next grain repeat at updated position/length targets
                 xfade_rd = loop_start + rd_q16;
-                rd_q16 = 0;
+                rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
                 xfade_len = cur_xfade;
                 xfade_ctr = cur_xfade;
                 xfade_step = (32767 << 15) / xfade_len;
