@@ -1164,13 +1164,27 @@ struct GlitcherBlock {
                  bool pulse2_live, bool p2_rising, bool p2_gate,
                  uint32_t clk_period_samples)
     {
-        bool want_active = glitchInjector || freezeGate;
+        bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
+        bool eff_glitchInjector = glitchInjector;
+        if (is_clock_sync) {
+            eff_glitchInjector = false;
+        }
+
+        bool want_active = eff_glitchInjector || freezeGate;
         if (pulse1_live) {
             want_active = p1_gate || freezeGate;
         }
         int32_t speed_q16 = 65536;
 
         if (mainProb < 50 && !want_active && !active && dry_fade_ctr == 0) {
+            outL = inL;
+            outR = inR;
+            bufL[wr] = encode_mulaw(inL);
+            bufR[wr] = encode_mulaw(inR);
+            wr = (wr + 1) & 0x7FFF;
+            return;
+        }
+        if (is_clock_sync && mainProb < 50 && !active && dry_fade_ctr == 0) {
             outL = inL;
             outR = inR;
             bufL[wr] = encode_mulaw(inL);
@@ -1396,7 +1410,7 @@ struct GlitcherBlock {
 
                 bool trigger = false;
                 if (pulse1_live) {
-                    trigger = (p1_rising && (((fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector)) || glitchInjector;
+                    trigger = (p1_rising && (((fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || eff_glitchInjector)) || eff_glitchInjector;
                 } else {
                     trigger = ((wr & (uint16_t)(norm_loop_size - 1)) == 0 && (fast_rand(rand_seed) & 0x7FFF) < (uint32_t)finalProb) || glitchInjector;
                 }
@@ -1514,9 +1528,13 @@ struct GlitcherBlock {
                     int32_t loop_prob = finalProb + (((32767 - finalProb) * size_factor) >> 15);
                     if (loop_prob > 32767) loop_prob = 32767;
 
-                    bool keep_looping = (roll < (uint32_t)loop_prob) || glitchInjector;
+                    bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
-                        keep_looping = keep_looping || p1_gate;
+                        if (is_clock_sync) {
+                            keep_looping = (roll < (uint32_t)loop_prob);
+                        } else {
+                            keep_looping = keep_looping || p1_gate;
+                        }
                     }
 
                     if (keep_looping) {
