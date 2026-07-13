@@ -1484,7 +1484,11 @@ struct GlitcherBlock {
                 };
 
                 int32_t offset_samples = (scrubOffset * 16384) >> 15;
-                int32_t loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x7FFF) << 16;
+                int32_t lookback = current_loop_len;
+                if (pulse1_live && clk_period_samples > 240) {
+                    lookback = clk_period_samples;
+                }
+                int32_t loop_start = (((int32_t)freeze_wr - lookback - offset_samples) & 0x7FFF) << 16;
 
                 // Step arpeggiator on Pulse 2 rising edge
                 if (pulse2_live && p2_rising) {
