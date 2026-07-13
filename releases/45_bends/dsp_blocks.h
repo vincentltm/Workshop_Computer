@@ -1172,7 +1172,7 @@ struct GlitcherBlock {
                  uint32_t &rand_seed, int32_t scrubOffset, int32_t glitchFeedback, int32_t globalNoiseScale,
                  bool pulse1_live, bool p1_rising, bool p1_gate,
                  bool pulse2_live, bool p2_rising, bool p2_gate,
-                 uint32_t clk_period_samples)
+                 uint32_t clk_period_samples, uint32_t clk_timer = 0)
     {
         bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
         bool eff_glitchInjector = glitchInjector;
@@ -1225,7 +1225,11 @@ struct GlitcherBlock {
             // 1. Lock recording and initialize freeze on transition
             if (!active) {
                 active = true;
-                freeze_wr = wr;
+                int32_t target_wr = wr;
+                if (pulse1_live && clk_period_samples > 240) {
+                    target_wr = wr - (int32_t)clk_timer;
+                }
+                freeze_wr = target_wr & 0x7FFF;
                 
                 int32_t init_len = 128 + size;
                 if (pulse1_live && clk_period_samples > 240) {

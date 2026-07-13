@@ -295,7 +295,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
                      pulse1_live, p1_rising, p1_val,
                      pulse2_live, p2_rising, p2_val,
-                     clk_period_samples);
+                     clk_period_samples, clk_timer);
 
     // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
     int32_t eff_filter_res = filter_res;
