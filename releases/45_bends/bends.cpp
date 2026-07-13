@@ -445,6 +445,7 @@ static int32_t smMain = 0, smX = 0, smY = 0;
 
 // Last known switch state (for debounce edge detection)
 static bool freeze_latched = false;
+static bool is_frozen       = false;
 
 
 
@@ -514,7 +515,7 @@ static void push_params_to_core1() {
         p.no_audio1 = true;
         p.no_audio2 = true;
 
-        p.is_freeze_page = (currentPage == 7);
+        p.is_freeze_page = is_frozen;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
@@ -608,7 +609,7 @@ void BendsCard::tick_ui_once() {
     bool cv2_live    = (cv2_connected_ctr    >= JACK_DEBOUNCE);
 
     bool pulse2_freeze = pulse2_live && PulseIn2();
-    bool is_frozen = freeze_latched || pulse2_freeze;
+    is_frozen = freeze_latched || pulse2_freeze;
 
     static bool last_is_frozen = false;
     if (is_frozen && !last_is_frozen) {
@@ -755,10 +756,10 @@ void BendsCard::tick_ui_once() {
             }
 
             if (!macro_adjusted_this_hold) {
-                if (currentPage >= 6) {
-                    currentPage = 0;
+                if (is_frozen) {
                     freeze_latched = false;
-                    is_frozen = freeze_latched || pulse2_freeze;
+                    is_frozen = false;
+                    currentPage = 2;
                 } else {
                     currentPage = (currentPage + 5) % 6;
                 }
@@ -789,11 +790,13 @@ void BendsCard::tick_ui_once() {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
                     } else if (debounced_sw == ComputerCard::Switch::Up) {
                         // Hold UP
-                        if (currentPage != 7) {
-                            if (currentPage < 6) {
+                        if (!is_frozen) {
+                            if (currentPage != 3) {
                                 pageBeforeUp = currentPage;
+                                currentPage = 3;
+                            } else {
+                                pageBeforeUp = 3;
                             }
-                            currentPage = 7;
                             freeze_latched = true;
                             is_frozen = true;
                             lockMain.engage(dzMain, vp[currentPage][0]);
@@ -814,10 +817,10 @@ void BendsCard::tick_ui_once() {
                 if (last_debounced_sw == ComputerCard::Switch::Down) {
                     // Flick DOWN
                     if (!macro_adjusted_this_hold) {
-                        if (currentPage >= 6) {
-                            currentPage = 0;
+                        if (is_frozen) {
                             freeze_latched = false;
-                            is_frozen = freeze_latched || pulse2_freeze;
+                            is_frozen = false;
+                            currentPage = 4;
                         } else {
                             currentPage = (currentPage + 1) % 6;
                         }
@@ -829,11 +832,13 @@ void BendsCard::tick_ui_once() {
                     }
                 } else if (last_debounced_sw == ComputerCard::Switch::Up) {
                     // Flick UP
-                    if (currentPage != 7) {
-                        if (currentPage < 6) {
+                    if (!is_frozen) {
+                        if (currentPage != 3) {
                             pageBeforeUp = currentPage;
+                            currentPage = 3;
+                        } else {
+                            pageBeforeUp = 3;
                         }
-                        currentPage = 7;
                         freeze_latched = true;
                     } else {
                         currentPage = pageBeforeUp;
@@ -851,13 +856,11 @@ void BendsCard::tick_ui_once() {
                     // Releasing Switch UP: return to the page we were on before and unfreeze
                     freeze_latched = false;
                     is_frozen = freeze_latched || pulse2_freeze;
-                    if (currentPage >= 6) {
-                        currentPage = pageBeforeUp;
-                        lockMain.engage(dzMain, vp[currentPage][0]);
-                        lockX.engage(dzX, vp[currentPage][1]);
-                        lockY.engage(dzY, vp[currentPage][2]);
-                        param_changed = true;
-                    }
+                    currentPage = pageBeforeUp;
+                    lockMain.engage(dzMain, vp[currentPage][0]);
+                    lockX.engage(dzX, vp[currentPage][1]);
+                    lockY.engage(dzY, vp[currentPage][2]);
+                    param_changed = true;
                 }
             }
         }
@@ -889,19 +892,27 @@ void BendsCard::tick_ui_once() {
         }
     } else {
         int32_t nextMain = lockMain.update(dzMain);
-        if (vp[currentPage][0] != nextMain) {
-            vp[currentPage][0] = nextMain;
+        int target_page = currentPage;
+        if (is_frozen && currentPage == 3) {
+            target_page = 7;
+        }
+        if (vp[target_page][0] != nextMain) {
+            vp[target_page][0] = nextMain;
             param_changed = true;
         }
     }
     int32_t nextX = lockX.update(dzX);
-    if (vp[currentPage][1] != nextX) {
-        vp[currentPage][1] = nextX;
+    int target_page_xy = currentPage;
+    if (is_frozen && currentPage == 3) {
+        target_page_xy = 7;
+    }
+    if (vp[target_page_xy][1] != nextX) {
+        vp[target_page_xy][1] = nextX;
         param_changed = true;
     }
     int32_t nextY = lockY.update(dzY);
-    if (vp[currentPage][2] != nextY) {
-        vp[currentPage][2] = nextY;
+    if (vp[target_page_xy][2] != nextY) {
+        vp[target_page_xy][2] = nextY;
         param_changed = true;
     }
 
@@ -938,7 +949,7 @@ void BendsCard::tick_ui_once() {
         p.delay_time     = scaled_delay_time;
         p.delay_feedback = vp[2][2];
 
-        bool is_freeze_page = (currentPage == 7);
+        bool is_freeze_page = is_frozen;
         if (is_freeze_page || is_frozen) {
             p.glitch_mix   = vp[7][0]; // scrub offset
             p.glitch_speed = vp[7][1]; // speed
@@ -1016,7 +1027,7 @@ void BendsCard::tick_ui_once() {
         g_params_idx.store(next_idx, std::memory_order_release);
     }
     // ── 6. LED visualisation ──────────────────────────────────────────────
-    bool is_freeze_page = (currentPage == 7);
+    bool is_freeze_page = is_frozen;
 
     if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int16_t bar_leds[6];
