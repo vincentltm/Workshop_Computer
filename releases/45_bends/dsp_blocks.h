@@ -1531,7 +1531,11 @@ struct GlitcherBlock {
                     bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
                         if (is_clock_sync) {
-                            keep_looping = (roll < (uint32_t)loop_prob);
+                            if (p1_rising) {
+                                keep_looping = (roll < (uint32_t)loop_prob);
+                            } else {
+                                keep_looping = true;
+                            }
                         } else {
                             keep_looping = keep_looping || p1_gate;
                         }
