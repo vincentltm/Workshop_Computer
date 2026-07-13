@@ -834,11 +834,17 @@ struct MultiTapDelayBlock {
 
         int32_t target_t = 24 + ((time * 19700) >> 15);
         if (pulse1_live && clk_period_samples > 240) {
-            static const int32_t div_num[8] = {1, 2, 3, 4, 6, 8, 12, 16};
-            int32_t step = (time * 8) >> 15;
-            if (step < 0) step = 0;
-            if (step > 7) step = 7;
-            target_t = (clk_period_samples * div_num[step]) / 16;
+            if (time < 4096) {
+                // Karplus-Strong micro-delay range: 24 to 300 samples (non-synced)
+                target_t = 24 + ((time * 276) >> 12);
+            } else {
+                // Rhythmic clock sync subdivisions (1/16, 1/8, 3/16, 1/4, 3/8, 1/2, 1/1)
+                static const int32_t div_num[7] = {1, 2, 3, 4, 6, 8, 16};
+                int32_t step = ((time - 4096) * 7) / 28672;
+                if (step < 0) step = 0;
+                if (step > 6) step = 6;
+                target_t = (clk_period_samples * div_num[step]) / 16;
+            }
         }
         target_t = target_t + (cv1Warp * 4);
         target_t = clamp_i32(target_t, 24, 20350);
