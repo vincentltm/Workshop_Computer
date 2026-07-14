@@ -95,9 +95,8 @@ struct ChorusBlock {
     int16_t  delayR[1024];
     uint16_t write_ptr  = 0;
 
-    // LFO phase accumulators
+    // LFO phase accumulator – wraps naturally
     uint16_t lfo_phase  = 0;
-    uint16_t wow_phase  = 0;
 
     // 1-pole LPF state for BBD emulation
     int32_t lp_stateL = 0;
@@ -107,34 +106,14 @@ struct ChorusBlock {
     int32_t hp_x1L = 0, hp_y1L = 0;
     int32_t hp_x1R = 0, hp_y1R = 0;
 
-    // Oxide low-pass filter states for tape emulation
-    int32_t oxide_lpL = 0;
-    int32_t oxide_lpR = 0;
-
-    // Random walk states for wow & flutter drift
-    int32_t driftL = 0;
-    int32_t driftR = 0;
-    uint16_t drift_timer = 0;
-
     void init() {
         memset(delayL, 0, sizeof(delayL));
         memset(delayR, 0, sizeof(delayR));
         write_ptr = 0;
         lfo_phase = 0;
-        wow_phase = 0;
         lp_stateL = 0;
         lp_stateR = 0;
         hp_x1L = hp_y1L = hp_x1R = hp_y1R = 0;
-        oxide_lpL = oxide_lpR = 0;
-        driftL = driftR = 0;
-        drift_timer = 0;
-    }
-
-    inline int16_t tape_saturate(int16_t in) {
-        int32_t x = in;
-        int32_t x3 = (((x * x) >> 15) * x) >> 15;
-        int32_t y = x - ((x3 * 5461) >> 15);
-        return saturate_q15(y);
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -152,7 +131,6 @@ struct ChorusBlock {
             eff_rate = clamp_i32(eff_rate, 0, 32767);
             uint16_t phase_inc = (uint16_t)(1 + (eff_rate >> 11));
             lfo_phase += phase_inc;
-            wow_phase += (uint16_t)(1 + (eff_rate >> 13));
             return;
         }
 
@@ -160,20 +138,29 @@ struct ChorusBlock {
         int32_t eff_rate = rate + (cv1Warp * 4);
         eff_rate = clamp_i32(eff_rate, 0, 32767);
 
-        // Phase increments
+        // Phase increment (doubled for 24kHz)
         uint16_t phase_inc = (uint16_t)(1 + (eff_rate >> 10));
         lfo_phase += phase_inc;
-        wow_phase += (uint16_t)(1 + (eff_rate >> 13));
 
-        // Update random walk (drift / flutter) every 32 samples (~750Hz)
-        drift_timer++;
-        if (drift_timer >= 32) {
-            drift_timer = 0;
-            int32_t step_size = (eff_rate * 300) >> 15;
-            driftL += (((int32_t)(fast_rand(rand_seed) & 0x1FF) - 256) * step_size) >> 8;
-            driftR += (((int32_t)(fast_rand(rand_seed) & 0x1FF) - 256) * step_size) >> 8;
-            driftL = clamp_i32(driftL, -16384, 16384);
-            driftR = clamp_i32(driftR, -16384, 16384);
+        // Decode depth / feedback from unified knob
+        int16_t depth    = 0;
+        int32_t feedback = 0;
+        bool destroy = false;
+        if (depthFeedback < 16384) {
+            depth    = (int16_t)(depthFeedback * 2); // 0 → 32767
+            feedback = 0;
+        } else {
+            depth    = 32767;
+            if (depthFeedback < 26214) {
+                // Standard range (Y < 80%): feedback rises up to 60% (19660)
+                // 26214 - 16384 = 9830. 19660 * 32768 / 9830 = 65536
+                feedback = ((depthFeedback - 16384) * 65536) >> 15;
+            } else {
+                // Destruction range (80% to 100% knob): feedback rises up to 95% (31128)
+                destroy = true;
+                // 32767 - 26214 = 6553. (31128 - 19660) * 32768 / 6553 = 57343
+                feedback = 19660 + (((depthFeedback - 26214) * 57343) >> 15);
+            }
         }
 
         // Classic dual-phase triangle LFO (L = 0°, R = 180° for deep stereo spread)
@@ -184,30 +171,14 @@ struct ChorusBlock {
         int16_t lfoL = get_tri(lfo_phase);
         int16_t lfoR = get_tri((uint16_t)(lfo_phase + 32768u));
 
-        int16_t wowL = get_tri(wow_phase);
-        int16_t wowR = get_tri((uint16_t)(wow_phase + 32768u));
-
-        // Modulations (tuned for lush, wide stereo image and no phase cancellations on drums)
-        int32_t wow_depth = (eff_rate * 24) >> 15; // max 24 samples of slow wow
-        int32_t flutter_depth = (eff_rate * 16) >> 15; // max 16 samples of fast flutter
-        int32_t chorus_depth = eff_rate;
-        int32_t depth_samples = (chorus_depth * 48) >> 15; // max 48 samples of normal BBD LFO
-
-        int32_t total_modL = (((int32_t)lfoL * depth_samples) >> 15) + 
-                             (((int32_t)wowL * wow_depth) >> 15) + 
-                             ((driftL * flutter_depth) >> 14);
-        int32_t total_modR = (((int32_t)lfoR * depth_samples) >> 15) + 
-                             (((int32_t)wowR * wow_depth) >> 15) + 
-                             ((driftR * flutter_depth) >> 14);
-
-        // Offset base delays (L=240, R=320) to prevent mono/stereo phasing on transients
-        int32_t delay_L_q16 = (240 << 16) + (total_modL << 16);
-        int32_t delay_R_q16 = (320 << 16) + (total_modR << 16);
+        // Base delay: 180 samples (~7.5 ms @ 24 kHz). Max modulation range: ±28 samples (~1.1 ms @ 24 kHz).
+        // This tightens the time window to achieve a lush, warm BBD chorus instead of a wide, seasick vibrato.
+        int32_t depth_samples = (int32_t)depth * 28 >> 15;
+        int32_t delay_L_q16 = (180 << 16) + (((int32_t)lfoL * depth_samples) << 1);
+        int32_t delay_R_q16 = (180 << 16) + (((int32_t)lfoR * depth_samples) << 1);
         
-        if (delay_L_q16 < (10 << 16)) delay_L_q16 = 10 << 16;
-        if (delay_L_q16 > (500 << 16)) delay_L_q16 = 500 << 16;
-        if (delay_R_q16 < (10 << 16)) delay_R_q16 = 10 << 16;
-        if (delay_R_q16 > (500 << 16)) delay_R_q16 = 500 << 16;
+        if (delay_L_q16 < (1 << 16)) delay_L_q16 = (1 << 16);
+        if (delay_R_q16 < (1 << 16)) delay_R_q16 = (1 << 16);
 
         delayL[write_ptr] = inL;
         delayR[write_ptr] = inR;
@@ -219,6 +190,7 @@ struct ChorusBlock {
             uint16_t frac   = (uint16_t)(rp_q16 & 0xFFFF);
             int16_t  y0     = buf[idx];
             int16_t  y1     = buf[nxt];
+            // int32_t safe: (y1-y0) in [-65535,65535], frac in [0,65535]; product fits int32
             return lerp_delay_q15(y0, y1, frac);
         };
 
@@ -228,51 +200,40 @@ struct ChorusBlock {
 
         // BBD low-pass filter
         int32_t damp = 32767 - ((mainMix * 24000) >> 15);
-        int32_t diffL = (int32_t)wetL - lp_stateL;
-        int32_t diffR = (int32_t)wetR - lp_stateR;
-        lp_stateL += (diffL * damp) >> 15;
-        lp_stateR += (diffR * damp) >> 15;
-        lp_stateL = clamp_i32(lp_stateL, -32768, 32767);
-        lp_stateR = clamp_i32(lp_stateR, -32768, 32767);
+        lp_stateL += ((int32_t)wetL - lp_stateL) * damp >> 15;
+        lp_stateR += ((int32_t)wetR - lp_stateR) * damp >> 15;
+        if (lp_stateL >  32767) lp_stateL =  32767;
+        if (lp_stateL < -32768) lp_stateL = -32768;
+        if (lp_stateR >  32767) lp_stateR =  32767;
+        if (lp_stateR < -32768) lp_stateR = -32768;
         wetL = (int16_t)lp_stateL;
         wetR = (int16_t)lp_stateR;
-
-        // Dynamic tape oxide low-pass damping (Y knob)
-        // High values of Y -> low cutoff (very dark)
-        int32_t damp_coef = 32767 - ((depthFeedback * 30000) >> 15); // ranges [2767..32767]
-        int32_t oxide_diffL = (int32_t)wetL - oxide_lpL;
-        int32_t oxide_diffR = (int32_t)wetR - oxide_lpR;
-        oxide_lpL += (oxide_diffL * damp_coef) >> 15;
-        oxide_lpR += (oxide_diffR * damp_coef) >> 15;
-        oxide_lpL = clamp_i32(oxide_lpL, -32768, 32767);
-        oxide_lpR = clamp_i32(oxide_lpR, -32768, 32767);
-        wetL = (int16_t)oxide_lpL;
-        wetR = (int16_t)oxide_lpR;
-
-        // Dynamic tape saturation (Y knob drive)
-        int32_t drive_gain = 32768 + ((depthFeedback * 16384) >> 15); // up to 1.5x drive
-        wetL = tape_saturate(saturate_q15(((int32_t)wetL * drive_gain) >> 15));
-        wetR = tape_saturate(saturate_q15(((int32_t)wetR * drive_gain) >> 15));
 
         // Vintage HPF on wet path (cutoff ~110 Hz: y = x - x1 + 0.976 * y1)
         int32_t yL = (int32_t)wetL - hp_x1L + ((hp_y1L * 32000) >> 15);
         hp_x1L = (int32_t)wetL;
-        hp_y1L = clamp_i32(yL, -65536, 65536);
+        hp_y1L = clamp_i32(yL, -1000000, 1000000);
         wetL = saturate_q15(yL);
 
         int32_t yR = (int32_t)wetR - hp_x1R + ((hp_y1R * 32000) >> 15);
         hp_x1R = (int32_t)wetR;
-        hp_y1R = clamp_i32(yR, -65536, 65536);
+        hp_y1R = clamp_i32(yR, -1000000, 1000000);
         wetR = saturate_q15(yR);
 
         // Feedback loop
-        int32_t feedback = (depthFeedback * 22000) >> 15; // up to ~67% feedback
         if (feedback > 0) {
             int32_t fbL = (int32_t)inL + (((int32_t)wetL * feedback) >> 15);
             int32_t fbR = (int32_t)inR + (((int32_t)wetR * feedback) >> 15);
             
             int16_t wrL = soft_limit_q15(fbL);
             int16_t wrR = soft_limit_q15(fbR);
+            
+            if (destroy) {
+                // Inject XOR bit corruption into Chorus BBD line (scale with destruction intensity)
+                uint16_t xor_mask = (uint16_t)((depthFeedback - 26214) >> 9); // up to ~12 bits of mask
+                wrL ^= xor_mask;
+                wrR ^= xor_mask;
+            }
             
             delayL[write_ptr] = wrL;
             delayR[write_ptr] = wrR;
@@ -762,25 +723,9 @@ struct CodecDemolisherBlock {
             }
         }
 
-        // ── Stage 3: Connection Breakup Bandwidth Narrowing ──
-        if (scramble_level > 0) {
-            // Dynamically tighten the bandpass filter mix to make it sound thin/telephonic
-            int32_t bp_mix = 12000 + ((scramble_level * 16000) >> 15);
-            
-            // Apply makeup gain to the bandpass filter signal to preserve perceived volume/power
-            int32_t bp_gain = 32768 + (((bp_mix - 12000) * 19000) >> 15); // up to 1.58x gain
-            int32_t gained_bpL = ((int32_t)bp_cL * bp_gain) >> 15;
-            int32_t gained_bpR = ((int32_t)bp_cR * bp_gain) >> 15;
-
-            sigL = lerp_q15(sigL, saturate_q15(gained_bpL), bp_mix);
-            sigR = lerp_q15(sigR, saturate_q15(gained_bpR), bp_mix);
-
-            lp_newL = sigL;
-            lp_newR = sigR;
-        } else {
-            lp_newL = sigL;
-            lp_newR = sigR;
-        }
+        // No Y knob filtering to prevent losing low frequencies (kick drum)
+        lp_newL = sigL;
+        lp_newR = sigR;
 
         int16_t wetL = sigL;
         int16_t wetR = sigR;
@@ -1183,7 +1128,7 @@ inline int16_t decode_mulaw(uint8_t u_val) {
 
 // Zoned speed determination helper. Placed in FLASH (not RAM) to save memory,
 // since it is only called on grain boundaries/initialization, not per-sample.
-__attribute__((noinline)) int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed, uint8_t arp_step, int32_t loop_len) {
+inline int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &seed, uint8_t arp_step, int32_t loop_len) {
     int32_t base_speed;
 
     // If the loop length is short, keep it clean (stuck CD/tape scrub style) rather than chaotic metallic buzzes
