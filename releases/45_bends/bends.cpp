@@ -236,7 +236,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    chorus.process(L, L, R, R, chorus_mix, chorus_rate, chorus_depth_fb, 0);
+    const int32_t eff_chorus_mix = scale_grit(chorus_mix, 32767, eff_grittiness);
+    const int32_t eff_chorus_depth_fb = scale_grit(chorus_depth_fb, 32767, eff_grittiness);
+    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth_fb, cv1_live ? cv1 : 0);
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
     const int32_t eff_codec_mix         = scale_grit(codec_mix, 32767, eff_grittiness);
@@ -259,9 +261,11 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         int32_t diff = 32767 - delay_time;
         eff_delay_time = delay_time + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
     }
+    const int32_t eff_delay_mix = scale_grit(delay_mix, 32767, eff_grittiness);
+    const int32_t eff_delay_feedback = scale_grit(delay_feedback, 32767, eff_grittiness);
 
     delay_fx.process(L, L, R, R,
-                     delay_mix, eff_delay_time, delay_feedback, freeze, 0, cv2, eff_global_noise_scale,
+                     eff_delay_mix, eff_delay_time, eff_delay_feedback, freeze, 0, cv2, eff_global_noise_scale,
                      pulse1_live, clk_period_samples);
 
     // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
@@ -298,20 +302,27 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
                      clk_period_samples, clk_timer);
 
     // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
-    int32_t eff_filter_res = filter_res;
+    int32_t eff_filter_cutoff = filter_cutoff;
     if (eff_grittiness < 16384) {
-        if (filter_res >= 18000) {
-            int32_t diff = filter_res - 18000;
-            eff_filter_res = 18000 + ((diff * eff_grittiness) >> 14);
-        }
-    } else {
-        int32_t diff = 32767 - filter_res;
-        eff_filter_res = filter_res + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
+        int32_t diff = filter_cutoff - 16384;
+        eff_filter_cutoff = 16384 + ((diff * eff_grittiness) >> 14);
     }
-    filter.process(L, L, R, R, filter_cutoff, eff_filter_res, filter_morph, 0);
+    const int32_t eff_filter_res = scale_grit(filter_res, 32767, eff_grittiness);
+    const int32_t eff_filter_morph = scale_grit(filter_morph, 32767, eff_grittiness);
+    filter.process(L, L, R, R, eff_filter_cutoff, eff_filter_res, eff_filter_morph, 0);
 
     // ── STAGE 6: Reverb ──────────────────────────────────────────────────────
-    reverb.process(L, R, reverb_mix, reverb_size, reverb_fb_glitch);
+    const int32_t eff_reverb_mix = scale_grit(reverb_mix, 32767, eff_grittiness);
+    int32_t eff_reverb_fb = reverb_fb_glitch;
+    if (eff_grittiness < 16384) {
+        if (reverb_fb_glitch > 16384) {
+            eff_reverb_fb = 16384 + (((reverb_fb_glitch - 16384) * eff_grittiness) >> 14);
+        }
+    } else {
+        int32_t diff = 32767 - reverb_fb_glitch;
+        eff_reverb_fb = reverb_fb_glitch + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
+    }
+    reverb.process(L, R, eff_reverb_mix, reverb_size, eff_reverb_fb);
 
     // --- CV Outputs (Envelope Follower and Arpeggiator CV / LFO) ---
     // CV Out 1: envelope follower of the audio signal (fast attack, slow decay)
@@ -325,11 +336,11 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     int16_t cv_out1_val = -2048 + ((env_followed * 4095) >> 15);
     CVOut1(cv_out1_val);
 
-    // CV Out 2: calibrated 1V/Octave MIDI Note in Zone 3 arpeggiator, or slow LFO in other zones
+    // CV Out 2: subtle stepped CV in Zone 3 (matching tape-drift vibe), or slow LFO in other zones
     if (glitcher.active && (eff_glitch_speed >= 19661 && eff_glitch_speed < 26214)) {
-        static const int8_t semitone_offsets[8] = {0, 4, 7, 12, -12, -5, 0, -12};
-        uint8_t note = 60 + semitone_offsets[glitcher.arpeggio_step & 7];
-        CVOut2MIDINote(note);
+        static const int16_t steps[8] = {0, 120, -120, 0, -80, 160, -160, 80};
+        int16_t cv_val = steps[glitcher.arpeggio_step & 7];
+        CVOut2(cv_val);
     } else {
         static uint16_t lfo_phase = 0;
         lfo_phase += 16;
@@ -419,22 +430,22 @@ static uint32_t pageFlashTimer      = 0;    // ms remaining in page-change flash
 // Virtual parameter table — 8 pages × 3 knobs [Main, X, Y]
 // Values are Q15 [0..32767]. Match atomic defaults above.
 static int32_t vp[8][3] = {
-    // Page 0 — Chorus:   Wet,   Rate,   Depth/FB
+    // Page 0 — Chorus / Tape Loss: Mix, Rate/Drift, Saturation/Damping
     {     0, 12000, 16384 },
-    // Page 1 — Compression & Grit: Artifacts, Decimate, Digital Vibe
-    {     0,     0,     0 },
+    // Page 1 — Digital Loss: Mix/Strength, Decimate/Bitcrush, Corruption/Glitches
+    {     0, 10000, 12000 },
     // Page 2 — Delay:    Wet,   Time,   Feedback
     {     0, 16384, 16384 },
     // Page 3 — Glitcher: Mix,   Size,   Speed Probability
     {     0, 16384, 16384 },
-    // Page 4 — Filter:   Cutoff, Resonance, Morph
-    { 32767,     0,     0 },
+    // Page 4 — Filter:   Cutoff (DJ LP/HP), Resonance, Grit (Wavefolder)
+    { 16384,  4000,  8000 },
     // Page 5 — Reverb:   Wet,   Decay,  Damping
     {     0, 16384,  8000 },
     // Page 6 — Sample Player: Start, Speed, Sample Select
     {     0, 16384,     0 },
-    // Page 7 — Freeze Scrub: Scrub Pos, Glitch Speed, Loop Size
-    {     0, 16384,  8000 },
+    // Page 7 — Freeze Scrub: Scrub Pos, Loop Size, Playback Speed
+    { 32767, 23000, 16384 },
 };
 
 // KnobLock instances — one per physical knob
@@ -458,9 +469,9 @@ static void push_params_to_core1() {
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = vp[0][2];
 
-        p.codec_mix         = scale_grit(vp[1][0], 32767, active_macro);
-        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
-        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        p.codec_mix         = vp[1][0];
+        p.codec_downsample  = vp[1][1];
+        p.codec_ringing_xor = vp[1][2];
 
         p.delay_mix      = vp[2][0];
         
@@ -479,9 +490,9 @@ static void push_params_to_core1() {
         p.delay_time     = scaled_delay_time;
         p.delay_feedback = vp[2][2];
 
-        p.glitch_mix      = scale_grit(vp[3][0], 32767, active_macro);
+        p.glitch_mix      = vp[3][0];
         p.glitch_size     = vp[3][1];
-        p.glitch_speed    = scale_grit(vp[3][2], 32767, active_macro);
+        p.glitch_speed    = vp[3][2];
 
         int32_t raw_fb = vp[2][2];
         int32_t glitch_fb = 0;
@@ -491,21 +502,8 @@ static void push_params_to_core1() {
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
 
         p.filter_cutoff = vp[4][0];
-        
-        // Scale filter resonance by active_macro
-        int32_t raw_filter_res = vp[4][1];
-        int32_t scaled_filter_res = raw_filter_res;
-        if (active_macro < 16384) {
-            if (raw_filter_res >= 18000) {
-                int32_t diff = raw_filter_res - 18000;
-                scaled_filter_res = 18000 + ((diff * active_macro) >> 14);
-            }
-        } else {
-            int32_t diff = 32767 - raw_filter_res;
-            scaled_filter_res = raw_filter_res + ((diff * ((active_macro - 16384) * 2)) >> 15);
-        }
-        p.filter_res    = scaled_filter_res;
-        p.filter_morph  = vp[4][2];
+        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
+        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
 
         p.freeze = freeze_latched;
         p.stutter = false;
@@ -515,7 +513,7 @@ static void push_params_to_core1() {
         p.no_audio1 = true;
         p.no_audio2 = true;
 
-        p.is_freeze_page = is_frozen;
+        p.is_freeze_page = (currentPage == 7);
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
@@ -610,20 +608,6 @@ void BendsCard::tick_ui_once() {
 
     bool pulse2_freeze = pulse2_live && PulseIn2();
     is_frozen = freeze_latched || pulse2_freeze;
-
-    static bool last_is_frozen = false;
-    if (is_frozen && !last_is_frozen) {
-        // Reset Freeze Page parameters to sensible defaults on freeze transition
-        vp[7][0] = 0;     // Scrub position = 0 (start of beat)
-        vp[7][1] = 16384; // Playback speed = 1.0x (center)
-        vp[7][2] = 32767; // Loop size = maximum (1/1 full beat)
-        
-        // Re-engage knob locks to prevent sudden physical knob jumps
-        lockMain.engage(dzMain, vp[currentPage][0]);
-        lockX.engage(dzX, vp[currentPage][1]);
-        lockY.engage(dzY, vp[currentPage][2]);
-    }
-    last_is_frozen = is_frozen;
 
     // Debounce Audio 1 and Audio 2 connection states
     static int audio1_connected_ctr = 0;
@@ -729,17 +713,14 @@ void BendsCard::tick_ui_once() {
 
             // Bake Filter parameters
             {
-                int32_t val = vp[4][1];
+                int32_t val = vp[4][0];
                 if (grittiness_macro < 16384) {
-                    if (val >= 18000) {
-                        int32_t diff = val - 18000;
-                        vp[4][1] = 18000 + ((diff * grittiness_macro) >> 14);
-                    }
-                } else {
-                    int32_t diff = 32767 - val;
-                    vp[4][1] = val + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
+                    int32_t diff = val - 16384;
+                    vp[4][0] = 16384 + ((diff * grittiness_macro) >> 14);
                 }
             }
+            vp[4][1] = scale_grit(vp[4][1], 32767, grittiness_macro);
+            vp[4][2] = scale_grit(vp[4][2], 32767, grittiness_macro);
 
             // Bake Reverb parameters
             {
@@ -756,10 +737,10 @@ void BendsCard::tick_ui_once() {
             }
 
             if (!macro_adjusted_this_hold) {
-                if (is_frozen) {
+                if (currentPage >= 6) {
+                    currentPage = 0;
                     freeze_latched = false;
-                    is_frozen = false;
-                    currentPage = 2;
+                    is_frozen = freeze_latched || pulse2_freeze;
                 } else {
                     currentPage = (currentPage + 5) % 6;
                 }
@@ -790,13 +771,11 @@ void BendsCard::tick_ui_once() {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
                     } else if (debounced_sw == ComputerCard::Switch::Up) {
                         // Hold UP
-                        if (!is_frozen) {
-                            if (currentPage != 3) {
+                        if (currentPage != 7) {
+                            if (currentPage < 6) {
                                 pageBeforeUp = currentPage;
-                                currentPage = 3;
-                            } else {
-                                pageBeforeUp = 3;
                             }
+                            currentPage = 7;
                             freeze_latched = true;
                             is_frozen = true;
                             lockMain.engage(dzMain, vp[currentPage][0]);
@@ -810,6 +789,21 @@ void BendsCard::tick_ui_once() {
         }
     } else {
         // Transition detected
+        if (last_debounced_sw == ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Up) {
+            // Instant freeze transition on switch press to eliminate 350ms latency!
+            if (currentPage != 7) {
+                if (currentPage < 6) {
+                    pageBeforeUp = currentPage;
+                }
+                currentPage = 7;
+                freeze_latched = true;
+                is_frozen = true;
+                lockMain.engage(dzMain, vp[currentPage][0]);
+                lockX.engage(dzX, vp[currentPage][1]);
+                lockY.engage(dzY, vp[currentPage][2]);
+                param_changed = true;
+            }
+        }
         if (last_debounced_sw != ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Middle) {
             // Switch was released
             if (active_sw_held_ms < 350) {
@@ -817,10 +811,10 @@ void BendsCard::tick_ui_once() {
                 if (last_debounced_sw == ComputerCard::Switch::Down) {
                     // Flick DOWN
                     if (!macro_adjusted_this_hold) {
-                        if (is_frozen) {
+                        if (currentPage >= 6) {
+                            currentPage = 0;
                             freeze_latched = false;
-                            is_frozen = false;
-                            currentPage = 4;
+                            is_frozen = freeze_latched || pulse2_freeze;
                         } else {
                             currentPage = (currentPage + 1) % 6;
                         }
@@ -831,24 +825,16 @@ void BendsCard::tick_ui_once() {
                         param_changed = true;
                     }
                 } else if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Flick UP
-                    if (!is_frozen) {
-                        if (currentPage != 3) {
-                            pageBeforeUp = currentPage;
-                            currentPage = 3;
-                        } else {
-                            pageBeforeUp = 3;
-                        }
-                        freeze_latched = true;
-                    } else {
-                        currentPage = pageBeforeUp;
-                        freeze_latched = false;
-                    }
+                    // Flick UP: unfreeze immediately since we froze instantly on press!
+                    freeze_latched = false;
                     is_frozen = freeze_latched || pulse2_freeze;
-                    lockMain.engage(dzMain, vp[currentPage][0]);
-                    lockX.engage(dzX, vp[currentPage][1]);
-                    lockY.engage(dzY, vp[currentPage][2]);
-                    param_changed = true;
+                    if (currentPage >= 6) {
+                        currentPage = pageBeforeUp;
+                        lockMain.engage(dzMain, vp[currentPage][0]);
+                        lockX.engage(dzX, vp[currentPage][1]);
+                        lockY.engage(dzY, vp[currentPage][2]);
+                        param_changed = true;
+                    }
                 }
             } else {
                 // Hold release action
@@ -856,11 +842,13 @@ void BendsCard::tick_ui_once() {
                     // Releasing Switch UP: return to the page we were on before and unfreeze
                     freeze_latched = false;
                     is_frozen = freeze_latched || pulse2_freeze;
-                    currentPage = pageBeforeUp;
-                    lockMain.engage(dzMain, vp[currentPage][0]);
-                    lockX.engage(dzX, vp[currentPage][1]);
-                    lockY.engage(dzY, vp[currentPage][2]);
-                    param_changed = true;
+                    if (currentPage >= 6) {
+                        currentPage = pageBeforeUp;
+                        lockMain.engage(dzMain, vp[currentPage][0]);
+                        lockX.engage(dzX, vp[currentPage][1]);
+                        lockY.engage(dzY, vp[currentPage][2]);
+                        param_changed = true;
+                    }
                 }
             }
         }
@@ -892,31 +880,32 @@ void BendsCard::tick_ui_once() {
         }
     } else {
         int32_t nextMain = lockMain.update(dzMain);
-        int target_page = currentPage;
-        if (is_frozen && currentPage == 3) {
-            target_page = 7;
-        }
-        if (vp[target_page][0] != nextMain) {
-            vp[target_page][0] = nextMain;
+        if (vp[currentPage][0] != nextMain) {
+            vp[currentPage][0] = nextMain;
             param_changed = true;
         }
     }
     int32_t nextX = lockX.update(dzX);
-    int target_page_xy = currentPage;
-    if (is_frozen && currentPage == 3) {
-        target_page_xy = 7;
-    }
-    if (vp[target_page_xy][1] != nextX) {
-        vp[target_page_xy][1] = nextX;
+    if (vp[currentPage][1] != nextX) {
+        vp[currentPage][1] = nextX;
         param_changed = true;
     }
     int32_t nextY = lockY.update(dzY);
-    if (vp[target_page_xy][2] != nextY) {
-        vp[target_page_xy][2] = nextY;
+    if (vp[currentPage][2] != nextY) {
+        vp[currentPage][2] = nextY;
         param_changed = true;
     }
 
-    // ── 5. Push virtual params to Core 1 double buffer ───────────────────    // ── 5. Push virtual params to Core 1 double buffer ───────────────────
+    static bool last_is_frozen = false;
+    if (is_frozen && !last_is_frozen) {
+        // Re-engage knob locks to prevent sudden physical knob jumps
+        lockMain.engage(dzMain, vp[7][0]);
+        lockX.engage(dzX, vp[7][1]);
+        lockY.engage(dzY, vp[7][2]);
+    }
+    last_is_frozen = is_frozen;
+
+    // ── 5. Push virtual params to Core 1 double buffer ───────────────────
     {
         uint32_t next_idx = 1 - g_params_idx.load(std::memory_order_relaxed);
         volatile Core1Params &p = g_params[next_idx];
@@ -928,9 +917,9 @@ void BendsCard::tick_ui_once() {
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = vp[0][2];
 
-        p.codec_mix         = scale_grit(vp[1][0], 32767, active_macro);
-        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
-        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        p.codec_mix         = vp[1][0];
+        p.codec_downsample  = vp[1][1];
+        p.codec_ringing_xor = vp[1][2];
 
         p.delay_mix      = vp[2][0];
         
@@ -949,15 +938,15 @@ void BendsCard::tick_ui_once() {
         p.delay_time     = scaled_delay_time;
         p.delay_feedback = vp[2][2];
 
-        bool is_freeze_page = is_frozen;
+        bool is_freeze_page = (currentPage == 7);
         if (is_freeze_page || is_frozen) {
             p.glitch_mix   = vp[7][0]; // scrub offset
-            p.glitch_speed = vp[7][1]; // speed
-            p.glitch_size  = vp[7][2]; // loop size
+            p.glitch_speed = vp[7][2]; // speed (Y knob)
+            p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
-            p.glitch_mix   = scale_grit(vp[3][0], 32767, active_macro);
+            p.glitch_mix   = vp[3][0];
             p.glitch_size  = vp[3][1];
-            p.glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+            p.glitch_speed = vp[3][2];
         }
 
         // Calculate Glitcher Feedback Loop scaled by grittiness macro
@@ -969,21 +958,8 @@ void BendsCard::tick_ui_once() {
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
 
         p.filter_cutoff = vp[4][0];
-        
-        // Scale filter resonance by active_macro
-        int32_t raw_filter_res = vp[4][1];
-        int32_t scaled_filter_res = raw_filter_res;
-        if (active_macro < 16384) {
-            if (raw_filter_res >= 18000) {
-                int32_t diff = raw_filter_res - 18000;
-                scaled_filter_res = 18000 + ((diff * active_macro) >> 14);
-            }
-        } else {
-            int32_t diff = 32767 - raw_filter_res;
-            scaled_filter_res = raw_filter_res + ((diff * (active_macro - 16384)) / 16383);
-        }
-        p.filter_res    = scaled_filter_res;
-        p.filter_morph  = vp[4][2];
+        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
+        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
 
         p.freeze = is_frozen;
         p.stutter = pulse1_live && PulseIn1();
@@ -1027,7 +1003,7 @@ void BendsCard::tick_ui_once() {
         g_params_idx.store(next_idx, std::memory_order_release);
     }
     // ── 6. LED visualisation ──────────────────────────────────────────────
-    bool is_freeze_page = is_frozen;
+    bool is_freeze_page = (currentPage == 7);
 
     if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int16_t bar_leds[6];
@@ -1036,14 +1012,32 @@ void BendsCard::tick_ui_once() {
             LedBrightness(i, bar_leds[i]);
         }
     } else if (is_freeze_page) {
-        // Freeze Scrub page: all 6 LEDs pulse slowly — distinct "frozen" indicator
-        static uint32_t freeze_led_phase = 0;
-        freeze_led_phase += 80; // ~0.7 Hz triangle wave at 1 kHz tick rate
-        uint32_t ph = (freeze_led_phase >> 16) & 0xFFFF;
-        uint16_t bright = (ph < 0x8000) ? (ph >> 3) : ((0xFFFF - ph) >> 3);
-        bright = (bright > 4095) ? 4095 : bright;
+        // Freeze Scrub page: show the active loop window (glow) and the moving playhead (bright)
+        int32_t start_idx = ((int32_t)glitcher.freeze_wr - glitcher.active_offset) & 0x7FFF;
+        int32_t end_idx = (start_idx + glitcher.current_loop_len) & 0x7FFF;
+        int32_t play_pos = (start_idx + (int32_t)(glitcher.rd_q16 >> 16)) & 0x7FFF;
+        
         for (int i = 0; i < 6; i++) {
-            LedBrightness(i, bright);
+            int32_t led_sample = i * 5461 + 2730; // center of LED's sector
+            bool in_loop = false;
+            if (start_idx <= end_idx) {
+                in_loop = (led_sample >= start_idx && led_sample < end_idx);
+            } else {
+                in_loop = (led_sample >= start_idx || led_sample < end_idx);
+            }
+            
+            // Determine base brightness: glow if inside the loop window, very dim if outside
+            int32_t brightness = in_loop ? 800 : 80;
+            
+            // Highlight the playhead position
+            int32_t play_led = play_pos / 5461;
+            if (play_led < 0) play_led = 0;
+            if (play_led > 5) play_led = 5;
+            if (play_led == i) {
+                brightness = 4095;
+            }
+            
+            LedBrightness(i, brightness);
         }
     } else if (pageFlashTimer > 0) {
         pageFlashTimer--;
