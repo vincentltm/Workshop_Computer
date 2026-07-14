@@ -2435,6 +2435,14 @@ struct ReverbBlock {
             int16_t val2 = buf[rd2];
             return lerp_delay_q15(val1, val2, frac);
         }
+
+        inline int16_t read_integer(int32_t len_scale) {
+            int32_t scaled_len = (len_scale * len) >> 15;
+            if (scaled_len < 1) scaled_len = 1;
+            if (scaled_len >= mask) scaled_len = mask - 1;
+            uint16_t rd = (ptr - scaled_len) & mask;
+            return buf[rd];
+        }
     };
 
     int16_t mem[28672];
@@ -2495,65 +2503,12 @@ struct ReverbBlock {
         lp_size_scale = 32767;
     }
 
-    void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
+    void process(int16_t &L, int16_t &R, int32_t mix, int32_t size_scale,
+                 int32_t decay, int32_t damp, int32_t lofi_level,
+                 int32_t sparkle_level, int32_t circuit_bent_level,
+                 int32_t lofi_shift, int32_t lofi_frac) {
         if (mix < 50) {
             return;
-        }
-        // Map Size (X) to scale factor: [0..32767] -> [4915..32767] (0.15x to 1.0x)
-        int32_t size_scale = 4915 + (((int32_t)size * 27852) >> 15);
-
-        // Max decay limit is dynamic based on size to prevent self-oscillation explosion
-        // [4915..32767] size_scale maps to [18000..28672] max_decay (0.55x to 0.875x decay coefficient)
-        // (size_scale - 4915) * 10672 / 27852 ≈ (size_scale - 4915) * 38429 >> 20
-        int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
-
-        // Map Feedback/Glitch (Y) to smooth overlapping morph curves:
-        // - Decay time rises cleanly from 0 to max_decay over 0..20000.
-        // - Lo-fi bitcrush fuzz starts rising at 12000.
-        // - Sparkle (XOR sizzle) starts rising at 14000 (stable high-fidelity digital crackle).
-        // - Circuit-bent address jitter + decimation starts rising at 20000 (introducing pitch-warping).
-        int32_t decay = 0;
-        int32_t lofi_level = 0;
-        int32_t sparkle_level = 0;
-        int32_t circuit_bent_level = 0;
-
-        // Decay
-        if (fb_glitch < 20000) {
-            int32_t val = (fb_glitch * 107374) >> 16; // scales [0..20000] -> [0..32767]
-            decay = (val * max_decay) >> 15;
-        } else {
-            decay = max_decay;
-        }
-
-        // Lo-fi Level (bitcrush fuzz)
-        if (fb_glitch < 12000) {
-            lofi_level = 0;
-        } else if (fb_glitch < 26000) {
-            int32_t diff = fb_glitch - 12000;
-            int32_t raw_lofi = (diff * 153391) >> 16;
-            int32_t raw_sq = (raw_lofi * raw_lofi) >> 15;
-            lofi_level = (raw_sq * raw_sq) >> 15; // quartic curve for fine control of subtle fuzz
-        } else {
-            lofi_level = 32767;
-        }
-
-        // Sparkle Level (XOR sizzle)
-        if (fb_glitch < 14000) {
-            sparkle_level = 0;
-        } else if (fb_glitch < 28000) {
-            int32_t diff = fb_glitch - 14000;
-            sparkle_level = (diff * 153391) >> 16; // 14000 width
-        } else {
-            sparkle_level = 32767;
-        }
-
-        // Circuit-Bent Level (Jitter + Decimation)
-        if (fb_glitch < 20000) {
-            circuit_bent_level = 0;
-        } else {
-            int32_t diff = fb_glitch - 20000;
-            circuit_bent_level = (diff * 168188) >> 16;
-            if (circuit_bent_level > 32767) circuit_bent_level = 32767;
         }
 
         // LFO Chorus: constant slow speed for high-fidelity lushness (no fast warbles) (doubled for 24kHz)
@@ -2594,20 +2549,19 @@ struct ReverbBlock {
         mono = apIn[3].process_fixed(mono);
 
         // Read tank loop outputs using jittered scales
-        int16_t tOutL = d2L.read(scaleL);
-        int16_t tOutR = d2R.read(scaleR);
+        int16_t tOutL = d2L.read_integer(scaleL);
+        int16_t tOutR = d2R.read_integer(scaleR);
 
         // Tank HF damping: bright and transparent at Y=0, warms up as lofi_level rises.
         // Base = 30000/32768 ≈ 0.91 (~25 kHz); max = 24000/32768 ≈ 0.73 (~12 kHz) at full Y.
-        int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
 
         // Left Tank
         int32_t iL = (int32_t)mono + (((int32_t)decay * tOutR) >> 15);
         iL = saturate_q15(iL);
-        int16_t sL = (int16_t)iL + (int16_t)((16384 * modL.read(scaleL)) >> 15);
+        int16_t sL = (int16_t)iL + (int16_t)((16384 * modL.read_integer(scaleL)) >> 15);
         modL.write(saturate_q15((int32_t)iL - (int16_t)((16384 * sL) >> 15)));
         d1L.write(sL);
-        sL = d1L.read(scaleL);
+        sL = d1L.read_integer(scaleL);
         lpL += (((int32_t)sL - lpL) * damp) >> 15;
         if (lpL >  32767) lpL =  32767;
         if (lpL < -32768) lpL = -32768;
@@ -2618,10 +2572,10 @@ struct ReverbBlock {
         // Right Tank
         int32_t iR = (int32_t)mono + (((int32_t)decay * tOutL) >> 15);
         iR = saturate_q15(iR);
-        int16_t sR = (int16_t)iR + (int16_t)((16384 * modR.read(scaleR)) >> 15);
+        int16_t sR = (int16_t)iR + (int16_t)((16384 * modR.read_integer(scaleR)) >> 15);
         modR.write(saturate_q15((int32_t)iR - (int16_t)((16384 * sR) >> 15)));
         d1R.write(sR);
-        sR = d1R.read(scaleR);
+        sR = d1R.read_integer(scaleR);
         lpR += (((int32_t)sR - lpR) * damp) >> 15;
         if (lpR >  32767) lpR =  32767;
         if (lpR < -32768) lpR = -32768;
@@ -2635,17 +2589,13 @@ struct ReverbBlock {
         // Apply Bitcrushing and XOR Scrambling OUTSIDE the feedback loop to keep the reverb tail natural and long
         // 1. Continuous Bitcrushing (word-length truncation) based on lofi_level
         if (lofi_level > 0) {
-            int32_t shift_q15 = (lofi_level * 6); // scale from 0 to 6 in Q15
-            int32_t int_shift = shift_q15 >> 15;
-            int32_t frac_shift = shift_q15 & 0x7FFF;
+            int16_t q1L = (wetL >> lofi_shift) << lofi_shift;
+            int16_t q2L = (wetL >> (lofi_shift + 1)) << (lofi_shift + 1);
+            wetL = lerp_q15(q1L, q2L, lofi_frac);
 
-            int16_t q1L = (wetL >> int_shift) << int_shift;
-            int16_t q2L = (wetL >> (int_shift + 1)) << (int_shift + 1);
-            wetL = lerp_q15(q1L, q2L, frac_shift);
-
-            int16_t q1R = (wetR >> int_shift) << int_shift;
-            int16_t q2R = (wetR >> (int_shift + 1)) << (int_shift + 1);
-            wetR = lerp_q15(q1R, q2R, frac_shift);
+            int16_t q1R = (wetR >> lofi_shift) << lofi_shift;
+            int16_t q2R = (wetR >> (lofi_shift + 1)) << (lofi_shift + 1);
+            wetR = lerp_q15(q1R, q2R, lofi_frac);
         }
 
         // 2. XOR Scrambling (controls the sparkle)

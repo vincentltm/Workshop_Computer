@@ -73,7 +73,13 @@ struct Core1Params {
 
     int32_t reverb_mix;
     int32_t reverb_size;
-    int32_t reverb_fb_glitch;
+    int32_t reverb_decay;
+    int32_t reverb_damp;
+    int32_t reverb_lofi_level;
+    int32_t reverb_sparkle_level;
+    int32_t reverb_circuit_bent_level;
+    int32_t reverb_lofi_shift;
+    int32_t reverb_lofi_frac;
 
     int32_t cv1;
     int32_t cv2;
@@ -170,8 +176,14 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_filter_morph  = p.filter_morph;
 
     const int32_t eff_reverb_mix      = p.reverb_mix;
-    const int32_t reverb_size         = p.reverb_size;
-    const int32_t eff_reverb_fb       = p.reverb_fb_glitch;
+    const int32_t reverb_size_scale   = p.reverb_size;
+    const int32_t eff_reverb_decay    = p.reverb_decay;
+    const int32_t eff_reverb_damp     = p.reverb_damp;
+    const int32_t eff_reverb_lofi_level = p.reverb_lofi_level;
+    const int32_t eff_reverb_sparkle_level = p.reverb_sparkle_level;
+    const int32_t eff_reverb_circuit_bent_level = p.reverb_circuit_bent_level;
+    const int32_t eff_reverb_lofi_shift = p.reverb_lofi_shift;
+    const int32_t eff_reverb_lofi_frac  = p.reverb_lofi_frac;
 
     const bool    freeze  = p.freeze;
     const bool    stutter = p.stutter;
@@ -266,7 +278,10 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     filter.process(L, L, R, R, eff_filter_cutoff, eff_filter_res, eff_filter_morph, 0);
 
     // ── STAGE 6: Reverb ──────────────────────────────────────────────────────
-    reverb.process(L, R, eff_reverb_mix, reverb_size, eff_reverb_fb);
+    reverb.process(L, R, eff_reverb_mix, reverb_size_scale,
+                   eff_reverb_decay, eff_reverb_damp, eff_reverb_lofi_level,
+                   eff_reverb_sparkle_level, eff_reverb_circuit_bent_level,
+                   eff_reverb_lofi_shift, eff_reverb_lofi_frac);
 
     // --- CV Outputs (Envelope Follower and Arpeggiator CV / LFO) ---
     // CV Out 1: envelope follower of the audio signal (fast attack, slow decay)
@@ -517,16 +532,71 @@ static void push_params_to_core1() {
 
         // Reverb params — computed with grittiness scaling on damping
         p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
-        p.reverb_size = vp[5][1];
         {
             int32_t fb = vp[5][2];
-            int32_t eff_fb = fb;
+            int32_t fb_glitch = fb;
             if (active_macro < 16384) {
-                if (fb > 16384) eff_fb = 16384 + (((fb - 16384) * active_macro) >> 14);
+                if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
             } else {
-                eff_fb = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
+                fb_glitch = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
             }
-            p.reverb_fb_glitch = eff_fb;
+            
+            int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
+            p.reverb_size = size_scale;
+            int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
+
+            int32_t decay = 0;
+            if (fb_glitch < 20000) {
+                int32_t val = (fb_glitch * 107374) >> 16;
+                decay = (val * max_decay) >> 15;
+            } else {
+                decay = max_decay;
+            }
+
+            int32_t lofi_level = 0;
+            if (fb_glitch < 12000) {
+                lofi_level = 0;
+            } else if (fb_glitch < 26000) {
+                int32_t diff = fb_glitch - 12000;
+                int32_t raw_lofi = (diff * 153391) >> 16;
+                int32_t raw_sq = (raw_lofi * raw_lofi) >> 15;
+                lofi_level = (raw_sq * raw_sq) >> 15;
+            } else {
+                lofi_level = 32767;
+            }
+
+            int32_t sparkle_level = 0;
+            if (fb_glitch < 14000) {
+                sparkle_level = 0;
+            } else if (fb_glitch < 28000) {
+                int32_t diff = fb_glitch - 14000;
+                sparkle_level = (diff * 153391) >> 16;
+            } else {
+                sparkle_level = 32767;
+            }
+
+            int32_t circuit_bent_level = 0;
+            if (fb_glitch < 20000) {
+                circuit_bent_level = 0;
+            } else {
+                int32_t diff = fb_glitch - 20000;
+                circuit_bent_level = (diff * 168188) >> 16;
+                if (circuit_bent_level > 32767) circuit_bent_level = 32767;
+            }
+
+            int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
+
+            int32_t shift_q15 = (lofi_level * 6);
+            int32_t int_shift = shift_q15 >> 15;
+            int32_t frac_shift = shift_q15 & 0x7FFF;
+
+            p.reverb_decay = decay;
+            p.reverb_damp = damp;
+            p.reverb_lofi_level = lofi_level;
+            p.reverb_sparkle_level = sparkle_level;
+            p.reverb_circuit_bent_level = circuit_bent_level;
+            p.reverb_lofi_shift = int_shift;
+            p.reverb_lofi_frac = frac_shift;
         }
     }
 }
@@ -1022,16 +1092,71 @@ void BendsCard::tick_ui_once() {
 
         // Reverb params
         p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
-        p.reverb_size = vp[5][1];
         {
             int32_t fb = vp[5][2];
-            int32_t eff_fb = fb;
+            int32_t fb_glitch = fb;
             if (active_macro < 16384) {
-                if (fb > 16384) eff_fb = 16384 + (((fb - 16384) * active_macro) >> 14);
+                if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
             } else {
-                eff_fb = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
+                fb_glitch = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
             }
-            p.reverb_fb_glitch = eff_fb;
+            
+            int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
+            p.reverb_size = size_scale;
+            int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
+
+            int32_t decay = 0;
+            if (fb_glitch < 20000) {
+                int32_t val = (fb_glitch * 107374) >> 16;
+                decay = (val * max_decay) >> 15;
+            } else {
+                decay = max_decay;
+            }
+
+            int32_t lofi_level = 0;
+            if (fb_glitch < 12000) {
+                lofi_level = 0;
+            } else if (fb_glitch < 26000) {
+                int32_t diff = fb_glitch - 12000;
+                int32_t raw_lofi = (diff * 153391) >> 16;
+                int32_t raw_sq = (raw_lofi * raw_lofi) >> 15;
+                lofi_level = (raw_sq * raw_sq) >> 15;
+            } else {
+                lofi_level = 32767;
+            }
+
+            int32_t sparkle_level = 0;
+            if (fb_glitch < 14000) {
+                sparkle_level = 0;
+            } else if (fb_glitch < 28000) {
+                int32_t diff = fb_glitch - 14000;
+                sparkle_level = (diff * 153391) >> 16;
+            } else {
+                sparkle_level = 32767;
+            }
+
+            int32_t circuit_bent_level = 0;
+            if (fb_glitch < 20000) {
+                circuit_bent_level = 0;
+            } else {
+                int32_t diff = fb_glitch - 20000;
+                circuit_bent_level = (diff * 168188) >> 16;
+                if (circuit_bent_level > 32767) circuit_bent_level = 32767;
+            }
+
+            int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
+
+            int32_t shift_q15 = (lofi_level * 6);
+            int32_t int_shift = shift_q15 >> 15;
+            int32_t frac_shift = shift_q15 & 0x7FFF;
+
+            p.reverb_decay = decay;
+            p.reverb_damp = damp;
+            p.reverb_lofi_level = lofi_level;
+            p.reverb_sparkle_level = sparkle_level;
+            p.reverb_circuit_bent_level = circuit_bent_level;
+            p.reverb_lofi_shift = int_shift;
+            p.reverb_lofi_frac = frac_shift;
         }
 
         g_params_idx.store(next_idx, std::memory_order_release);
