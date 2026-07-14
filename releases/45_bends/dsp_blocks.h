@@ -2120,6 +2120,12 @@ struct FilterBlock {
         (void)cv1Warp;
         (void)cv2Corruption;
 
+        if (cutoff == 16384 && sm_cutoff == 16384 && grit_param == 0 && sm_grit == 0) {
+            outL = dcL.process(inL);
+            outR = dcR.process(inR);
+            return;
+        }
+
         // Smooth control parameters to prevent clicking/plopping on fast sweeps
         IIR_SMOOTH(sm_cutoff, cutoff, 8);
         IIR_SMOOTH(sm_grit, grit_param, 8);
@@ -2516,6 +2522,9 @@ struct ReverbBlock {
     }
 
     void process(int16_t &L, int16_t &R, int32_t mix, int32_t size, int32_t fb_glitch) {
+        if (mix < 50) {
+            return;
+        }
         // Map Size (X) to scale factor: [0..32767] -> [4915..32767] (0.15x to 1.0x)
         int32_t size_scale = 4915 + (((int32_t)size * 27852) >> 15);
 

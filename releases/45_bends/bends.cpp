@@ -140,31 +140,31 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const uint32_t params_idx     = g_params_idx.load(std::memory_order_relaxed);
     const volatile Core1Params &p = g_params[params_idx];
 
-    const int32_t chorus_mix      = apply_deadzone(p.chorus_mix);
-    const int32_t chorus_rate     = p.chorus_rate;
-    const int32_t chorus_depth_fb = p.chorus_depth_fb;
+    const int32_t eff_chorus_mix      = p.chorus_mix;
+    const int32_t chorus_rate         = p.chorus_rate;
+    const int32_t eff_chorus_depth_fb = p.chorus_depth_fb;
 
-    const int32_t codec_mix         = apply_deadzone(p.codec_mix);
-    const int32_t codec_downsample  = p.codec_downsample;
-    const int32_t codec_ringing_xor = p.codec_ringing_xor;
+    const int32_t eff_codec_mix         = p.codec_mix;
+    const int32_t eff_codec_downsample  = p.codec_downsample;
+    const int32_t eff_codec_ringing_xor = p.codec_ringing_xor;
 
-    const int32_t delay_mix      = apply_deadzone(p.delay_mix);
-    const int32_t delay_time     = p.delay_time;
-    const int32_t delay_feedback = p.delay_feedback;
+    const int32_t eff_delay_mix      = p.delay_mix;
+    const int32_t eff_delay_time     = p.delay_time;
+    const int32_t eff_delay_feedback = p.delay_feedback;
 
-    const int32_t glitch_mix      = apply_deadzone(p.glitch_mix);
-    const int32_t glitch_size     = p.glitch_size;
-    const int32_t glitch_speed    = p.glitch_speed;
-    const int32_t glitch_feedback = p.glitch_feedback;
-    const int32_t global_noise_scale = p.global_noise_scale;
+    const int32_t eff_glitch_mix      = p.glitch_mix;
+    const int32_t eff_glitch_size     = p.glitch_size;
+    const int32_t eff_glitch_speed    = p.glitch_speed;
+    const int32_t eff_glitch_feedback = p.glitch_feedback;
+    const int32_t eff_global_noise_scale = p.global_noise_scale;
 
-    const int32_t filter_cutoff = p.filter_cutoff;
-    const int32_t filter_res    = p.filter_res;
-    const int32_t filter_morph  = p.filter_morph;
+    const int32_t eff_filter_cutoff = p.filter_cutoff;
+    const int32_t eff_filter_res    = p.filter_res;
+    const int32_t eff_filter_morph  = p.filter_morph;
 
-    const int32_t reverb_mix      = apply_deadzone(p.reverb_mix);
-    const int32_t reverb_size     = p.reverb_size;
-    const int32_t reverb_fb_glitch = p.reverb_fb_glitch;
+    const int32_t eff_reverb_mix      = p.reverb_mix;
+    const int32_t reverb_size         = p.reverb_size;
+    const int32_t eff_reverb_fb       = p.reverb_fb_glitch;
 
     const bool    freeze  = p.freeze;
     const bool    stutter = p.stutter;
@@ -176,7 +176,6 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     const bool no_audio2 = p.no_audio2;
     const bool is_freeze_page = p.is_freeze_page;
-    const int32_t grittiness_macro = p.grittiness_macro;
 
     // --- Sample-Accurate Edge Detection for Eurorack Pulses ---
     bool p1_val = PulseIn1();
@@ -198,13 +197,6 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         }
         clk_timer = 0;
     }
-
-    // --- CV1 Global Glitchiness Macro Offset ---
-    int32_t cv1_offset = 0;
-    if (cv1_live) {
-        cv1_offset = cv1 * 8; // maps -2048..2047 to -16384..16376
-    }
-    int32_t eff_grittiness = clamp_i32(grittiness_macro + cv1_offset, 0, 32767);
 
     // --- Read Audio Inputs & Attenuate for Headroom ---
     int16_t L = (int16_t)((AudioIn1() << 4) >> 1);
@@ -236,64 +228,26 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    const int32_t eff_chorus_mix = scale_grit(chorus_mix, 32767, eff_grittiness);
-    const int32_t eff_chorus_depth_fb = scale_grit(chorus_depth_fb, 32767, eff_grittiness);
     chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth_fb, cv1_live ? cv1 : 0);
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
-    const int32_t eff_codec_mix         = scale_grit(codec_mix, 32767, eff_grittiness);
-    const int32_t eff_codec_downsample  = scale_grit(codec_downsample, 24000, eff_grittiness);
-    const int32_t eff_codec_ringing_xor = scale_grit(codec_ringing_xor, 32767, eff_grittiness);
-    const int32_t eff_global_noise_scale = scale_grit(global_noise_scale, 49152, eff_grittiness);
-
     codec.process(L, L, R, R,
                   eff_codec_mix, eff_codec_downsample, eff_codec_ringing_xor,
                   cv2, rand_seed, eff_global_noise_scale);
 
     // ── STAGE 3: Multi-Tap Delay ─────────────────────────────────────────────
-    int32_t eff_delay_time = delay_time;
-    if (eff_grittiness < 16384) {
-        if (delay_time > 16384) {
-            int32_t diff = delay_time - 16384;
-            eff_delay_time = 16384 + ((diff * eff_grittiness) >> 14);
-        }
-    } else {
-        int32_t diff = 32767 - delay_time;
-        eff_delay_time = delay_time + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
-    }
-    const int32_t eff_delay_mix = scale_grit(delay_mix, 32767, eff_grittiness);
-    const int32_t eff_delay_feedback = scale_grit(delay_feedback, 32767, eff_grittiness);
-
     delay_fx.process(L, L, R, R,
                      eff_delay_mix, eff_delay_time, eff_delay_feedback, freeze, 0, cv2, eff_global_noise_scale,
                      pulse1_live, clk_period_samples);
 
     // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
-    int32_t eff_glitch_mix   = glitch_mix;
-    int32_t eff_glitch_size  = glitch_size;
-    int32_t eff_glitch_speed = glitch_speed;
-    int32_t scrub_offset     = 0;
-
+    int32_t scrub_offset = 0;
     if (is_freeze_page) {
-        eff_glitch_mix   = 32767;
-        eff_glitch_size  = p.glitch_size;
-        eff_glitch_speed = p.glitch_speed;
-        scrub_offset     = p.glitch_mix;
-    } else if (freeze) {
-        eff_glitch_mix   = scale_grit(glitch_mix, 32767, eff_grittiness);
-        eff_glitch_size  = p.glitch_size;
-        eff_glitch_speed = p.glitch_speed;
-        scrub_offset     = 0;
-    } else {
-        eff_glitch_mix   = scale_grit(glitch_mix, 32767, eff_grittiness);
-        eff_glitch_size  = p.glitch_size;
-        eff_glitch_speed = scale_grit(glitch_speed, 32767, eff_grittiness);
-        scrub_offset     = 0;
+        scrub_offset = eff_glitch_mix;
     }
-    const int32_t eff_glitch_feedback = scale_grit(glitch_feedback, 32767, eff_grittiness);
 
     glitcher.process(L, L, R, R,
-                     eff_glitch_mix, eff_glitch_size, eff_glitch_speed,
+                     is_freeze_page ? 32767 : eff_glitch_mix, eff_glitch_size, eff_glitch_speed,
                      stutter, is_freeze_page || freeze,
                      cv1, cv2, rand_seed,
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
@@ -302,26 +256,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
                      clk_period_samples, clk_timer);
 
     // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
-    int32_t eff_filter_cutoff = filter_cutoff;
-    if (eff_grittiness < 16384) {
-        int32_t diff = filter_cutoff - 16384;
-        eff_filter_cutoff = 16384 + ((diff * eff_grittiness) >> 14);
-    }
-    const int32_t eff_filter_res = scale_grit(filter_res, 32767, eff_grittiness);
-    const int32_t eff_filter_morph = scale_grit(filter_morph, 32767, eff_grittiness);
     filter.process(L, L, R, R, eff_filter_cutoff, eff_filter_res, eff_filter_morph, 0);
 
     // ── STAGE 6: Reverb ──────────────────────────────────────────────────────
-    const int32_t eff_reverb_mix = scale_grit(reverb_mix, 32767, eff_grittiness);
-    int32_t eff_reverb_fb = reverb_fb_glitch;
-    if (eff_grittiness < 16384) {
-        if (reverb_fb_glitch > 16384) {
-            eff_reverb_fb = 16384 + (((reverb_fb_glitch - 16384) * eff_grittiness) >> 14);
-        }
-    } else {
-        int32_t diff = 32767 - reverb_fb_glitch;
-        eff_reverb_fb = reverb_fb_glitch + ((diff * ((eff_grittiness - 16384) * 2)) >> 15);
-    }
     reverb.process(L, R, eff_reverb_mix, reverb_size, eff_reverb_fb);
 
     // --- CV Outputs (Envelope Follower and Arpeggiator CV / LFO) ---
@@ -386,7 +323,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         
         // Layer 4: High-frequency digital static / crackle spits (modulated by CV2 corruption and noise scale)
         int32_t cv2_abs = cv2 < 0 ? -cv2 : cv2;
-        int32_t static_prob = 1000 + ((cv2_abs * global_noise_scale) >> 15); // ranges 1000 to ~6000
+        int32_t static_prob = 1000 + ((cv2_abs * eff_global_noise_scale) >> 15); // ranges 1000 to ~6000
         bool digital_static = (int32_t)(fast_rand(rand_seed) & 0x7FFF) < static_prob;
         composite_val ^= digital_static;
         
@@ -465,15 +402,15 @@ static void push_params_to_core1() {
     for (int idx = 0; idx < 2; idx++) {
         volatile Core1Params &p = g_params[idx];
 
-        p.chorus_mix       = vp[0][0];
+        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = vp[0][2];
+        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
 
-        p.codec_mix         = vp[1][0];
-        p.codec_downsample  = vp[1][1];
-        p.codec_ringing_xor = vp[1][2];
+        p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
+        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
+        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
 
-        p.delay_mix      = vp[2][0];
+        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -485,14 +422,21 @@ static void push_params_to_core1() {
             }
         } else {
             int32_t diff = 32767 - raw_delay_time;
-            scaled_delay_time = raw_delay_time + ((diff * ((active_macro - 16384) * 2)) >> 15);
+            scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = vp[2][2];
+        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
 
-        p.glitch_mix      = vp[3][0];
-        p.glitch_size     = vp[3][1];
-        p.glitch_speed    = vp[3][2];
+        bool is_freeze_page = (currentPage == 7);
+        if (is_freeze_page || freeze_latched) {
+            p.glitch_mix   = vp[7][0]; // scrub offset
+            p.glitch_speed = vp[7][2]; // speed (Y knob)
+            p.glitch_size  = vp[7][1]; // loop size (X knob)
+        } else {
+            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
+            p.glitch_size  = vp[3][1];
+            p.glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+        }
 
         int32_t raw_fb = vp[2][2];
         int32_t glitch_fb = 0;
@@ -501,7 +445,14 @@ static void push_params_to_core1() {
         }
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
 
-        p.filter_cutoff = vp[4][0];
+        // Filter cutoff pre-scaling
+        int32_t raw_filter_cutoff = vp[4][0];
+        int32_t scaled_filter_cutoff = raw_filter_cutoff;
+        if (active_macro < 16384) {
+            int32_t diff = raw_filter_cutoff - 16384;
+            scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
+        }
+        p.filter_cutoff = scaled_filter_cutoff;
         p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
         p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
 
@@ -513,7 +464,7 @@ static void push_params_to_core1() {
         p.no_audio1 = true;
         p.no_audio2 = true;
 
-        p.is_freeze_page = (currentPage == 7);
+        p.is_freeze_page = is_freeze_page;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
@@ -526,7 +477,7 @@ static void push_params_to_core1() {
         p.global_noise_scale = scale_grit(noise_scale, 49152, active_macro);
 
         // Reverb params — computed with grittiness scaling on damping
-        p.reverb_mix  = apply_deadzone(vp[5][0]);
+        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
         p.reverb_size = vp[5][1];
         {
             int32_t fb = vp[5][2];
@@ -534,7 +485,7 @@ static void push_params_to_core1() {
             if (active_macro < 16384) {
                 if (fb > 16384) eff_fb = 16384 + (((fb - 16384) * active_macro) >> 14);
             } else {
-                eff_fb = fb + (((32767 - fb) * ((active_macro - 16384) * 2)) >> 15);
+                eff_fb = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
             }
             p.reverb_fb_glitch = eff_fb;
         }
@@ -911,17 +862,22 @@ void BendsCard::tick_ui_once() {
         volatile Core1Params &p = g_params[next_idx];
         
         g_macro_active = (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350);
-        int32_t active_macro = g_macro_active ? grittiness_macro : 16384;
+        int32_t base_macro = g_macro_active ? grittiness_macro : 16384;
 
-        p.chorus_mix       = vp[0][0];
+        // Read CV1 and calculate active_macro on Core 0
+        int32_t cv1_val = cv1_live ? (CVIn1()) : 0;
+        int32_t cv1_offset = cv1_live ? (cv1_val * 8) : 0;
+        int32_t active_macro = clamp_i32(base_macro + cv1_offset, 0, 32767);
+
+        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = vp[0][2];
+        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
 
-        p.codec_mix         = vp[1][0];
-        p.codec_downsample  = vp[1][1];
-        p.codec_ringing_xor = vp[1][2];
+        p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
+        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
+        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
 
-        p.delay_mix      = vp[2][0];
+        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -936,7 +892,7 @@ void BendsCard::tick_ui_once() {
             scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = vp[2][2];
+        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
 
         bool is_freeze_page = (currentPage == 7);
         if (is_freeze_page || is_frozen) {
@@ -944,26 +900,33 @@ void BendsCard::tick_ui_once() {
             p.glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
-            p.glitch_mix   = vp[3][0];
+            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
             p.glitch_size  = vp[3][1];
-            p.glitch_speed = vp[3][2];
+            p.glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
         }
 
         // Calculate Glitcher Feedback Loop scaled by grittiness macro
         int32_t raw_fb = vp[2][2];
         int32_t glitch_fb = 0;
         if (raw_fb > 22937) {
-            glitch_fb = ((raw_fb - 22937) * 109224) >> 15; // Optimized division-free!
+            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
         }
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
 
-        p.filter_cutoff = vp[4][0];
+        // Filter cutoff pre-scaling
+        int32_t raw_filter_cutoff = vp[4][0];
+        int32_t scaled_filter_cutoff = raw_filter_cutoff;
+        if (active_macro < 16384) {
+            int32_t diff = raw_filter_cutoff - 16384;
+            scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
+        }
+        p.filter_cutoff = scaled_filter_cutoff;
         p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
         p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
 
         p.freeze = is_frozen;
         p.stutter = pulse1_live && PulseIn1();
-        p.cv1 = cv1_live ? CVIn1() : 0;
+        p.cv1 = cv1_live ? cv1_val : 0;
         p.cv2 = cv2_live ? CVIn2() : 0;
         p.pulse1_live = pulse1_live;
         p.pulse2_live = pulse2_live;
@@ -977,7 +940,7 @@ void BendsCard::tick_ui_once() {
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
-        // Global Noise Scale (tied to Reverb Y knob)
+        // Global Noise Scale
         int32_t noise_scale = 16384;
         int32_t rev_damping = vp[5][2];
         if (rev_damping > 16384) {
@@ -986,8 +949,8 @@ void BendsCard::tick_ui_once() {
         }
         p.global_noise_scale = scale_grit(noise_scale, 49152, active_macro);
 
-        // Reverb params — grittiness scaling on damping
-        p.reverb_mix  = apply_deadzone(vp[5][0]);
+        // Reverb params
+        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
         p.reverb_size = vp[5][1];
         {
             int32_t fb = vp[5][2];
