@@ -47,7 +47,10 @@ ReverbBlock       reverb;
 struct Core1Params {
     int32_t chorus_mix;
     int32_t chorus_rate;
-    int32_t chorus_depth_fb;
+    int32_t chorus_depth_fb; // Keep for legacy, but we will use the decoded ones
+    int32_t chorus_depth;
+    int32_t chorus_feedback;
+    int32_t chorus_xor_mask;
 
     int32_t codec_mix;
     int32_t codec_downsample;
@@ -60,6 +63,7 @@ struct Core1Params {
     int32_t glitch_mix;
     int32_t glitch_size;
     int32_t glitch_speed;
+    int32_t glitch_speed_mapped;
     int32_t glitch_feedback;
     int32_t global_noise_scale;
 
@@ -142,7 +146,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     const int32_t eff_chorus_mix      = p.chorus_mix;
     const int32_t chorus_rate         = p.chorus_rate;
-    const int32_t eff_chorus_depth_fb = p.chorus_depth_fb;
+    const int32_t eff_chorus_depth    = p.chorus_depth;
+    const int32_t eff_chorus_feedback = p.chorus_feedback;
+    const int32_t eff_chorus_xor_mask = p.chorus_xor_mask;
 
     const int32_t eff_codec_mix         = p.codec_mix;
     const int32_t eff_codec_downsample  = p.codec_downsample;
@@ -155,6 +161,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_glitch_mix      = p.glitch_mix;
     const int32_t eff_glitch_size     = p.glitch_size;
     const int32_t eff_glitch_speed    = p.glitch_speed;
+    const int32_t eff_glitch_speed_mapped = p.glitch_speed_mapped;
     const int32_t eff_glitch_feedback = p.glitch_feedback;
     const int32_t eff_global_noise_scale = p.global_noise_scale;
 
@@ -228,7 +235,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth_fb, cv1_live ? cv1 : 0);
+    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth, eff_chorus_feedback, eff_chorus_xor_mask, cv1_live ? cv1 : 0);
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
     codec.process(L, L, R, R,
@@ -247,7 +254,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     glitcher.process(L, L, R, R,
-                     is_freeze_page ? 32767 : eff_glitch_mix, eff_glitch_size, eff_glitch_speed,
+                     is_freeze_page ? 32767 : eff_glitch_mix, eff_glitch_size, eff_glitch_speed, eff_glitch_speed_mapped,
                      stutter, is_freeze_page || freeze,
                      cv1, cv2, rand_seed,
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
@@ -406,6 +413,27 @@ static void push_params_to_core1() {
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
 
+        // Pre-decode Chorus depth, feedback, and destroy
+        int32_t raw_depth_fb = p.chorus_depth_fb;
+        int32_t chorus_depth = 0;
+        int32_t chorus_feedback = 0;
+        int32_t chorus_xor_mask = 0;
+        if (raw_depth_fb < 16384) {
+            chorus_depth = raw_depth_fb * 2;
+            chorus_feedback = 0;
+        } else {
+            chorus_depth = 32767;
+            if (raw_depth_fb < 26214) {
+                chorus_feedback = ((raw_depth_fb - 16384) * 65536) >> 15;
+            } else {
+                chorus_feedback = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
+                chorus_xor_mask = (raw_depth_fb - 26214) >> 9;
+            }
+        }
+        p.chorus_depth = chorus_depth;
+        p.chorus_feedback = chorus_feedback;
+        p.chorus_xor_mask = chorus_xor_mask;
+
         p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
         p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
         p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
@@ -428,15 +456,26 @@ static void push_params_to_core1() {
         p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
 
         bool is_freeze_page = (currentPage == 7);
+        int32_t raw_glitch_speed = 16384;
         if (is_freeze_page || freeze_latched) {
             p.glitch_mix   = vp[7][0]; // scrub offset
-            p.glitch_speed = vp[7][2]; // speed (Y knob)
+            raw_glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
             p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
             p.glitch_size  = vp[3][1];
-            p.glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
         }
+        p.glitch_speed = raw_glitch_speed;
+
+        // Glitch speed mapping
+        int32_t glitch_speed_mapped = 65536;
+        if (raw_glitch_speed > 18000) {
+            glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
+        } else if (raw_glitch_speed < 14000) {
+            glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+        }
+        p.glitch_speed_mapped = glitch_speed_mapped;
 
         int32_t raw_fb = vp[2][2];
         int32_t glitch_fb = 0;
@@ -873,6 +912,27 @@ void BendsCard::tick_ui_once() {
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
 
+        // Pre-decode Chorus depth, feedback, and destroy
+        int32_t raw_depth_fb = p.chorus_depth_fb;
+        int32_t chorus_depth = 0;
+        int32_t chorus_feedback = 0;
+        int32_t chorus_xor_mask = 0;
+        if (raw_depth_fb < 16384) {
+            chorus_depth = raw_depth_fb * 2;
+            chorus_feedback = 0;
+        } else {
+            chorus_depth = 32767;
+            if (raw_depth_fb < 26214) {
+                chorus_feedback = ((raw_depth_fb - 16384) * 65536) >> 15;
+            } else {
+                chorus_feedback = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
+                chorus_xor_mask = (raw_depth_fb - 26214) >> 9;
+            }
+        }
+        p.chorus_depth = chorus_depth;
+        p.chorus_feedback = chorus_feedback;
+        p.chorus_xor_mask = chorus_xor_mask;
+
         p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
         p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
         p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
@@ -895,15 +955,26 @@ void BendsCard::tick_ui_once() {
         p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
 
         bool is_freeze_page = (currentPage == 7);
+        int32_t raw_glitch_speed = 16384;
         if (is_freeze_page || is_frozen) {
             p.glitch_mix   = vp[7][0]; // scrub offset
-            p.glitch_speed = vp[7][2]; // speed (Y knob)
+            raw_glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
             p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
             p.glitch_size  = vp[3][1];
-            p.glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
         }
+        p.glitch_speed = raw_glitch_speed;
+
+        // Glitch speed mapping
+        int32_t glitch_speed_mapped = 65536;
+        if (raw_glitch_speed > 18000) {
+            glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
+        } else if (raw_glitch_speed < 14000) {
+            glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+        }
+        p.glitch_speed_mapped = glitch_speed_mapped;
 
         // Calculate Glitcher Feedback Loop scaled by grittiness macro
         int32_t raw_fb = vp[2][2];

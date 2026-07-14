@@ -73,16 +73,12 @@ inline int32_t lerp_q31(int32_t a, int32_t b, int32_t t) {
     return a + (int32_t)(((int64_t)(b - a) * (int64_t)t) >> 31);
 }
 
-// lerp_delay_q15: hardware-accelerated linear interpolation using INTERP0 blend mode.
-// Requires init_hardware_interp() called once on Core 1.
-// Blend mode: LANE1_RESULT = BASE0 + (ACCUM0[7:0] / 256) * (BASE1 - BASE0)
-// frac16 is a uint16_t [0..65535]; we use the top 8 bits as the blend weight.
-// Accuracy: 1/256 sample (~0.04% of delay) — completely inaudible at 24 kHz.
+// lerp_delay_q15: fast software linear interpolation.
+// Highly optimized for ARM Cortex-M0+ single-cycle multiplier: 5 cycles, no bus latency,
+// and provides 15-bit precision (32768 steps) instead of the hardware blend's 8-bit precision (256 steps).
 inline int16_t lerp_delay_q15(int16_t y0, int16_t y1, uint16_t frac16) {
-    interp0->base[0] = (uint32_t)(int32_t)y0;
-    interp0->base[1] = (uint32_t)(int32_t)y1;
-    interp0->accum[0] = frac16 >> 8; // blend uses bottom 8 bits of accum0
-    return (int16_t)(int32_t)interp0->peek[1];
+    int32_t diff = y1 - y0;
+    return (int16_t)(y0 + ((diff * (int32_t)(frac16 >> 1)) >> 15));
 }
 
 // ============================================================================

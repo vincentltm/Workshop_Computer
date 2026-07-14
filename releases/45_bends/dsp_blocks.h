@@ -117,7 +117,7 @@ struct ChorusBlock {
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
-                 int32_t mainMix, int32_t rate, int32_t depthFeedback,
+                 int32_t mainMix, int32_t rate, int16_t depth, int32_t feedback, int32_t xor_mask,
                  int32_t cv1Warp)
     {
         if (mainMix < 50) {
@@ -142,28 +142,7 @@ struct ChorusBlock {
         uint16_t phase_inc = (uint16_t)(1 + (eff_rate >> 10));
         lfo_phase += phase_inc;
 
-        // Decode depth / feedback from unified knob
-        int16_t depth    = 0;
-        int32_t feedback = 0;
-        bool destroy = false;
-        if (depthFeedback < 16384) {
-            depth    = (int16_t)(depthFeedback * 2); // 0 → 32767
-            feedback = 0;
-        } else {
-            depth    = 32767;
-            if (depthFeedback < 26214) {
-                // Standard range (Y < 80%): feedback rises up to 60% (19660)
-                // 26214 - 16384 = 9830. 19660 * 32768 / 9830 = 65536
-                feedback = ((depthFeedback - 16384) * 65536) >> 15;
-            } else {
-                // Destruction range (80% to 100% knob): feedback rises up to 95% (31128)
-                destroy = true;
-                // 32767 - 26214 = 6553. (31128 - 19660) * 32768 / 6553 = 57343
-                feedback = 19660 + (((depthFeedback - 26214) * 57343) >> 15);
-            }
-        }
-
-        // Classic dual-phase triangle LFO (L = 0°, R = 180° for deep stereo spread)
+        // Classic dual-phase triangle LFO (L = 0°, R = 180° for stereo spread)
         auto get_tri = [](uint16_t phase) -> int16_t {
             int32_t tmp = (phase < 32768) ? ((phase << 1) - 32768) : (32767 - ((phase - 32768) << 1));
             return (int16_t)tmp;
@@ -171,8 +150,7 @@ struct ChorusBlock {
         int16_t lfoL = get_tri(lfo_phase);
         int16_t lfoR = get_tri((uint16_t)(lfo_phase + 32768u));
 
-        // Base delay: 180 samples (~7.5 ms @ 24 kHz). Max modulation range: ±28 samples (~1.1 ms @ 24 kHz).
-        // This tightens the time window to achieve a lush, warm BBD chorus instead of a wide, seasick vibrato.
+        // Base delay: 180 samples. Max modulation: ±28 samples.
         int32_t depth_samples = (int32_t)depth * 28 >> 15;
         int32_t delay_L_q16 = (180 << 16) + (((int32_t)lfoL * depth_samples) << 1);
         int32_t delay_R_q16 = (180 << 16) + (((int32_t)lfoR * depth_samples) << 1);
@@ -190,26 +168,19 @@ struct ChorusBlock {
             uint16_t frac   = (uint16_t)(rp_q16 & 0xFFFF);
             int16_t  y0     = buf[idx];
             int16_t  y1     = buf[nxt];
-            // int32_t safe: (y1-y0) in [-65535,65535], frac in [0,65535]; product fits int32
             return lerp_delay_q15(y0, y1, frac);
         };
 
-        int32_t wp_q16 = (int32_t)write_ptr << 16;
-        int16_t wetL = read_frac(delayL, wp_q16, delay_L_q16);
-        int16_t wetR = read_frac(delayR, wp_q16, delay_R_q16);
+        int16_t wetL = read_frac(delayL, (write_ptr << 16), delay_L_q16);
+        int16_t wetR = read_frac(delayR, (write_ptr << 16), delay_R_q16);
 
-        // BBD low-pass filter
-        int32_t damp = 32767 - ((mainMix * 24000) >> 15);
-        lp_stateL += ((int32_t)wetL - lp_stateL) * damp >> 15;
-        lp_stateR += ((int32_t)wetR - lp_stateR) * damp >> 15;
-        if (lp_stateL >  32767) lp_stateL =  32767;
-        if (lp_stateL < -32768) lp_stateL = -32768;
-        if (lp_stateR >  32767) lp_stateR =  32767;
-        if (lp_stateR < -32768) lp_stateR = -32768;
+        // BBD low-pass filter (cutoff ~6 kHz)
+        lp_stateL += ((wetL - lp_stateL) * 16384) >> 15;
         wetL = (int16_t)lp_stateL;
+        lp_stateR += ((wetR - lp_stateR) * 16384) >> 15;
         wetR = (int16_t)lp_stateR;
 
-        // Vintage HPF on wet path (cutoff ~110 Hz: y = x - x1 + 0.976 * y1)
+        // Vintage HPF on wet path (cutoff ~110 Hz)
         int32_t yL = (int32_t)wetL - hp_x1L + ((hp_y1L * 32000) >> 15);
         hp_x1L = (int32_t)wetL;
         hp_y1L = clamp_i32(yL, -1000000, 1000000);
@@ -228,11 +199,9 @@ struct ChorusBlock {
             int16_t wrL = soft_limit_q15(fbL);
             int16_t wrR = soft_limit_q15(fbR);
             
-            if (destroy) {
-                // Inject XOR bit corruption into Chorus BBD line (scale with destruction intensity)
-                uint16_t xor_mask = (uint16_t)((depthFeedback - 26214) >> 9); // up to ~12 bits of mask
-                wrL ^= xor_mask;
-                wrR ^= xor_mask;
+            if (xor_mask > 0) {
+                wrL ^= (uint16_t)xor_mask;
+                wrR ^= (uint16_t)xor_mask;
             }
             
             delayL[write_ptr] = wrL;
@@ -1312,7 +1281,7 @@ struct GlitcherBlock {
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
-                 int32_t mainProb, int32_t size, int32_t speedQuant,
+                 int32_t mainProb, int32_t size, int32_t speedQuant, int32_t speedMapped,
                  bool glitchInjector, bool freezeGate, int32_t cv1Warp, int32_t cv2Corruption,
                  uint32_t &rand_seed, int32_t scrubOffset, int32_t glitchFeedback, int32_t globalNoiseScale,
                  bool pulse1_live, bool p1_rising, bool p1_gate,
@@ -1432,12 +1401,7 @@ struct GlitcherBlock {
                 active_offset = clamp_i32(init_offset, 0, 32760);
 
                 // Determine initial speed and rd_q16 direction
-                int32_t init_speed = 65536;
-                if (speedQuant > 18000) {
-                    init_speed = 65536 + (((speedQuant - 18000) * 65536) / 14767);
-                } else if (speedQuant < 14000) {
-                    init_speed = -65536 + ((speedQuant * 131072) / 14000);
-                }
+                int32_t init_speed = speedMapped;
                 const int32_t pitch_ratio_lut[25] = {
                     32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
                     69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
@@ -1500,12 +1464,7 @@ struct GlitcherBlock {
             target_offset = clamp_i32(target_offset, 0, 32760);
             
             // Continuous tape speed mapping with a wide 1.0x center deadzone [14000..18000]
-            int32_t active_speed = 65536;
-            if (speedQuant > 18000) {
-                active_speed = 65536 + (((speedQuant - 18000) * 65536) / 14767);
-            } else if (speedQuant < 14000) {
-                active_speed = -65536 + ((speedQuant * 131072) / 14000);
-            }
+            int32_t active_speed = speedMapped;
 
             // CV2 pitch ratio tracking
             const int32_t pitch_ratio_lut[25] = {
@@ -2408,9 +2367,24 @@ struct ReverbBlock {
             uint16_t rd1 = (ptr - scaled_len_int) & mask;
             uint16_t rd2 = (ptr - (scaled_len_int + 1)) & mask;
 
-            // Hardware-accelerated linear interpolation via INTERP0 blend mode
             int16_t dIn  = lerp_delay_q15(bufIn[rd1],  bufIn[rd2],  frac);
             int16_t dOut = lerp_delay_q15(bufOut[rd1], bufOut[rd2], frac);
+
+            int32_t interm = ((int32_t)(g * in) >> 15) + dIn - ((int32_t)(dOut * g) >> 15);
+            if (interm > 32767) interm = 32767;
+            else if (interm < -32768) interm = -32768;
+
+            int16_t out = (int16_t)interm;
+            bufIn[ptr] = in;
+            bufOut[ptr] = out;
+            ptr = (ptr + 1) & mask;
+            return out;
+        }
+
+        inline int16_t process_fixed(int16_t in) {
+            uint16_t rd = (ptr - len) & mask;
+            int16_t dIn  = bufIn[rd];
+            int16_t dOut = bufOut[rd];
 
             int32_t interm = ((int32_t)(g * in) >> 15) + dIn - ((int32_t)(dOut * g) >> 15);
             if (interm > 32767) interm = 32767;
@@ -2614,9 +2588,10 @@ struct ReverbBlock {
         int16_t mono = (int16_t)(((int32_t)L + (int32_t)R) >> 1);
 
         // Input all-passes are kept at fixed scale to prevent pitch-glide in the diffusion network
-        for (int i = 0; i < 4; i++) {
-            mono = apIn[i].process(mono, 32767);
-        }
+        mono = apIn[0].process_fixed(mono);
+        mono = apIn[1].process_fixed(mono);
+        mono = apIn[2].process_fixed(mono);
+        mono = apIn[3].process_fixed(mono);
 
         // Read tank loop outputs using jittered scales
         int16_t tOutL = d2L.read(scaleL);
@@ -2637,7 +2612,7 @@ struct ReverbBlock {
         if (lpL >  32767) lpL =  32767;
         if (lpL < -32768) lpL = -32768;
         sL = (int16_t)lpL;
-        sL = apTankL.process(sL, 32767);
+        sL = apTankL.process_fixed(sL);
         d2L.write(sL);
 
         // Right Tank
@@ -2651,7 +2626,7 @@ struct ReverbBlock {
         if (lpR >  32767) lpR =  32767;
         if (lpR < -32768) lpR = -32768;
         sR = (int16_t)lpR;
-        sR = apTankR.process(sR, 32767);
+        sR = apTankR.process_fixed(sR);
         d2R.write(sR);
 
         int32_t wetL = sL;
