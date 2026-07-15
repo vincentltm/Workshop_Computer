@@ -366,8 +366,11 @@ struct CodecDemolisherBlock {
     }
 
     void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
-                 int32_t strength, int32_t downsample, int32_t ringingXor,
-                 int32_t cv2Corruption, uint32_t &rand_seed, int32_t globalNoiseScale = 16384)
+                 int32_t strength,
+                 int32_t mp3_ring_level, int32_t fuzz_level, int32_t decimate_level,
+                 int32_t pop_prob, int32_t click_depth, int32_t bad_conn_level, int32_t scramble_level,
+                 int32_t sputter_prob, int32_t tape_sat, int32_t tape_hiss, int32_t active_loss,
+                 uint32_t &rand_seed)
     {
         if (strength < 50) {
             outL = inL;
@@ -390,126 +393,27 @@ struct CodecDemolisherBlock {
         vibe_lfo += 4; // doubled for 24kHz
         int16_t vibe_sine = lookup_sine(vibe_lfo); // [-32768, 32767]
 
-        // ── 2. Decoupled Parameter Mapping ─────────────────────────────────────
-        // Warp Y input quadratically for a wide, beautiful analog tape/vinyl sweet spot,
-        // but keep X linear so encoding effects respond immediately and transition smoothly.
-        int32_t X = downsample;
-        int32_t warped_ringing = (ringingXor * ringingXor) >> 15;
-
-        // Knob X (Encoding control) Zone progression: MP3 -> Fuzz Bitcrush -> Downsampling
-        int32_t mp3_ring_level = 0;
-        int32_t fuzz_level = 0;
-        int32_t decimate_level = 0;
-
-        if (X < 11000) {
-            // Zone 1: HQ Digital MP3 watery comb filter
-            mp3_ring_level = (X * 24402) >> 13;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 22000) {
-            // Zone 2: Crossfade MP3 -> Fuzz Bitcrush
-            int32_t t = X - 11000;
-            mp3_ring_level = 32767 - ((t * 24402) >> 13);
-            fuzz_level = (t * 24402) >> 13;
-            decimate_level = 0;
-        } else {
-            // Zone 3: Crossfade Fuzz -> Full downsampling decimation
-            int32_t t = X - 22000;
-            mp3_ring_level = 0;
-            fuzz_level = 32767 - ((t * 24931) >> 13);
-            decimate_level = (t * 24931) >> 13;
-        }
-
-        // Knob Y (ringingXor) + CV2 controls Zone progression (Digital Clicks -> CD Skips -> Connection Breakup)
-        int32_t Y = warped_ringing + (cv2Corruption * 8);
-        Y = clamp_i32(Y, 0, 32767);
-
-        int32_t pop_prob = 0;
-        int32_t bad_conn_level = 0;
-        int32_t scramble_level = 0; // Represents digital static hash & breakup
-
-        // 1. Digital Click slip drops (sharp vinyl clicks) - active between 2000 and 24000
-        if (Y >= 2000 && Y < 11000) {
-            int32_t ratio = ((Y - 2000) * 11927) >> 15; // Q15, rises 0..32767
-            int32_t ratio_sq = (ratio * ratio) >> 15;
-            pop_prob = (ratio_sq * 2) >> 15;
-        } else if (Y >= 11000 && Y < 24000) {
-            int32_t ratio = ((24000 - Y) * 82596) >> 15; // Q15, falls 32767..0
-            int32_t ratio_sq = (ratio * ratio) >> 15;
-            pop_prob = (ratio_sq * 2) >> 15;
-        }
-
-        // 2. CD Skips & Packet drops - active between 8000 and 28000 (overlaps with vinyl clicks)
-        if (Y >= 8000 && Y < 20000) {
-            bad_conn_level = ((Y - 8000) * 89478) >> 15; // Q15, rises 0..32767
-        } else if (Y >= 20000 && Y < 28000) {
-            bad_conn_level = ((28000 - Y) * 134218) >> 15; // Q15, falls 32767..0
-        }
-
-        // 3. Connection Breakup (scramble noise) - active between 18000 and 32767 (overlaps with CD skips)
-        if (Y >= 18000) {
-            scramble_level = ((Y - 18000) * 72712) >> 15; // Q15, rises 0..32767
-            if (scramble_level > 32767) scramble_level = 32767;
-        }
-
-        // Scale clicks/pops by the X knob (quality). 
-        // If X is low (clean), clicks are very subtle and quiet (in the background).
-        // If X is high (crushed), clicks are loud and prominent.
-        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15); // ranges [8000..32767] (0.24x to 1.0x)
-        pop_prob = (pop_prob * x_scale_q15) >> 15;
-
-        // Warp fuzz_level quadratically to make it enter gently and have a wide sweet spot
-        fuzz_level = (fuzz_level * fuzz_level) >> 15;
-
-        // Scale levels by Main knob (strength)
-        // We use glitch_strength for probabilities/levels of skips/static noise so that
-        // the main knob has less influence on glitch occurrence and stutters can still trigger at low mix.
-        int32_t glitch_strength = 16384 + (strength >> 1); // Q15, ranges 50% to 100%
-        fuzz_level = (fuzz_level * strength) >> 15; // MP3 compression remains fully controlled by strength
-        decimate_level = (decimate_level * strength) >> 15;
-        mp3_ring_level = (mp3_ring_level * strength) >> 15;
-        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
-        scramble_level = (scramble_level * glitch_strength) >> 15;
-
-        // Blend clicks in at lower strengths (50% baseline presence)
-        int32_t pop_strength = 16384 + (strength >> 1); // ranges [16384, 32767]
-        pop_prob = (pop_prob * pop_strength) >> 15;
-
-        // Apply Global Noise Scale modifier (16384 is 1.0x)
-        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
-        decimate_level = (decimate_level * globalNoiseScale) >> 14;
-        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
-        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
-        scramble_level = (scramble_level * globalNoiseScale) >> 14;
-        pop_prob = (pop_prob * globalNoiseScale) >> 14;
-
-        if (fuzz_level > 32767) fuzz_level = 32767;
-        if (decimate_level > 32767) decimate_level = 32767;
-        if (mp3_ring_level > 32767) mp3_ring_level = 32767;
-        if (bad_conn_level > 32767) bad_conn_level = 32767;
-        if (scramble_level > 32767) scramble_level = 32767;
-
-        // We process the signal sequentially!
         int16_t sigL = inL;
         int16_t sigR = inR;
 
-        // ── Stage 0: Digital Clock Slip Clicks (Zone 1 of Y) ──
+        // ── Stage 0: Analog Tape Saturation & Hiss (Zone 1 of Y) ──
+        if (tape_sat > 0) {
+            int32_t satL = tape_saturate(((int32_t)sigL * (32768 + tape_sat)) >> 15);
+            int32_t satR = tape_saturate(((int32_t)sigR * (32768 + tape_sat)) >> 15);
+            sigL = lerp_q15(sigL, satL, tape_sat);
+            sigR = lerp_q15(sigR, satR, tape_sat);
+        }
+        if (tape_hiss > 0) {
+            int32_t noiseL = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * tape_hiss >> 8;
+            int32_t noiseR = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * tape_hiss >> 8;
+            sigL = saturate_q15(sigL + noiseL);
+            sigR = saturate_q15(sigR + noiseR);
+        }
+
+        // ── Stage 0.2: Digital Clock Slip Clicks (Zone 1/2 of Y) ──
         if (pop_prob > 0) {
             uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
             if ((int32_t)roll < pop_prob) {
-                // Calculate click blend depth (0 to 32767) scaled by both Y zone progress and strength
-                int32_t click_ratio = 0;
-                if (Y >= 4000 && Y < 11000) {
-                    click_ratio = ((Y - 4000) * 19173) >> 12;
-                } else if (Y < 22000) {
-                    int32_t t = Y - 11000;
-                    click_ratio = ((11000 - t) * 24402) >> 13;
-                }
-                int32_t click_depth = (click_ratio * strength) >> 15;
-                click_depth = (click_depth * x_scale_q15) >> 15; // scale drop depth by X quality
-                click_depth = (click_depth * 18000) >> 15;      // cap at 55% depth to keep them subtle
-
-                // Blend clicks by scaling drop depth rather than forcing full silence
                 sigL = sigL - ((sigL * click_depth) >> 15);
                 sigR = sigR - ((sigR * click_depth) >> 15);
             }
@@ -619,8 +523,6 @@ struct CodecDemolisherBlock {
 
         // ── Stage 2: Bad Connection (Packet Drops & Stutter Repetition) ──────
         if (bad_conn_level > 0 || scramble_level > 0) {
-            int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
-
             if (!trans_dropped) {
                 trans_historyL[trans_wr] = sigL;
                 trans_historyR[trans_wr] = sigR;
@@ -631,9 +533,9 @@ struct CodecDemolisherBlock {
                 trans_frame_size = 240 + (((fast_rand(rand_seed) & 0xFFFF) * 720) >> 16);
 
                 // Gilbert-Elliott packet loss model (bursty clustering)
-                // At higher degradation, BAD bursts trigger more often and last longer.
-                int32_t p_good_to_bad = (active_loss * 2800) >> 15;
-                int32_t p_bad_to_good = 3200 - ((active_loss * 2200) >> 15);
+                // Rebalanced for cleaner skips with air:
+                int32_t p_good_to_bad = (active_loss * 1600) >> 15;
+                int32_t p_bad_to_good = 4000 - ((active_loss * 2500) >> 15);
 
                 uint32_t state_roll = fast_rand(rand_seed) & 0x7FFF;
                 if (link_state_bad) {
@@ -648,7 +550,7 @@ struct CodecDemolisherBlock {
 
                 int32_t drop_thresh = 0;
                 if (link_state_bad) {
-                    drop_thresh = (active_loss * 20000) >> 15;
+                    drop_thresh = (active_loss * 15000) >> 15;
                     if (scramble_level > 0) {
                         drop_thresh += (scramble_level * 6000) >> 15;
                     }
@@ -787,7 +689,6 @@ struct CodecDemolisherBlock {
         int16_t out_wetR = wetR;
 
         // Sputter / Crackle probability scales with Y (ringingXor) and strength (Main)
-        int32_t sputter_prob = ((ringingXor * strength) >> 15) * 80 >> 15;
         if (sputter_prob > 0) {
             uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
 

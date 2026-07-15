@@ -55,6 +55,17 @@ struct Core1Params {
     int32_t codec_mix;
     int32_t codec_downsample;
     int32_t codec_ringing_xor;
+    int32_t codec_mp3_ring;
+    int32_t codec_fuzz;
+    int32_t codec_decimate;
+    int32_t codec_pop_prob;
+    int32_t codec_click_depth;
+    int32_t codec_bad_conn;
+    int32_t codec_scramble;
+    int32_t codec_sputter_prob;
+    int32_t codec_tape_sat;
+    int32_t codec_tape_hiss;
+    int32_t codec_active_loss;
 
     int32_t delay_mix;
     int32_t delay_time;
@@ -157,8 +168,17 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_chorus_xor_mask = p.chorus_xor_mask;
 
     const int32_t eff_codec_mix         = p.codec_mix;
-    const int32_t eff_codec_downsample  = p.codec_downsample;
-    const int32_t eff_codec_ringing_xor = p.codec_ringing_xor;
+    const int32_t eff_codec_mp3_ring    = p.codec_mp3_ring;
+    const int32_t eff_codec_fuzz        = p.codec_fuzz;
+    const int32_t eff_codec_decimate    = p.codec_decimate;
+    const int32_t eff_codec_pop_prob    = p.codec_pop_prob;
+    const int32_t eff_codec_click_depth = p.codec_click_depth;
+    const int32_t eff_codec_bad_conn    = p.codec_bad_conn;
+    const int32_t eff_codec_scramble    = p.codec_scramble;
+    const int32_t eff_codec_sputter_prob = p.codec_sputter_prob;
+    const int32_t eff_codec_tape_sat    = p.codec_tape_sat;
+    const int32_t eff_codec_tape_hiss   = p.codec_tape_hiss;
+    const int32_t eff_codec_active_loss = p.codec_active_loss;
 
     const int32_t eff_delay_mix      = p.delay_mix;
     const int32_t eff_delay_time     = p.delay_time;
@@ -251,8 +271,11 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
     codec.process(L, L, R, R,
-                  eff_codec_mix, eff_codec_downsample, eff_codec_ringing_xor,
-                  cv2, rand_seed, eff_global_noise_scale);
+                  eff_codec_mix,
+                  eff_codec_mp3_ring, eff_codec_fuzz, eff_codec_decimate,
+                  eff_codec_pop_prob, eff_codec_click_depth, eff_codec_bad_conn, eff_codec_scramble,
+                  eff_codec_sputter_prob, eff_codec_tape_sat, eff_codec_tape_hiss, eff_codec_active_loss,
+                  rand_seed);
 
     // ── STAGE 3: Multi-Tap Delay ─────────────────────────────────────────────
     delay_fx.process(L, L, R, R,
@@ -424,6 +447,16 @@ static void push_params_to_core1() {
     for (int idx = 0; idx < 2; idx++) {
         volatile Core1Params &p = g_params[idx];
 
+        // Precompute global noise scale first
+        int32_t noise_scale = 16384;
+        int32_t rev_damping = vp[5][2];
+        if (rev_damping > 16384) {
+            int32_t diff = rev_damping - 16384;
+            noise_scale = 16384 + (diff << 1);
+        }
+        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
+        p.global_noise_scale = globalNoiseScale;
+
         p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
@@ -449,9 +482,134 @@ static void push_params_to_core1() {
         p.chorus_feedback = chorus_feedback;
         p.chorus_xor_mask = chorus_xor_mask;
 
-        p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
-        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
-        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        // Pre-calculate Codec levels
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
+        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        
+        p.codec_mix = raw_strength;
+        p.codec_downsample = raw_downsample;
+        p.codec_ringing_xor = raw_ringing_xor;
+
+        int32_t X = raw_downsample;
+        int32_t warped_ringing = (raw_ringing_xor * raw_ringing_xor) >> 15;
+
+        int32_t mp3_ring_level = 0;
+        int32_t fuzz_level = 0;
+        int32_t decimate_level = 0;
+
+        if (X < 11000) {
+            mp3_ring_level = (X * 24402) >> 13;
+            fuzz_level = 0;
+            decimate_level = 0;
+        } else if (X < 22000) {
+            int32_t t = X - 11000;
+            mp3_ring_level = 32767 - ((t * 24402) >> 13);
+            fuzz_level = (t * 24402) >> 13;
+            decimate_level = 0;
+        } else {
+            int32_t t = X - 22000;
+            mp3_ring_level = 0;
+            fuzz_level = 32767 - ((t * 24931) >> 13);
+            decimate_level = (t * 24931) >> 13;
+        }
+
+        int32_t Y = warped_ringing; // cv2 is 0 at startup
+        Y = clamp_i32(Y, 0, 32767);
+
+        // --- NEW Y KNOB REBALANCING ---
+        // 1. Tape/Vinyl Saturation & Noise (Y < 10000)
+        int32_t tape_sat = 0;
+        int32_t tape_hiss = 0;
+        if (Y < 10000) {
+            tape_sat = (Y * 3); // rises to 30000 at Y = 10000
+            tape_hiss = (Y * 80) >> 15; // gentle noise
+        } else {
+            tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
+            tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
+        }
+
+        // 2. Vinyl Click slips (rises between 1000 and 8000, falls to 16000)
+        int32_t pop_prob = 0;
+        if (Y >= 1000 && Y < 8000) {
+            pop_prob = ((Y - 1000) * 1) / 7000;
+        } else if (Y >= 8000 && Y < 16000) {
+            pop_prob = 1 - ((Y - 8000) / 8000);
+        }
+
+        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 24000, peaks at 16000)
+        int32_t bad_conn_level = 0;
+        if (Y >= 8000 && Y < 16000) {
+            bad_conn_level = ((Y - 8000) * 32767) / 8000;
+        } else if (Y >= 16000 && Y < 24000) {
+            bad_conn_level = 32767 - (((Y - 16000) * 32767) / 8000);
+        }
+
+        // 4. Broken Connection Scramble (Y >= 20000, rises 0..32767)
+        int32_t scramble_level = 0;
+        if (Y >= 20000) {
+            scramble_level = ((Y - 20000) * 32767) / 12767;
+        }
+
+        // Scale pop_prob by X quality
+        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
+        pop_prob = (pop_prob * x_scale_q15) >> 15;
+
+        // Fuzz level quadratic warp
+        fuzz_level = (fuzz_level * fuzz_level) >> 15;
+
+        // Scale by Main knob (strength)
+        int32_t glitch_strength = 16384 + (raw_strength >> 1);
+        fuzz_level = (fuzz_level * raw_strength) >> 15;
+        decimate_level = (decimate_level * raw_strength) >> 15;
+        mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
+        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
+        scramble_level = (scramble_level * glitch_strength) >> 15;
+
+        int32_t pop_strength = 16384 + (raw_strength >> 1);
+        pop_prob = (pop_prob * pop_strength) >> 15;
+
+        // Global Noise Scale modifier
+        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
+        decimate_level = (decimate_level * globalNoiseScale) >> 14;
+        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
+        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
+        scramble_level = (scramble_level * globalNoiseScale) >> 14;
+        pop_prob = (pop_prob * globalNoiseScale) >> 14;
+
+        if (fuzz_level > 32767) fuzz_level = 32767;
+        if (decimate_level > 32767) decimate_level = 32767;
+        if (mp3_ring_level > 32767) mp3_ring_level = 32767;
+        if (bad_conn_level > 32767) bad_conn_level = 32767;
+        if (scramble_level > 32767) scramble_level = 32767;
+
+        int32_t click_ratio = 0;
+        if (Y >= 4000 && Y < 11000) {
+            click_ratio = ((Y - 4000) * 19173) >> 12;
+        } else if (Y < 22000) {
+            int32_t t = Y - 11000;
+            click_ratio = ((11000 - t) * 24402) >> 13;
+        }
+        int32_t click_depth = (click_ratio * raw_strength) >> 15;
+        click_depth = (click_depth * x_scale_q15) >> 15;
+        click_depth = (click_depth * 18000) >> 15;
+
+        int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
+        sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
+
+        int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
+
+        p.codec_mp3_ring = mp3_ring_level;
+        p.codec_fuzz = fuzz_level;
+        p.codec_decimate = decimate_level;
+        p.codec_pop_prob = pop_prob;
+        p.codec_click_depth = click_depth;
+        p.codec_bad_conn = bad_conn_level;
+        p.codec_scramble = scramble_level;
+        p.codec_sputter_prob = sputter_prob;
+        p.codec_tape_sat = tape_sat;
+        p.codec_tape_hiss = tape_hiss;
+        p.codec_active_loss = active_loss;
 
         p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
         
@@ -522,13 +680,6 @@ static void push_params_to_core1() {
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
-        int32_t noise_scale = 16384;
-        int32_t rev_damping = vp[5][2];
-        if (rev_damping > 16384) {
-            int32_t diff = rev_damping - 16384;
-            noise_scale = 16384 + (diff << 1);
-        }
-        p.global_noise_scale = scale_grit(noise_scale, 49152, active_macro);
 
         // Reverb params — computed with grittiness scaling on damping
         p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
@@ -978,6 +1129,16 @@ void BendsCard::tick_ui_once() {
         int32_t cv1_offset = cv1_live ? (cv1_val * 8) : 0;
         int32_t active_macro = clamp_i32(base_macro + cv1_offset, 0, 32767);
 
+        // Precompute global noise scale first
+        int32_t noise_scale = 16384;
+        int32_t rev_damping = vp[5][2];
+        if (rev_damping > 16384) {
+            int32_t diff = rev_damping - 16384;
+            noise_scale = 16384 + (diff << 1);
+        }
+        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
+        p.global_noise_scale = globalNoiseScale;
+
         p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
         p.chorus_rate      = vp[0][1];
         p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
@@ -1003,9 +1164,135 @@ void BendsCard::tick_ui_once() {
         p.chorus_feedback = chorus_feedback;
         p.chorus_xor_mask = chorus_xor_mask;
 
-        p.codec_mix         = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
-        p.codec_downsample  = scale_grit(vp[1][1], 24000, active_macro);
-        p.codec_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        // Pre-calculate Codec levels
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
+        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        
+        p.codec_mix = raw_strength;
+        p.codec_downsample = raw_downsample;
+        p.codec_ringing_xor = raw_ringing_xor;
+
+        int32_t X = raw_downsample;
+        int32_t warped_ringing = (raw_ringing_xor * raw_ringing_xor) >> 15;
+
+        int32_t mp3_ring_level = 0;
+        int32_t fuzz_level = 0;
+        int32_t decimate_level = 0;
+
+        if (X < 11000) {
+            mp3_ring_level = (X * 24402) >> 13;
+            fuzz_level = 0;
+            decimate_level = 0;
+        } else if (X < 22000) {
+            int32_t t = X - 11000;
+            mp3_ring_level = 32767 - ((t * 24402) >> 13);
+            fuzz_level = (t * 24402) >> 13;
+            decimate_level = 0;
+        } else {
+            int32_t t = X - 22000;
+            mp3_ring_level = 0;
+            fuzz_level = 32767 - ((t * 24931) >> 13);
+            decimate_level = (t * 24931) >> 13;
+        }
+
+        int32_t cv2_val = cv2_live ? (CVIn2()) : 0;
+        int32_t Y = warped_ringing + (cv2_val * 8);
+        Y = clamp_i32(Y, 0, 32767);
+
+        // --- NEW Y KNOB REBALANCING ---
+        // 1. Tape/Vinyl Saturation & Noise (Y < 10000)
+        int32_t tape_sat = 0;
+        int32_t tape_hiss = 0;
+        if (Y < 10000) {
+            tape_sat = (Y * 3); // rises to 30000 at Y = 10000
+            tape_hiss = (Y * 80) >> 15; // gentle noise
+        } else {
+            tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
+            tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
+        }
+
+        // 2. Vinyl Click slips (rises between 1000 and 8000, falls to 16000)
+        int32_t pop_prob = 0;
+        if (Y >= 1000 && Y < 8000) {
+            pop_prob = ((Y - 1000) * 1) / 7000;
+        } else if (Y >= 8000 && Y < 16000) {
+            pop_prob = 1 - ((Y - 8000) / 8000);
+        }
+
+        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 24000, peaks at 16000)
+        int32_t bad_conn_level = 0;
+        if (Y >= 8000 && Y < 16000) {
+            bad_conn_level = ((Y - 8000) * 32767) / 8000;
+        } else if (Y >= 16000 && Y < 24000) {
+            bad_conn_level = 32767 - (((Y - 16000) * 32767) / 8000);
+        }
+
+        // 4. Broken Connection Scramble (Y >= 20000, rises 0..32767)
+        int32_t scramble_level = 0;
+        if (Y >= 20000) {
+            scramble_level = ((Y - 20000) * 32767) / 12767;
+        }
+
+        // Scale pop_prob by X quality
+        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
+        pop_prob = (pop_prob * x_scale_q15) >> 15;
+
+        // Fuzz level quadratic warp
+        fuzz_level = (fuzz_level * fuzz_level) >> 15;
+
+        // Scale by Main knob (strength)
+        int32_t glitch_strength = 16384 + (raw_strength >> 1);
+        fuzz_level = (fuzz_level * raw_strength) >> 15;
+        decimate_level = (decimate_level * raw_strength) >> 15;
+        mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
+        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
+        scramble_level = (scramble_level * glitch_strength) >> 15;
+
+        int32_t pop_strength = 16384 + (raw_strength >> 1);
+        pop_prob = (pop_prob * pop_strength) >> 15;
+
+        // Global Noise Scale modifier
+        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
+        decimate_level = (decimate_level * globalNoiseScale) >> 14;
+        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
+        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
+        scramble_level = (scramble_level * globalNoiseScale) >> 14;
+        pop_prob = (pop_prob * globalNoiseScale) >> 14;
+
+        if (fuzz_level > 32767) fuzz_level = 32767;
+        if (decimate_level > 32767) decimate_level = 32767;
+        if (mp3_ring_level > 32767) mp3_ring_level = 32767;
+        if (bad_conn_level > 32767) bad_conn_level = 32767;
+        if (scramble_level > 32767) scramble_level = 32767;
+
+        int32_t click_ratio = 0;
+        if (Y >= 4000 && Y < 11000) {
+            click_ratio = ((Y - 4000) * 19173) >> 12;
+        } else if (Y < 22000) {
+            int32_t t = Y - 11000;
+            click_ratio = ((11000 - t) * 24402) >> 13;
+        }
+        int32_t click_depth = (click_ratio * raw_strength) >> 15;
+        click_depth = (click_depth * x_scale_q15) >> 15;
+        click_depth = (click_depth * 18000) >> 15;
+
+        int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
+        sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
+
+        int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
+
+        p.codec_mp3_ring = mp3_ring_level;
+        p.codec_fuzz = fuzz_level;
+        p.codec_decimate = decimate_level;
+        p.codec_pop_prob = pop_prob;
+        p.codec_click_depth = click_depth;
+        p.codec_bad_conn = bad_conn_level;
+        p.codec_scramble = scramble_level;
+        p.codec_sputter_prob = sputter_prob;
+        p.codec_tape_sat = tape_sat;
+        p.codec_tape_hiss = tape_hiss;
+        p.codec_active_loss = active_loss;
 
         p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
         
@@ -1081,14 +1368,7 @@ void BendsCard::tick_ui_once() {
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
 
-        // Global Noise Scale
-        int32_t noise_scale = 16384;
-        int32_t rev_damping = vp[5][2];
-        if (rev_damping > 16384) {
-            int32_t diff = rev_damping - 16384;
-            noise_scale = 16384 + (diff << 1);
-        }
-        p.global_noise_scale = scale_grit(noise_scale, 49152, active_macro);
+
 
         // Reverb params
         p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
