@@ -372,7 +372,7 @@ struct CodecDemolisherBlock {
                  int32_t sputter_prob, int32_t tape_sat, int32_t tape_hiss, int32_t active_loss,
                  uint32_t &rand_seed)
     {
-        if (strength < 50) {
+        if (strength < 800) {
             outL = inL;
             outR = inR;
             decL = inL;
@@ -396,6 +396,9 @@ struct CodecDemolisherBlock {
         int16_t sigL = inL;
         int16_t sigR = inR;
 
+        // Scale gating by absolute input amplitude to keep silence clean
+        int32_t input_amp = (sigL < 0 ? -sigL : sigL) + (sigR < 0 ? -sigR : sigR);
+
         // ── Stage 0: Analog Tape Saturation & Hiss (Zone 1 of Y) ──
         if (tape_sat > 0) {
             int32_t satL = tape_saturate(((int32_t)sigL * (32768 + tape_sat)) >> 15);
@@ -403,7 +406,7 @@ struct CodecDemolisherBlock {
             sigL = lerp_q15(sigL, satL, tape_sat);
             sigR = lerp_q15(sigR, satR, tape_sat);
         }
-        if (tape_hiss > 0) {
+        if (tape_hiss > 0 && input_amp > 100) {
             int32_t noiseL = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * tape_hiss >> 8;
             int32_t noiseR = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * tape_hiss >> 8;
             sigL = saturate_q15(sigL + noiseL);
@@ -420,7 +423,7 @@ struct CodecDemolisherBlock {
         }
 
         // ── Stage 0.5: Digital Hash Noise (Zone 3 of Y) ──
-        if (scramble_level > 0) {
+        if (scramble_level > 0 && input_amp > 100) {
             int32_t noise_amp = (scramble_level * 50) >> 15; // subtle pre-bitcrush digital noise
             int32_t hashL = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * noise_amp >> 8;
             int32_t hashR = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * noise_amp >> 8;
@@ -584,13 +587,14 @@ struct CodecDemolisherBlock {
                 trans_wr = (trans_wr + 1) & 0xFF;
                 trans_loop_ctr = 0;
             }
-
             int32_t scramble_prob = (active_loss * 4000) >> 15; 
             if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < scramble_prob) {
                 uint32_t limit = 1 + (active_loss >> 11);
                 uint16_t mask = (uint16_t)((fast_rand(rand_seed) >> (32 - 4)) & (limit - 1));
-                sigL ^= mask;
-                sigR ^= mask;
+                if (input_amp > 100) {
+                    sigL ^= mask;
+                    sigR ^= mask;
+                }
             }
         }
 
@@ -696,8 +700,11 @@ struct CodecDemolisherBlock {
                 sputter_timer--;
                 if (sputter_active) {
                     int16_t noise = (int16_t)(fast_rand(rand_seed) & 0xFFFF);
-                    out_wetL = (noise * 600) >> 15;
-                    out_wetR = (noise * 600) >> 15;
+                    int32_t wet_amp = (wetL < 0 ? -wetL : wetL) + (wetR < 0 ? -wetR : wetR);
+                    int32_t sputter_scale = wet_amp >> 4;
+                    if (sputter_scale > 600) sputter_scale = 600;
+                    out_wetL = (noise * (int16_t)sputter_scale) >> 15;
+                    out_wetR = (noise * (int16_t)sputter_scale) >> 15;
                 } else {
                     out_wetL = 0;
                     out_wetR = 0;

@@ -529,26 +529,26 @@ static void push_params_to_core1() {
             tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
         }
 
-        // 2. Vinyl Click slips (rises between 1000 and 8000, falls to 16000)
+        // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
         int32_t pop_prob = 0;
-        if (Y >= 1000 && Y < 8000) {
-            pop_prob = ((Y - 1000) * 1) / 7000;
+        if (Y >= 3000 && Y < 8000) {
+            pop_prob = ((Y - 3000) * 2) / 5000; // rises 0..2
         } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 1 - ((Y - 8000) / 8000);
+            pop_prob = 2 - (((Y - 8000) * 2) / 8000); // falls 2..0
         }
 
-        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 24000, peaks at 16000)
+        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
         int32_t bad_conn_level = 0;
-        if (Y >= 8000 && Y < 16000) {
-            bad_conn_level = ((Y - 8000) * 32767) / 8000;
-        } else if (Y >= 16000 && Y < 24000) {
-            bad_conn_level = 32767 - (((Y - 16000) * 32767) / 8000);
+        if (Y >= 8000 && Y < 18000) {
+            bad_conn_level = ((Y - 8000) * 32767) / 10000;
+        } else if (Y >= 18000 && Y < 26000) {
+            bad_conn_level = 32767 - (((Y - 18000) * 32767) / 8000);
         }
 
-        // 4. Broken Connection Scramble (Y >= 20000, rises 0..32767)
+        // 4. Broken Connection Scramble (Y >= 22000, rises 0..32767)
         int32_t scramble_level = 0;
-        if (Y >= 20000) {
-            scramble_level = ((Y - 20000) * 32767) / 12767;
+        if (Y >= 22000) {
+            scramble_level = ((Y - 22000) * 32767) / 10767;
         }
 
         // Scale pop_prob by X quality
@@ -584,11 +584,11 @@ static void push_params_to_core1() {
         if (scramble_level > 32767) scramble_level = 32767;
 
         int32_t click_ratio = 0;
-        if (Y >= 4000 && Y < 11000) {
-            click_ratio = ((Y - 4000) * 19173) >> 12;
-        } else if (Y < 22000) {
+        if (Y >= 3000 && Y < 11000) {
+            click_ratio = ((Y - 3000) * 16384) / 8000;
+        } else if (Y >= 11000 && Y < 22000) {
             int32_t t = Y - 11000;
-            click_ratio = ((11000 - t) * 24402) >> 13;
+            click_ratio = 16384 - ((t * 16384) / 11000);
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
@@ -1212,26 +1212,26 @@ void BendsCard::tick_ui_once() {
             tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
         }
 
-        // 2. Vinyl Click slips (rises between 1000 and 8000, falls to 16000)
+        // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
         int32_t pop_prob = 0;
-        if (Y >= 1000 && Y < 8000) {
-            pop_prob = ((Y - 1000) * 1) / 7000;
+        if (Y >= 3000 && Y < 8000) {
+            pop_prob = ((Y - 3000) * 2) / 5000; // rises 0..2
         } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 1 - ((Y - 8000) / 8000);
+            pop_prob = 2 - (((Y - 8000) * 2) / 8000); // falls 2..0
         }
 
-        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 24000, peaks at 16000)
+        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
         int32_t bad_conn_level = 0;
-        if (Y >= 8000 && Y < 16000) {
-            bad_conn_level = ((Y - 8000) * 32767) / 8000;
-        } else if (Y >= 16000 && Y < 24000) {
-            bad_conn_level = 32767 - (((Y - 16000) * 32767) / 8000);
+        if (Y >= 8000 && Y < 18000) {
+            bad_conn_level = ((Y - 8000) * 32767) / 10000;
+        } else if (Y >= 18000 && Y < 26000) {
+            bad_conn_level = 32767 - (((Y - 18000) * 32767) / 8000);
         }
 
-        // 4. Broken Connection Scramble (Y >= 20000, rises 0..32767)
+        // 4. Broken Connection Scramble (Y >= 22000, rises 0..32767)
         int32_t scramble_level = 0;
-        if (Y >= 20000) {
-            scramble_level = ((Y - 20000) * 32767) / 12767;
+        if (Y >= 22000) {
+            scramble_level = ((Y - 22000) * 32767) / 10767;
         }
 
         // Scale pop_prob by X quality
@@ -1267,11 +1267,11 @@ void BendsCard::tick_ui_once() {
         if (scramble_level > 32767) scramble_level = 32767;
 
         int32_t click_ratio = 0;
-        if (Y >= 4000 && Y < 11000) {
-            click_ratio = ((Y - 4000) * 19173) >> 12;
-        } else if (Y < 22000) {
+        if (Y >= 3000 && Y < 11000) {
+            click_ratio = ((Y - 3000) * 16384) / 8000;
+        } else if (Y >= 11000 && Y < 22000) {
             int32_t t = Y - 11000;
-            click_ratio = ((11000 - t) * 24402) >> 13;
+            click_ratio = 16384 - ((t * 16384) / 11000);
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
