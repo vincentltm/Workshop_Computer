@@ -143,10 +143,9 @@ inline int32_t scale_grit(int32_t val, int32_t max_val, int32_t macro) {
     if (macro < 16384) {
         return (val * macro) >> 14;
     } else {
-        // (macro - 16384) / 16383  ≈  (macro - 16384) * 65538 >> 20
-        // max error: 65538/1048576 - 1/16383 < 0.0004% — inaudible
         int32_t diff = max_val - val;
-        return val + ((diff * ((macro - 16384) * 65538 >> 20)) >> 15);
+        int32_t scale_q15 = (macro - 16384) * 2;
+        return val + ((diff * scale_q15) >> 15);
     }
 }
 
@@ -887,12 +886,17 @@ void BendsCard::tick_ui_once() {
     }
     if (sw_down_exited) {
         if (active_sw_held_ms >= 350) {
+            // Bake Chorus parameters
+            vp[0][0] = scale_grit(vp[0][0], 32767, grittiness_macro);
+            vp[0][2] = scale_grit(vp[0][2], 32767, grittiness_macro);
+
             // Bake Codec parameters
             vp[1][0] = scale_grit(vp[1][0], 32767, grittiness_macro);
             vp[1][1] = scale_grit(vp[1][1], 24000, grittiness_macro);
             vp[1][2] = scale_grit(vp[1][2], 32767, grittiness_macro);
 
             // Bake Delay parameters
+            vp[2][0] = scale_grit(vp[2][0], 32767, grittiness_macro);
             {
                 int32_t val = vp[2][1];
                 if (grittiness_macro < 16384) {
@@ -905,18 +909,7 @@ void BendsCard::tick_ui_once() {
                     vp[2][1] = val + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
                 }
             }
-            {
-                int32_t val = vp[2][2];
-                if (grittiness_macro < 16384) {
-                    if (val > 22937) {
-                        int32_t diff = val - 22937;
-                        vp[2][2] = 22937 + ((diff * grittiness_macro) >> 14);
-                    }
-                } else {
-                    int32_t diff = 32767 - val;
-                    vp[2][2] = val + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
-                }
-            }
+            vp[2][2] = scale_grit(vp[2][2], 32767, grittiness_macro);
 
             // Bake Glitcher parameters
             vp[3][0] = scale_grit(vp[3][0], 32767, grittiness_macro);
@@ -934,6 +927,7 @@ void BendsCard::tick_ui_once() {
             vp[4][2] = scale_grit(vp[4][2], 32767, grittiness_macro);
 
             // Bake Reverb parameters
+            vp[5][0] = scale_grit(vp[5][0], 32767, grittiness_macro);
             {
                 int32_t val = vp[5][2];
                 if (grittiness_macro < 16384) {
@@ -964,6 +958,9 @@ void BendsCard::tick_ui_once() {
             grittiness_macro = 16384;
             g_macro_active = false;
             lockMain.engage(dzMain, vp[currentPage][0]);
+            lockX.engage(dzX, vp[currentPage][1]);
+            lockY.engage(dzY, vp[currentPage][2]);
+            lockMacro.engage(dzMain, grittiness_macro);
             param_changed = true;
         } else {
             lockMain.engage(dzMain, vp[currentPage][0]);
