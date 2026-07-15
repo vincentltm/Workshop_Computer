@@ -532,9 +532,9 @@ static void push_params_to_core1() {
         // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
         int32_t pop_prob = 0;
         if (Y >= 3000 && Y < 8000) {
-            pop_prob = ((Y - 3000) * 2) / 5000; // rises 0..2
+            pop_prob = ((Y - 3000) * 1) / 5000; // rises 0..1
         } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 2 - (((Y - 8000) * 2) / 8000); // falls 2..0
+            pop_prob = 1 - (((Y - 8000) * 1) / 8000); // falls 1..0
         }
 
         // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
@@ -592,7 +592,7 @@ static void push_params_to_core1() {
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 18000) >> 15;
+        click_depth = (click_depth * 4000) >> 15;
 
         int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
@@ -1215,9 +1215,9 @@ void BendsCard::tick_ui_once() {
         // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
         int32_t pop_prob = 0;
         if (Y >= 3000 && Y < 8000) {
-            pop_prob = ((Y - 3000) * 2) / 5000; // rises 0..2
+            pop_prob = ((Y - 3000) * 1) / 5000; // rises 0..1
         } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 2 - (((Y - 8000) * 2) / 8000); // falls 2..0
+            pop_prob = 1 - (((Y - 8000) * 1) / 8000); // falls 1..0
         }
 
         // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
@@ -1275,7 +1275,7 @@ void BendsCard::tick_ui_once() {
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 18000) >> 15;
+        click_depth = (click_depth * 4000) >> 15;
 
         int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
