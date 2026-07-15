@@ -536,9 +536,9 @@ struct CodecDemolisherBlock {
                 trans_frame_size = 240 + (((fast_rand(rand_seed) & 0xFFFF) * 720) >> 16);
 
                 // Gilbert-Elliott packet loss model (bursty clustering)
-                // Rebalanced for cleaner skips with air:
-                int32_t p_good_to_bad = (active_loss * 1600) >> 15;
-                int32_t p_bad_to_good = 4000 - ((active_loss * 2500) >> 15);
+                // Rebalanced for sparser, shorter, and cleaner skips:
+                int32_t p_good_to_bad = (active_loss * 350) >> 15;
+                int32_t p_bad_to_good = 8000 - ((active_loss * 4000) >> 15);
 
                 uint32_t state_roll = fast_rand(rand_seed) & 0x7FFF;
                 if (link_state_bad) {
@@ -553,9 +553,9 @@ struct CodecDemolisherBlock {
 
                 int32_t drop_thresh = 0;
                 if (link_state_bad) {
-                    drop_thresh = (active_loss * 15000) >> 15;
+                    drop_thresh = (active_loss * 7000) >> 15;
                     if (scramble_level > 0) {
-                        drop_thresh += (scramble_level * 6000) >> 15;
+                        drop_thresh += (scramble_level * 3000) >> 15;
                     }
                 }
 
