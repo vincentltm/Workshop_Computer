@@ -147,44 +147,61 @@ struct KnobLock {
     bool    locked = true;
     int32_t ref    = 0;
     int32_t val    = 0;
+    bool    catchup_mode = false;
+    bool    catchup_dir = false; // true if ref > val (need v <= val), false if ref < val (need v >= val)
 
     // Engage lock: call on every page change.
     // saved_value is the virtual parameter value for this page.
-    void engage(int32_t current_hw_value, int32_t saved_value = 0) {
+    void engage(int32_t current_hw_value, int32_t saved_value = 0, bool catchup = false) {
         locked = true;
         ref    = current_hw_value;
         val    = saved_value;
+        catchup_mode = catchup;
+        if (catchup) {
+            catchup_dir = (ref > val);
+        }
     }
 
     // Call every UI tick with the smoothed hardware knob value.
-    // Returns the new virtual value (either locked saved value or slewing towards physical).
+    // Returns the new virtual value.
     int32_t update(int32_t v) {
         if (locked) {
-            int32_t d = v - ref;
-            if (d < 0) d = -d;
-            if (d > 1638) {
-                locked = false; // Unlocked!
+            if (catchup_mode) {
+                if (catchup_dir) {
+                    if (v <= val) locked = false;
+                } else {
+                    if (v >= val) locked = false;
+                }
+            } else {
+                int32_t d = v - ref;
+                if (d < 0) d = -d;
+                if (d > 1638) {
+                    locked = false; // Unlocked!
+                }
             }
         }
         
         if (!locked) {
-            int32_t dist = v - val;
-            if (dist < 0) dist = -dist;
-            
-            // Dynamic slew speed: if physical knob is far, slide slowly. If close, track fast.
-            // dist range is [0, 32767].
-            int32_t shift = 4; // fast tracking for small jumps (~16ms)
-            if (dist > 20000)      shift = 7; // very slow slide for full-scale jumps (~128ms)
-            else if (dist > 10000) shift = 6; // medium-slow for half-scale (~64ms)
-            else if (dist > 3000)  shift = 5; // standard slew (~32ms)
-            
-            val += (v - val) >> shift;
-            
-            // Snap to physical value when extremely close
-            int32_t diff = v - val;
-            if (diff < 0) diff = -diff;
-            if (diff < 32) {
-                val = v;
+            if (catchup_mode) {
+                val = v; // instant tracking once caught up
+            } else {
+                int32_t dist = v - val;
+                if (dist < 0) dist = -dist;
+                
+                // Dynamic slew speed: if physical knob is far, slide slowly. If close, track fast.
+                int32_t shift = 4; // fast tracking for small jumps (~16ms)
+                if (dist > 20000)      shift = 7; // very slow slide for full-scale jumps (~128ms)
+                else if (dist > 10000) shift = 6; // medium-slow for half-scale (~64ms)
+                else if (dist > 3000)  shift = 5; // standard slew (~32ms)
+                
+                val += (v - val) >> shift;
+                
+                // Snap to physical value when extremely close
+                int32_t diff = v - val;
+                if (diff < 0) diff = -diff;
+                if (diff < 32) {
+                    val = v;
+                }
             }
         }
         return val;
@@ -195,6 +212,7 @@ struct KnobLock {
         locked = true;
         ref    = v;
         val    = saved_value;
+        catchup_mode = false;
     }
 };
 

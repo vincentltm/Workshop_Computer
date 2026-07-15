@@ -881,7 +881,7 @@ void BendsCard::tick_ui_once() {
     bool sw_down_exited  = (last_debounced_sw == ComputerCard::Switch::Down && debounced_sw != ComputerCard::Switch::Down);
 
     if (sw_down_entered) {
-        lockMacro.engage(dzMain, grittiness_macro);
+        lockMacro.engage(dzMain, grittiness_macro, true);
         macro_adjusted_this_hold = false;
     }
     if (sw_down_exited) {
@@ -1443,7 +1443,28 @@ void BendsCard::tick_ui_once() {
 
     if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int16_t bar_leds[6];
-        get_bar_graph_leds(grittiness_macro, bar_leds);
+        if (lockMacro.locked) {
+            // Knob is locked, show catchup helper
+            get_bar_graph_leds(lockMacro.val, bar_leds);
+            // Make the virtual value target dim
+            for (int i = 0; i < 6; i++) {
+                bar_leds[i] = (bar_leds[i] * 300) >> 12; // dim it down
+            }
+            // Flash the physical position at 5Hz
+            static uint32_t blink_counter = 0;
+            blink_counter++;
+            bool blink_on = (blink_counter % 200 < 100);
+            if (blink_on) {
+                int32_t phys_val = dzMain;
+                int phys_idx = phys_val / 5461;
+                if (phys_idx < 0) phys_idx = 0;
+                if (phys_idx > 5) phys_idx = 5;
+                bar_leds[phys_idx] = 4095; // flash bright
+            }
+        } else {
+            // Unlocked, show normal macro value solid
+            get_bar_graph_leds(grittiness_macro, bar_leds);
+        }
         for (int i = 0; i < 6; i++) {
             LedBrightness(i, bar_leds[i]);
         }
