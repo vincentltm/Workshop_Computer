@@ -139,11 +139,17 @@ public:
 
 BendsCard card;
 
-inline int32_t scale_grit(int32_t val, int32_t max_val, int32_t macro) {
+inline int32_t scale_grit(int32_t val, int32_t max_val, int32_t macro, int32_t gain_q15 = 32768) {
     if (macro < 16384) {
         return (val * macro) >> 14;
     } else {
-        int32_t diff = max_val - val;
+        int32_t target_max = val;
+        if (gain_q15 >= 32768) {
+            target_max = max_val;
+        } else {
+            target_max = val + (((max_val - val) * gain_q15) >> 15);
+        }
+        int32_t diff = target_max - val;
         int32_t scale_q15 = (macro - 16384) * 2;
         return val + ((diff * scale_q15) >> 15);
     }
@@ -456,9 +462,9 @@ static void push_params_to_core1() {
         int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
         p.global_noise_scale = globalNoiseScale;
 
-        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
+        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro, 16384);
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
+        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro, 16384);
 
         // Pre-decode Chorus depth, feedback, and destroy
         int32_t raw_depth_fb = p.chorus_depth_fb;
@@ -482,9 +488,9 @@ static void push_params_to_core1() {
         p.chorus_xor_mask = chorus_xor_mask;
 
         // Pre-calculate Codec levels
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
-        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro, 16384);
+        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro, 16384);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro, 16384);
         
         p.codec_mix = raw_strength;
         p.codec_downsample = raw_downsample;
@@ -610,7 +616,7 @@ static void push_params_to_core1() {
         p.codec_tape_hiss = tape_hiss;
         p.codec_active_loss = active_loss;
 
-        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
+        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro, 16384);
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -625,7 +631,7 @@ static void push_params_to_core1() {
             scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
+        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro, 13107);
 
         bool is_freeze_page = (currentPage == 7);
         int32_t raw_glitch_speed = 16384;
@@ -634,9 +640,9 @@ static void push_params_to_core1() {
             raw_glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
-            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
+            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro, 16384);
             p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro, 16384);
         }
         p.glitch_speed = raw_glitch_speed;
 
@@ -654,7 +660,7 @@ static void push_params_to_core1() {
         if (raw_fb > 22937) {
             glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
         }
-        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
+        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
 
         // Filter cutoff pre-scaling
         int32_t raw_filter_cutoff = vp[4][0];
@@ -664,8 +670,8 @@ static void push_params_to_core1() {
             scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
         }
         p.filter_cutoff = scaled_filter_cutoff;
-        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
-        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
+        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro, 13107);
+        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro, 9830);
 
         p.freeze = freeze_latched;
         p.stutter = false;
@@ -681,14 +687,15 @@ static void push_params_to_core1() {
 
 
         // Reverb params — computed with grittiness scaling on damping
-        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
+        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro, 13107);
         {
             int32_t fb = vp[5][2];
             int32_t fb_glitch = fb;
             if (active_macro < 16384) {
                 if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
             } else {
-                fb_glitch = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
+                int32_t target_max = fb + (((32767 - fb) * 13107) >> 15);
+                fb_glitch = fb + (((target_max - fb) * (active_macro - 16384)) / 16383);
             }
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
@@ -887,16 +894,16 @@ void BendsCard::tick_ui_once() {
     if (sw_down_exited) {
         if (active_sw_held_ms >= 350) {
             // Bake Chorus parameters
-            vp[0][0] = scale_grit(vp[0][0], 32767, grittiness_macro);
-            vp[0][2] = scale_grit(vp[0][2], 32767, grittiness_macro);
+            vp[0][0] = scale_grit(vp[0][0], 32767, grittiness_macro, 16384);
+            vp[0][2] = scale_grit(vp[0][2], 32767, grittiness_macro, 16384);
 
             // Bake Codec parameters
-            vp[1][0] = scale_grit(vp[1][0], 32767, grittiness_macro);
-            vp[1][1] = scale_grit(vp[1][1], 24000, grittiness_macro);
-            vp[1][2] = scale_grit(vp[1][2], 32767, grittiness_macro);
+            vp[1][0] = scale_grit(vp[1][0], 32767, grittiness_macro, 16384);
+            vp[1][1] = scale_grit(vp[1][1], 24000, grittiness_macro, 16384);
+            vp[1][2] = scale_grit(vp[1][2], 32767, grittiness_macro, 16384);
 
             // Bake Delay parameters
-            vp[2][0] = scale_grit(vp[2][0], 32767, grittiness_macro);
+            vp[2][0] = scale_grit(vp[2][0], 32767, grittiness_macro, 16384);
             {
                 int32_t val = vp[2][1];
                 if (grittiness_macro < 16384) {
@@ -909,11 +916,11 @@ void BendsCard::tick_ui_once() {
                     vp[2][1] = val + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
                 }
             }
-            vp[2][2] = scale_grit(vp[2][2], 32767, grittiness_macro);
+            vp[2][2] = scale_grit(vp[2][2], 32767, grittiness_macro, 13107);
 
             // Bake Glitcher parameters
-            vp[3][0] = scale_grit(vp[3][0], 32767, grittiness_macro);
-            vp[3][2] = scale_grit(vp[3][2], 32767, grittiness_macro);
+            vp[3][0] = scale_grit(vp[3][0], 32767, grittiness_macro, 16384);
+            vp[3][2] = scale_grit(vp[3][2], 32767, grittiness_macro, 16384);
 
             // Bake Filter parameters
             {
@@ -923,11 +930,11 @@ void BendsCard::tick_ui_once() {
                     vp[4][0] = 16384 + ((diff * grittiness_macro) >> 14);
                 }
             }
-            vp[4][1] = scale_grit(vp[4][1], 32767, grittiness_macro);
-            vp[4][2] = scale_grit(vp[4][2], 32767, grittiness_macro);
+            vp[4][1] = scale_grit(vp[4][1], 32767, grittiness_macro, 13107);
+            vp[4][2] = scale_grit(vp[4][2], 32767, grittiness_macro, 9830);
 
             // Bake Reverb parameters
-            vp[5][0] = scale_grit(vp[5][0], 32767, grittiness_macro);
+            vp[5][0] = scale_grit(vp[5][0], 32767, grittiness_macro, 13107);
             {
                 int32_t val = vp[5][2];
                 if (grittiness_macro < 16384) {
@@ -936,8 +943,8 @@ void BendsCard::tick_ui_once() {
                         vp[5][2] = 16384 + ((diff * grittiness_macro) >> 14);
                     }
                 } else {
-                    int32_t diff = 32767 - val;
-                    vp[5][2] = val + ((diff * (grittiness_macro - 16384)) / 16383);
+                    int32_t target_max = val + (((32767 - val) * 13107) >> 15);
+                    vp[5][2] = val + (((target_max - val) * (grittiness_macro - 16384)) / 16383);
                 }
             }
 
@@ -1136,9 +1143,9 @@ void BendsCard::tick_ui_once() {
         int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
         p.global_noise_scale = globalNoiseScale;
 
-        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro);
+        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro, 16384);
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro);
+        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro, 16384);
 
         // Pre-decode Chorus depth, feedback, and destroy
         int32_t raw_depth_fb = p.chorus_depth_fb;
@@ -1162,9 +1169,9 @@ void BendsCard::tick_ui_once() {
         p.chorus_xor_mask = chorus_xor_mask;
 
         // Pre-calculate Codec levels
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro);
-        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro);
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro, 16384);
+        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro, 16384);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro, 16384);
         
         p.codec_mix = raw_strength;
         p.codec_downsample = raw_downsample;
@@ -1291,7 +1298,7 @@ void BendsCard::tick_ui_once() {
         p.codec_tape_hiss = tape_hiss;
         p.codec_active_loss = active_loss;
 
-        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro);
+        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro, 16384);
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -1306,7 +1313,7 @@ void BendsCard::tick_ui_once() {
             scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro);
+        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro, 13107);
 
         bool is_freeze_page = (currentPage == 7);
         int32_t raw_glitch_speed = 16384;
@@ -1315,9 +1322,9 @@ void BendsCard::tick_ui_once() {
             raw_glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
-            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro);
+            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro, 16384);
             p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro, 16384);
         }
         p.glitch_speed = raw_glitch_speed;
 
@@ -1336,7 +1343,7 @@ void BendsCard::tick_ui_once() {
         if (raw_fb > 22937) {
             glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
         }
-        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro);
+        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
 
         // Filter cutoff pre-scaling
         int32_t raw_filter_cutoff = vp[4][0];
@@ -1346,8 +1353,8 @@ void BendsCard::tick_ui_once() {
             scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
         }
         p.filter_cutoff = scaled_filter_cutoff;
-        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro);
-        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro);
+        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro, 13107);
+        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro, 9830);
 
         p.freeze = is_frozen;
         p.stutter = pulse1_live && PulseIn1();
@@ -1368,14 +1375,15 @@ void BendsCard::tick_ui_once() {
 
 
         // Reverb params
-        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro);
+        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro, 13107);
         {
             int32_t fb = vp[5][2];
             int32_t fb_glitch = fb;
             if (active_macro < 16384) {
                 if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
             } else {
-                fb_glitch = fb + (((32767 - fb) * (active_macro - 16384)) / 16383);
+                int32_t target_max = fb + (((32767 - fb) * 13107) >> 15);
+                fb_glitch = fb + (((target_max - fb) * (active_macro - 16384)) / 16383);
             }
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
