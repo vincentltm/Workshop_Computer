@@ -113,7 +113,7 @@ volatile Core1Params g_params[2];
 std::atomic<uint32_t> g_params_idx{0};
 
 // Grittiness macro state (written on Core 0, read in push_params_to_core1)
-static int32_t grittiness_macro = 32767;
+static int32_t grittiness_macro = 16384;
 static bool g_macro_active = false;
 
 // Visual feedback (Core 1 → Core 0)
