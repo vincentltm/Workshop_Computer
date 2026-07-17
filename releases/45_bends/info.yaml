@@ -2,5 +2,24 @@ Description: Stereo Multi-FX, Glitch, and Codec Demolisher Card
 Name: Bends
 Language: C++
 Creator: Vincent Maurer (vincentmaurer.de) with Advanced Agentic Coding
-Version: 1.0
-Status: Release
+Version: 1.1
+Status: Released
+License: MIT
+panel:
+  inputs:
+    - id: PulseIn1
+      name: Stutter Clock / Trigger
+      description: Global stutter clock sync and gate trigger for granular glitches.
+      type: pulse
+    - id: PulseIn2
+      name: Freeze Gate
+      description: Global freeze gate input to loop current delay and stutter buffers.
+      type: pulse
+    - id: CVIn1
+      name: Macro / Clicks / Skips Injector
+      description: Global modulator for grittiness macro (positive voltage adds pops and CD skipping).
+      type: cv
+    - id: CVIn2
+      name: Breakup / Stutter Injector
+      description: Global digital scramble and packet dropout injector (gate triggers stutter if > +1.2V).
+      type: cv
