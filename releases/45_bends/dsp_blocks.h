@@ -643,7 +643,7 @@ struct CodecDemolisherBlock {
         wetR = tape_saturate(saturate_q15(compRi));
 
         // ── 4. Downsampling (from X Knob) ─────────────────────────────────────
-        if (decimate_level > 0) {
+        if (decimate_level > 800) {
             int16_t pre_decL = wetL;
             int16_t pre_decR = wetR;
 
@@ -760,8 +760,9 @@ struct MultiTapDelayBlock {
     // IIR-smoothed delay time (prevents zipper on rapid changes)
     int32_t  smooth_t = 8000;
 
-    // Wow & flutter LFO phase accumulator
+    // Wow & flutter LFO phase accumulator and smoothed depth
     uint16_t flutter_phase = 0;
+    int32_t  smooth_flutter_depth = 0;
 
     // Feedback 1-pole LPF state variables
     int32_t  lp_feedback_L = 0;
@@ -783,6 +784,7 @@ struct MultiTapDelayBlock {
         wr            = 0;
         smooth_t      = 8000;
         flutter_phase = 0;
+        smooth_flutter_depth = 0;
         lp_feedback_L = 0;
         lp_feedback_R = 0;
         clk_phase     = 0;
@@ -862,7 +864,11 @@ struct MultiTapDelayBlock {
         // Increment wow & flutter LFO (~2.2 Hz) (doubled for 24kHz)
         flutter_phase += 6;
         int16_t lfo = lookup_sine_fast(flutter_phase);
-        int32_t flutter = (lfo * 8) >> 15; // up to ±8 samples of flutter
+        int32_t cv2_abs = cv2Corruption < 0 ? -cv2Corruption : cv2Corruption;
+        int32_t cv2_warp = cv2_abs * 12; // ranges 0..24576
+        int32_t target_flutter_depth = ((feedback * 40) >> 15) + ((cv2_warp * 20) >> 15);
+        smooth_flutter_depth += ((target_flutter_depth - smooth_flutter_depth) * 64) >> 10;
+        int32_t flutter = (lfo * smooth_flutter_depth) >> 15; // up to ±60 samples of lush tape flutter/warble
 
         // Fractional-sample read with linear interpolation (optimised: division-free)
         auto read_stereo = [&](int32_t delay_q16,
