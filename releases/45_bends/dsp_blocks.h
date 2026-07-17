@@ -424,7 +424,7 @@ struct CodecDemolisherBlock {
 
         // ── Stage 0.5: Digital Hash Noise (Zone 3 of Y) ──
         if (scramble_level > 0 && input_amp > 100) {
-            int32_t noise_amp = (scramble_level * 50) >> 15; // subtle pre-bitcrush digital noise
+            int32_t noise_amp = (scramble_level * 20) >> 15; // subtle pre-bitcrush digital noise
             int32_t hashL = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * noise_amp >> 8;
             int32_t hashR = (((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * noise_amp >> 8;
             sigL = saturate_q15(sigL + hashL);
@@ -2129,17 +2129,17 @@ struct FilterBlock {
             if (peak > env) env += (peak - env) >> attack_shift;
             else env += (peak - env) >> release_shift;
 
-            // Threshold sweeps from 32767 down to 6000 as grit increases
-            int32_t thresh = 32767 - ((eff_grit * 26767) >> 15);
-            // Compression slope sweeps up from 0 to 24000 (around 3:1 ratio)
-            int32_t slope = (eff_grit * 24000) >> 15;
+            // Threshold sweeps from 32767 down to 12767 as grit increases
+            int32_t thresh = 32767 - ((eff_grit * 20000) >> 15);
+            // Compression slope sweeps up from 0 to 15000 (around 1.5:1 ratio)
+            int32_t slope = (eff_grit * 15000) >> 15;
 
             int32_t gain_coef = 32768; // Q15
             if (env > thresh) {
                 int32_t overshoot = env - thresh;
                 int32_t gain_reduction = ((int32_t)overshoot * slope) >> 15;
                 gain_coef = 32768 - gain_reduction;
-                if (gain_coef < 8192) gain_coef = 8192; // max ~12dB gain reduction
+                if (gain_coef < 18000) gain_coef = 18000; // max ~5.2dB gain reduction for constant volume
             }
 
             distL = ((int32_t)distL * gain_coef) >> 15;

@@ -528,10 +528,10 @@ static void push_params_to_core1() {
         int32_t tape_hiss = 0;
         if (Y < 10000) {
             tape_sat = (Y * 3); // rises to 30000 at Y = 10000
-            tape_hiss = (Y * 80) >> 15; // gentle noise
+            tape_hiss = (Y * 30) >> 15; // gentle noise
         } else {
             tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
-            tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
+            tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
         }
 
         // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
@@ -1210,10 +1210,10 @@ void BendsCard::tick_ui_once() {
         int32_t tape_hiss = 0;
         if (Y < 10000) {
             tape_sat = (Y * 3); // rises to 30000 at Y = 10000
-            tape_hiss = (Y * 80) >> 15; // gentle noise
+            tape_hiss = (Y * 30) >> 15; // gentle noise
         } else {
             tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
-            tape_hiss = 80 - (((Y - 10000) * 80) / 22767);
+            tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
         }
 
         // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
