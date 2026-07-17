@@ -97,6 +97,9 @@ struct Core1Params {
 
     int32_t grittiness_macro;
 
+    int32_t input_width;
+    int32_t input_balance;
+
     int32_t glitch_loop_size;
     int32_t glitch_target_offset;
     int32_t glitch_speed_q16;
@@ -119,6 +122,9 @@ volatile uint32_t g_clk_period_samples = 0;
 // Grittiness macro state (written on Core 0, read in push_params_to_core1)
 static int32_t grittiness_macro = 16384;
 static bool g_macro_active = false;
+static int32_t global_input_width = 32767;
+static int32_t global_input_balance = 16384;
+static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Balance
 
 // Visual feedback (Core 1 → Core 0)
 std::atomic<uint16_t> vis_lfo_phase{0};       // Chorus LFO phase for LED glow
@@ -204,6 +210,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_glitch_target_offset = p.glitch_target_offset;
     const int32_t eff_glitch_speed_q16     = p.glitch_speed_q16;
 
+    const int32_t eff_input_width   = p.input_width;
+    const int32_t eff_input_balance = p.input_balance;
+
     const int32_t eff_filter_cutoff = p.filter_cutoff;
     const int32_t eff_filter_res    = p.filter_res;
     const int32_t eff_filter_morph  = p.filter_morph;
@@ -258,6 +267,25 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     // --- Apply Input DC Blockers ---
     L = dc_inL.process(L);
     R = dc_inR.process(R);
+
+    // --- Apply Global Stereo Width & Balance Controls (Switch Down hold tweaks) ---
+    {
+        // 1. Balance control (linear / equal-power split)
+        int32_t gainL = 32768;
+        int32_t gainR = 32768;
+        if (eff_input_balance < 16384) {
+            gainR = (eff_input_balance * 2);
+        } else if (eff_input_balance > 16384) {
+            gainL = ((32767 - eff_input_balance) * 2);
+        }
+        int32_t balancedL = ((int32_t)L * gainL) >> 15;
+        int32_t balancedR = ((int32_t)R * gainR) >> 15;
+
+        // 2. Width cross-mixing (0 = mono sum, 32767 = full hard panned stereo)
+        int32_t mono_sum = (balancedL + balancedR) >> 1;
+        L = (int16_t)(mono_sum + (((balancedL - mono_sum) * eff_input_width) >> 15));
+        R = (int16_t)(mono_sum + (((balancedR - mono_sum) * eff_input_width) >> 15));
+    }
 
     // --- Dynamic Transient Softener for Hot/Clipping Inputs ---
     {
@@ -746,6 +774,8 @@ static void push_params_to_core1() {
         p.is_freeze_page = is_freeze_page;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
+        p.input_width = global_input_width;
+        p.input_balance = global_input_balance;
 
 
         // Reverb params — computed with grittiness scaling on damping
@@ -1026,6 +1056,7 @@ void BendsCard::tick_ui_once() {
 
             grittiness_macro = 16384;
             g_macro_active = false;
+            last_modified_macro_knob = 0;
             lockMain.engage(dzMain, vp[currentPage][0]);
             lockX.engage(dzX, vp[currentPage][1]);
             lockY.engage(dzY, vp[currentPage][2]);
@@ -1046,6 +1077,9 @@ void BendsCard::tick_ui_once() {
                     // Trigger hold action
                     if (debounced_sw == ComputerCard::Switch::Down) {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
+                        lockX.engage(dzX, global_input_width, true);
+                        lockY.engage(dzY, global_input_balance, true);
+                        last_modified_macro_knob = 0; // default view is Macro
                     } else if (debounced_sw == ComputerCard::Switch::Up) {
                         // Hold UP
                         if (currentPage != 7) {
@@ -1146,31 +1180,44 @@ void BendsCard::tick_ui_once() {
         lockMacro.engage(dzMain, grittiness_macro);
     }
 
-    if (debounced_sw == ComputerCard::Switch::Down) {
-        if (active_sw_held_ms >= 350) {
-            int32_t nextMacro = lockMacro.update(dzMain);
-            if (grittiness_macro != nextMacro) {
-                grittiness_macro = nextMacro;
-                macro_adjusted_this_hold = true;
+    if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
+        int32_t nextMacro = lockMacro.update(dzMain);
+        if (grittiness_macro != nextMacro) {
+            grittiness_macro = nextMacro;
+            macro_adjusted_this_hold = true;
+            param_changed = true;
+            last_modified_macro_knob = 0;
+        }
+        int32_t nextWidth = lockX.update(dzX);
+        if (global_input_width != nextWidth) {
+            global_input_width = nextWidth;
+            param_changed = true;
+            last_modified_macro_knob = 1;
+        }
+        int32_t nextBalance = lockY.update(dzY);
+        if (global_input_balance != nextBalance) {
+            global_input_balance = nextBalance;
+            param_changed = true;
+            last_modified_macro_knob = 2;
+        }
+    } else {
+        if (debounced_sw != ComputerCard::Switch::Down) {
+            int32_t nextMain = lockMain.update(dzMain);
+            if (vp[currentPage][0] != nextMain) {
+                vp[currentPage][0] = nextMain;
                 param_changed = true;
             }
         }
-    } else {
-        int32_t nextMain = lockMain.update(dzMain);
-        if (vp[currentPage][0] != nextMain) {
-            vp[currentPage][0] = nextMain;
+        int32_t nextX = lockX.update(dzX);
+        if (vp[currentPage][1] != nextX) {
+            vp[currentPage][1] = nextX;
             param_changed = true;
         }
-    }
-    int32_t nextX = lockX.update(dzX);
-    if (vp[currentPage][1] != nextX) {
-        vp[currentPage][1] = nextX;
-        param_changed = true;
-    }
-    int32_t nextY = lockY.update(dzY);
-    if (vp[currentPage][2] != nextY) {
-        vp[currentPage][2] = nextY;
-        param_changed = true;
+        int32_t nextY = lockY.update(dzY);
+        if (vp[currentPage][2] != nextY) {
+            vp[currentPage][2] = nextY;
+            param_changed = true;
+        }
     }
 
     static bool last_is_frozen = false;
@@ -1504,6 +1551,8 @@ void BendsCard::tick_ui_once() {
         p.is_freeze_page = is_freeze_page;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
+        p.input_width = global_input_width;
+        p.input_balance = global_input_balance;
 
 
 
@@ -1584,9 +1633,23 @@ void BendsCard::tick_ui_once() {
 
     if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int16_t bar_leds[6];
-        if (lockMacro.locked) {
+        int32_t val_to_show = grittiness_macro;
+        bool is_locked = lockMacro.locked;
+        int32_t phys_val = dzMain;
+        
+        if (last_modified_macro_knob == 1) {
+            val_to_show = global_input_width;
+            is_locked = lockX.locked;
+            phys_val = dzX;
+        } else if (last_modified_macro_knob == 2) {
+            val_to_show = global_input_balance;
+            is_locked = lockY.locked;
+            phys_val = dzY;
+        }
+        
+        if (is_locked) {
             // Knob is locked, show catchup helper
-            get_bar_graph_leds(lockMacro.val, bar_leds);
+            get_bar_graph_leds(val_to_show, bar_leds);
             // Make the virtual value target dim
             for (int i = 0; i < 6; i++) {
                 bar_leds[i] = (bar_leds[i] * 300) >> 12; // dim it down
@@ -1596,15 +1659,14 @@ void BendsCard::tick_ui_once() {
             blink_counter++;
             bool blink_on = (blink_counter % 200 < 100);
             if (blink_on) {
-                int32_t phys_val = dzMain;
                 int phys_idx = phys_val / 5461;
                 if (phys_idx < 0) phys_idx = 0;
                 if (phys_idx > 5) phys_idx = 5;
                 bar_leds[phys_idx] = 4095; // flash bright
             }
         } else {
-            // Unlocked, show normal macro value solid
-            get_bar_graph_leds(grittiness_macro, bar_leds);
+            // Unlocked, show normal value solid
+            get_bar_graph_leds(val_to_show, bar_leds);
         }
         for (int i = 0; i < 6; i++) {
             LedBrightness(i, bar_leds[i]);
