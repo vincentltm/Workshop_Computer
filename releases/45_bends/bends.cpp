@@ -532,28 +532,33 @@ static void push_params_to_core1() {
         } else {
             tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
             tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
+            if (tape_sat < 0) tape_sat = 0;
+            if (tape_hiss < 0) tape_hiss = 0;
         }
 
-        // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
+        // 2. Vinyl Click slips (Y >= 10000 && Y < 16000)
         int32_t pop_prob = 0;
-        if (Y >= 3000 && Y < 8000) {
-            pop_prob = ((Y - 3000) * 1) / 5000; // rises 0..1
-        } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 1 - (((Y - 8000) * 1) / 8000); // falls 1..0
+        if (Y >= 10000 && Y < 13000) {
+            pop_prob = ((Y - 10000) * 12) / 3000; // rises 0..12
+        } else if (Y >= 13000 && Y < 16000) {
+            pop_prob = 12 - (((Y - 13000) * 12) / 3000); // falls 12..0
         }
 
-        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
+        // 3. CD Skips & Packet drops (Y >= 16000 && Y < 24000, peaks at 20000)
         int32_t bad_conn_level = 0;
-        if (Y >= 8000 && Y < 18000) {
-            bad_conn_level = ((Y - 8000) * 32767) / 10000;
-        } else if (Y >= 18000 && Y < 26000) {
-            bad_conn_level = 32767 - (((Y - 18000) * 32767) / 8000);
+        int32_t sputter_prob = 0;
+        if (Y >= 16000 && Y < 20000) {
+            bad_conn_level = ((Y - 16000) * 32767) / 4000;
+            sputter_prob = ((Y - 16000) * 50) / 4000; // rises 0..50
+        } else if (Y >= 20000 && Y < 24000) {
+            bad_conn_level = 32767 - (((Y - 20000) * 32767) / 4000);
+            sputter_prob = 50 - (((Y - 20000) * 50) / 4000); // falls 50..0
         }
 
-        // 4. Broken Connection Scramble (Y >= 22000, rises 0..32767)
+        // 4. Broken Connection Scramble (Y >= 24000, rises 0..32767)
         int32_t scramble_level = 0;
-        if (Y >= 22000) {
-            scramble_level = ((Y - 22000) * 32767) / 10767;
+        if (Y >= 24000) {
+            scramble_level = ((Y - 24000) * 32767) / 8767;
         }
 
         // Scale pop_prob by X quality
@@ -589,17 +594,17 @@ static void push_params_to_core1() {
         if (scramble_level > 32767) scramble_level = 32767;
 
         int32_t click_ratio = 0;
-        if (Y >= 3000 && Y < 11000) {
-            click_ratio = ((Y - 3000) * 16384) / 8000;
-        } else if (Y >= 11000 && Y < 22000) {
-            int32_t t = Y - 11000;
-            click_ratio = 16384 - ((t * 16384) / 11000);
+        if (Y >= 10000 && Y < 13000) {
+            click_ratio = ((Y - 10000) * 16384) / 3000;
+        } else if (Y >= 13000 && Y < 16000) {
+            int32_t t = Y - 13000;
+            click_ratio = 16384 - ((t * 16384) / 3000);
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
         click_depth = (click_depth * 4000) >> 15;
 
-        int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
+        sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
         int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
@@ -1214,28 +1219,33 @@ void BendsCard::tick_ui_once() {
         } else {
             tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
             tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
+            if (tape_sat < 0) tape_sat = 0;
+            if (tape_hiss < 0) tape_hiss = 0;
         }
 
-        // 2. Vinyl Click slips (rises between 3000 and 8000, falls to 16000)
+        // 2. Vinyl Click slips (Y >= 10000 && Y < 16000)
         int32_t pop_prob = 0;
-        if (Y >= 3000 && Y < 8000) {
-            pop_prob = ((Y - 3000) * 1) / 5000; // rises 0..1
-        } else if (Y >= 8000 && Y < 16000) {
-            pop_prob = 1 - (((Y - 8000) * 1) / 8000); // falls 1..0
+        if (Y >= 10000 && Y < 13000) {
+            pop_prob = ((Y - 10000) * 12) / 3000; // rises 0..12
+        } else if (Y >= 13000 && Y < 16000) {
+            pop_prob = 12 - (((Y - 13000) * 12) / 3000); // falls 12..0
         }
 
-        // 3. CD Skips & Packet drops (Y >= 8000 && Y < 26000, peaks at 18000)
+        // 3. CD Skips & Packet drops (Y >= 16000 && Y < 24000, peaks at 20000)
         int32_t bad_conn_level = 0;
-        if (Y >= 8000 && Y < 18000) {
-            bad_conn_level = ((Y - 8000) * 32767) / 10000;
-        } else if (Y >= 18000 && Y < 26000) {
-            bad_conn_level = 32767 - (((Y - 18000) * 32767) / 8000);
+        int32_t sputter_prob = 0;
+        if (Y >= 16000 && Y < 20000) {
+            bad_conn_level = ((Y - 16000) * 32767) / 4000;
+            sputter_prob = ((Y - 16000) * 50) / 4000; // rises 0..50
+        } else if (Y >= 20000 && Y < 24000) {
+            bad_conn_level = 32767 - (((Y - 20000) * 32767) / 4000);
+            sputter_prob = 50 - (((Y - 20000) * 50) / 4000); // falls 50..0
         }
 
-        // 4. Broken Connection Scramble (Y >= 22000, rises 0..32767)
+        // 4. Broken Connection Scramble (Y >= 24000, rises 0..32767)
         int32_t scramble_level = 0;
-        if (Y >= 22000) {
-            scramble_level = ((Y - 22000) * 32767) / 10767;
+        if (Y >= 24000) {
+            scramble_level = ((Y - 24000) * 32767) / 8767;
         }
 
         // Scale pop_prob by X quality
@@ -1271,17 +1281,17 @@ void BendsCard::tick_ui_once() {
         if (scramble_level > 32767) scramble_level = 32767;
 
         int32_t click_ratio = 0;
-        if (Y >= 3000 && Y < 11000) {
-            click_ratio = ((Y - 3000) * 16384) / 8000;
-        } else if (Y >= 11000 && Y < 22000) {
-            int32_t t = Y - 11000;
-            click_ratio = 16384 - ((t * 16384) / 11000);
+        if (Y >= 10000 && Y < 13000) {
+            click_ratio = ((Y - 10000) * 16384) / 3000;
+        } else if (Y >= 13000 && Y < 16000) {
+            int32_t t = Y - 13000;
+            click_ratio = 16384 - ((t * 16384) / 3000);
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
         click_depth = (click_depth * 4000) >> 15;
 
-        int32_t sputter_prob = ((raw_ringing_xor * raw_strength) >> 15) * 80 >> 15;
+        sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
         int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
