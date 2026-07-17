@@ -18,6 +18,11 @@ DCBlocker dc_inR;
 int32_t lp_inL = 0;
 int32_t lp_inR = 0;
 
+// Anti-aliasing lowpass state (1-pole, -3dB @ ~8.5 kHz @ 24 kHz)
+// Removes MUX clock sub-harmonics that the 12 kHz notch in ComputerCard misses.
+int32_t lp_aa_L = 0;
+int32_t lp_aa_R = 0;
+
 
 inline int32_t apply_deadzone(int32_t val) {
     if (val < 500) return 0;
@@ -120,9 +125,9 @@ volatile Core1Params g_params[2];
 std::atomic<uint32_t> g_params_idx{0};
 volatile uint32_t g_clk_period_samples = 0;
 // Grittiness macro state (written on Core 0, read in push_params_to_core1)
-static int32_t grittiness_macro = 16384;
+static int32_t grittiness_macro = 16384; // 50% = transparent: baking at this value changes nothing
 static bool g_macro_active = false;
-static int32_t global_input_width = 32767;
+static int32_t global_input_width = 9830;
 static int32_t global_input_balance = 16384;
 static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Balance
 
@@ -153,16 +158,34 @@ inline int32_t scale_grit(int32_t val, int32_t max_val, int32_t macro, int32_t g
     if (macro < 16384) {
         return (val * macro) >> 14;
     } else {
-        int32_t target_max = val;
-        if (gain_q15 >= 32768) {
-            target_max = max_val;
-        } else {
+        int32_t target_max = max_val;
+        if (gain_q15 < 32768) {
             target_max = val + (((max_val - val) * gain_q15) >> 15);
+        }
+        if (target_max < val) {
+            target_max = val; // Never scale down when turning macro up
         }
         int32_t diff = target_max - val;
         int32_t scale_q15 = (macro - 16384) * 2;
         return val + ((diff * scale_q15) >> 15);
     }
+}
+
+inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x) {
+    if (macro < 16384) {
+        return macro; // Linear / flat decay when dialing grittiness out
+    }
+    int32_t x = (macro - 16384) * 2; // 0..32767 progress above center
+    if (x < start_x) {
+        return 16384; // Stays clean / transparent
+    }
+    if (x >= end_x) {
+        return 32767; // Reaches max intensity
+    }
+    int32_t range = end_x - start_x;
+    int32_t val = ((x - start_x) * 32768) / range;
+    int32_t val_sq = (val * val) >> 15; // Quadratic curve for fine-grained start and steep end control
+    return 16384 + (val_sq >> 1); // Maps back to [16384, 32767]
 }
 
 // ============================================================================
@@ -229,11 +252,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     const bool    freeze  = p.freeze;
     const bool    stutter = p.stutter;
-    const int32_t cv1    = p.cv1;
     const int32_t cv2    = p.cv2;
     const bool    pulse1_live = p.pulse1_live;
     const bool    pulse2_live = p.pulse2_live;
-    const bool    cv1_live    = p.cv1_live;
 
     const bool no_audio2 = p.no_audio2;
     const bool is_freeze_page = p.is_freeze_page;
@@ -261,12 +282,56 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // --- Read Audio Inputs & Attenuate for Headroom ---
+    // AudioIn() returns ±2048 (12-bit). Net << 3 → ±16384 in Q15 (50% FS, 6dB headroom).
     int16_t L = (int16_t)((AudioIn1() << 4) >> 1);
     int16_t R = no_audio2 ? L : (int16_t)((AudioIn2() << 4) >> 1);
+
+    // --- Anti-Aliasing Lowpass (1-pole, coef=30500 → -3dB @ ~8.5 kHz @ 24 kHz) ---
+    // ComputerCard applies a 12 kHz notch (Q=100) inside BufferFull() to remove the
+    // fundamental MUX clock tone. This LP removes the sub-harmonics at 4–8 kHz that
+    // fold back within the 12 kHz Nyquist and are audible as a high-frequency whine.
+    lp_aa_L += (((int32_t)L - lp_aa_L) * 30500) >> 15;
+    L = (int16_t)lp_aa_L;
+    lp_aa_R += (((int32_t)R - lp_aa_R) * 30500) >> 15;
+    R = (int16_t)lp_aa_R;
 
     // --- Apply Input DC Blockers ---
     L = dc_inL.process(L);
     R = dc_inR.process(R);
+
+    // --- Input Noise Gate (suppress digital USB ground noise) ---
+    {
+        // 1-pole low-pass filter at ~300Hz in the sidechain to ignore high-frequency USB whine
+        static int32_t gate_lpL = 0;
+        static int32_t gate_lpR = 0;
+        gate_lpL += (((int32_t)L - gate_lpL) * 2385) >> 15;
+        gate_lpR += (((int32_t)R - gate_lpR) * 2385) >> 15;
+
+        int32_t absL = gate_lpL < 0 ? -gate_lpL : gate_lpL;
+        int32_t absR = gate_lpR < 0 ? -gate_lpR : gate_lpR;
+        int32_t input_level = absL + absR;
+        
+        static int32_t gate_env = 0;
+        if (input_level > gate_env) {
+            gate_env += (input_level - gate_env) >> 4;   // fast attack ~1ms
+        } else {
+            gate_env += (input_level - gate_env) >> 13;  // slow release/decay ~340ms (prevents chattering)
+        }
+        
+        static bool gate_open = true;
+        if (gate_env > 300) {
+            gate_open = true;
+        } else if (gate_env < 180) {
+            gate_open = false;
+        }
+        
+        static int32_t gate_gain = 32768;
+        int32_t target_gain = gate_open ? 32768 : 0;
+        gate_gain += (target_gain - gate_gain) >> 10;     // 40ms click-free fade
+        
+        L = (int16_t)(((int32_t)L * gate_gain) >> 15);
+        R = (int16_t)(((int32_t)R * gate_gain) >> 15);
+    }
 
     // --- Apply Global Stereo Width & Balance Controls (Switch Down hold tweaks) ---
     {
@@ -309,7 +374,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth, eff_chorus_feedback, eff_chorus_xor_mask, cv1_live ? cv1 : 0);
+    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth, eff_chorus_feedback, eff_chorus_xor_mask, 0);
 
     // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
     codec.process(L, L, R, R,
@@ -321,20 +386,20 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     // ── STAGE 3: Multi-Tap Delay ─────────────────────────────────────────────
     delay_fx.process(L, L, R, R,
-                     eff_delay_mix, eff_delay_time, eff_delay_feedback, freeze, 0, cv2, eff_global_noise_scale,
+                     eff_delay_mix, eff_delay_time, eff_delay_feedback, freeze, 0, 0, eff_global_noise_scale,
                      pulse1_live, clk_period_samples);
 
     // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
-    int32_t scrub_offset = 0;
-    if (is_freeze_page) {
-        scrub_offset = eff_glitch_mix;
-    }
+    // scrub_offset: seek position within the frozen loop (MAIN knob on Page 7)
+    // mainProb:     in freeze mode always 100% wet so MAIN only controls scrub,
+    //               in glitch mode controls glitch probability / blend
+    int32_t scrub_offset = is_freeze_page ? eff_glitch_mix : 0;
 
     glitcher.process(L, L, R, R,
-                     is_freeze_page ? 32767 : eff_glitch_mix,
+                     freeze ? 32767 : eff_glitch_mix,
                      eff_glitch_size, eff_glitch_speed, eff_glitch_speed_mapped,
-                     stutter, is_freeze_page || freeze,
-                     cv1, cv2, rand_seed,
+                     stutter, freeze,
+                     0, cv2, rand_seed,
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
                      pulse1_live, p1_rising, p1_val,
                      pulse2_live, p2_rising, p2_val,
@@ -433,9 +498,11 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // --- Output ---
-    // Gain makeup: scale back up by 6dB (shift left by 1) to restore output levels
-    AudioOut1(soft_limit_q15((int32_t)L << 1) >> 4);
-    AudioOut2(soft_limit_q15((int32_t)R << 1) >> 4);
+    // Unity gain: input << 3 and output >> 4 cancel exactly (±16384 Q15 → ±1024 DAC ≡ ±3V).
+    // A ±6V Eurorack signal (ADC ±2048 → Q15 ±16384) comes out at the same ±6V.
+    // The previous << 1 caused a spurious +6dB, making Bends louder than peer modules.
+    AudioOut1(soft_limit_q15((int32_t)L) >> 4);
+    AudioOut2(soft_limit_q15((int32_t)R) >> 4);
 }
 
 // Core 1 entry point
@@ -488,25 +555,36 @@ static bool is_frozen       = false;
 
 static void push_params_to_core1() {
     int32_t active_macro = g_macro_active ? grittiness_macro : 16384;
+    if (active_macro > 15884 && active_macro < 16884) {
+        active_macro = 16384; // Center deadzone to prevent CV drift from scaling parameters
+    }
     for (int idx = 0; idx < 2; idx++) {
         volatile Core1Params &p = g_params[idx];
 
-        // Precompute global noise scale first
+        // Precompute staggered macros for the grittiness sweep
+        int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 30000);
+        int32_t macro_codec  = get_staggered_macro(active_macro, 0, 22000);
+        int32_t macro_delay  = get_staggered_macro(active_macro, 12000, 32767);
+        int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
+        int32_t macro_filter = get_staggered_macro(active_macro, 16000, 32767);
+        int32_t macro_reverb = get_staggered_macro(active_macro, 20000, 32767);
+
+        // Precompute global noise scale first (tied to reverb/lofi entrance)
         int32_t noise_scale = 16384;
         int32_t rev_damping = vp[5][2];
         if (rev_damping > 16384) {
             int32_t diff = rev_damping - 16384;
             noise_scale = 16384 + (diff << 1);
         }
-        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
+        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, macro_reverb);
         p.global_noise_scale = globalNoiseScale;
 
-        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro, 16384);
+        p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro, 16384);
+        p.chorus_depth_fb  = vp[0][2];
 
         // Pre-decode Chorus depth, feedback, and destroy
-        int32_t raw_depth_fb = p.chorus_depth_fb;
+        int32_t raw_depth_fb = vp[0][2];
         int32_t chorus_depth = 0;
         int32_t chorus_feedback = 0;
         int32_t chorus_xor_mask = 0;
@@ -515,89 +593,90 @@ static void push_params_to_core1() {
             chorus_feedback = 0;
         } else {
             chorus_depth = 32767;
+            int32_t base_fb = 0;
+            int32_t base_xor = 0;
             if (raw_depth_fb < 26214) {
-                chorus_feedback = ((raw_depth_fb - 16384) * 65536) >> 15;
+                base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
             } else {
-                chorus_feedback = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
-                chorus_xor_mask = (raw_depth_fb - 26214) >> 9;
+                base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
+                base_xor = (raw_depth_fb - 26214) >> 9;
+            }
+            if (active_macro < 16384) {
+                chorus_feedback = (base_fb * active_macro) >> 14;
+                chorus_xor_mask = (base_xor * active_macro) >> 14;
+            } else {
+                int32_t diff_fb = 32767 - base_fb;
+                int32_t diff_xor = 31 - base_xor;
+                int32_t scale_q15 = (macro_chorus - 16384) * 2;
+                chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
+                chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
             }
         }
         p.chorus_depth = chorus_depth;
         p.chorus_feedback = chorus_feedback;
         p.chorus_xor_mask = chorus_xor_mask;
 
-        // Pre-calculate Codec levels
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro, 16384);
-        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro, 16384);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro, 16384);
+        // Pre-calculate Codec levels (Omitting 16384 fourth parameter allows 100% full intensity scaling)
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
+        int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
         
         p.codec_mix = raw_strength;
         p.codec_downsample = raw_downsample;
         p.codec_ringing_xor = raw_ringing_xor;
 
         int32_t X = raw_downsample;
-        int32_t warped_ringing = (raw_ringing_xor * raw_ringing_xor) >> 15;
+        int32_t Y = raw_ringing_xor;
+        Y = clamp_i32(Y, 0, 32767);
 
         int32_t mp3_ring_level = 0;
         int32_t fuzz_level = 0;
         int32_t decimate_level = 0;
 
-        if (X < 11000) {
-            mp3_ring_level = (X * 24402) >> 13;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 22000) {
-            int32_t t = X - 11000;
-            mp3_ring_level = 32767 - ((t * 24402) >> 13);
-            fuzz_level = (t * 24402) >> 13;
-            decimate_level = 0;
+        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
+        if (X < 16384) {
+            mp3_ring_level = 32767 - (X * 2);
         } else {
-            int32_t t = X - 22000;
             mp3_ring_level = 0;
-            fuzz_level = 32767 - ((t * 24931) >> 13);
-            decimate_level = (t * 24931) >> 13;
         }
 
-        int32_t Y = warped_ringing; // cv2 is 0 at startup
-        Y = clamp_i32(Y, 0, 32767);
+        if (X < 16384) {
+            fuzz_level = X * 2;
+        } else {
+            fuzz_level = 32767 - ((X - 16384) * 2);
+        }
 
-        // --- NEW Y KNOB REBALANCING ---
-        // 1. Tape/Vinyl Saturation & Noise (Y < 10000)
+        if (X < 16384) {
+            decimate_level = 0;
+        } else {
+            decimate_level = (X - 16384) * 2;
+            if (decimate_level > 32767) decimate_level = 32767;
+        }
+
+        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
-        if (Y < 10000) {
-            tape_sat = (Y * 3); // rises to 30000 at Y = 10000
-            tape_hiss = (Y * 30) >> 15; // gentle noise
-        } else {
-            tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
-            tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
-            if (tape_sat < 0) tape_sat = 0;
-            if (tape_hiss < 0) tape_hiss = 0;
-        }
-
-        // 2. Vinyl Click slips (Y >= 10000 && Y < 16000)
         int32_t pop_prob = 0;
-        if (Y >= 10000 && Y < 13000) {
-            pop_prob = ((Y - 10000) * 12) / 3000; // rises 0..12
-        } else if (Y >= 13000 && Y < 16000) {
-            pop_prob = 12 - (((Y - 13000) * 12) / 3000); // falls 12..0
-        }
-
-        // 3. CD Skips & Packet drops (Y >= 16000 && Y < 24000, peaks at 20000)
         int32_t bad_conn_level = 0;
         int32_t sputter_prob = 0;
-        if (Y >= 16000 && Y < 20000) {
-            bad_conn_level = ((Y - 16000) * 32767) / 4000;
-            sputter_prob = ((Y - 16000) * 50) / 4000; // rises 0..50
-        } else if (Y >= 20000 && Y < 24000) {
-            bad_conn_level = 32767 - (((Y - 20000) * 32767) / 4000);
-            sputter_prob = 50 - (((Y - 20000) * 50) / 4000); // falls 50..0
+        int32_t scramble_level = 0;
+
+        if (Y < 16384) {
+            tape_sat = 30000 - (Y * 30000) / 16384;
+            tape_hiss = 30 - (Y * 30) / 16384;
+            pop_prob = 12 - (Y * 12) / 16384;
         }
 
-        // 4. Broken Connection Scramble (Y >= 24000, rises 0..32767)
-        int32_t scramble_level = 0;
-        if (Y >= 24000) {
-            scramble_level = ((Y - 24000) * 32767) / 8767;
+        if (Y < 16384) {
+            bad_conn_level = (Y * 32767) / 16384;
+            sputter_prob = (Y * 50) / 16384;
+        } else {
+            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
+            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
+        }
+
+        if (Y >= 16384) {
+            scramble_level = ((Y - 16384) * 32767) / 16383;
         }
 
         // Scale pop_prob by X quality
@@ -641,7 +720,7 @@ static void push_params_to_core1() {
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 4000) >> 15;
+        click_depth = (click_depth * 16000) >> 15;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
@@ -660,7 +739,7 @@ static void push_params_to_core1() {
         p.codec_tape_hiss = tape_hiss;
         p.codec_active_loss = active_loss;
 
-        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro, 16384);
+        p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -668,25 +747,53 @@ static void push_params_to_core1() {
         if (active_macro < 16384) {
             if (raw_delay_time > 16384) {
                 int32_t diff = raw_delay_time - 16384;
-                scaled_delay_time = 16384 + ((diff * active_macro) >> 14);
+                scaled_delay_time = 16384 + ((diff * macro_delay) >> 14);
             }
         } else {
             int32_t diff = 32767 - raw_delay_time;
-            scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
+            scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro, 13107);
+
+        // Custom Delay Feedback and Glitch Feedback scaling:
+        // Delay feedback below 22937 is clean. Only the glitch/XOR feedback portion above 22937 is scaled by macro.
+        int32_t raw_fb = vp[2][2];
+        int32_t clean_fb = raw_fb;
+        int32_t glitch_fb = 0;
+        if (raw_fb > 22937) {
+            clean_fb = 22937;
+            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
+        }
+
+        if (active_macro < 16384) {
+            glitch_fb = (glitch_fb * active_macro) >> 14;
+        } else {
+            int32_t diff_fb = 32767 - glitch_fb;
+            int32_t scale_q15 = (macro_delay - 16384) * 2;
+            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
+        }
+
+        if (raw_fb > 22937) {
+            p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
+            if (p.delay_feedback > 30000) p.delay_feedback = 30000;
+            p.glitch_feedback = glitch_fb;
+        } else {
+            p.delay_feedback = clean_fb;
+            p.glitch_feedback = 0;
+        }
 
         bool is_freeze_page = (currentPage == 7);
+        bool use_freeze_params = (is_freeze_page || (freeze_latched && currentPage != 3));
         int32_t raw_glitch_speed = 16384;
-        if (is_freeze_page || freeze_latched) {
+        if (use_freeze_params) {
             p.glitch_mix   = vp[7][0]; // scrub offset
             raw_glitch_speed = vp[7][2]; // speed (Y knob)
             p.glitch_size  = vp[7][1]; // loop size (X knob)
         } else {
-            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro, 16384);
+            int32_t raw_mix = apply_deadzone(vp[3][0]);
+            p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
             p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro, 16384);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
         }
         p.glitch_speed = raw_glitch_speed;
 
@@ -698,13 +805,6 @@ static void push_params_to_core1() {
             glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
         }
         p.glitch_speed_mapped = glitch_speed_mapped;
-
-        int32_t raw_fb = vp[2][2];
-        int32_t glitch_fb = 0;
-        if (raw_fb > 22937) {
-            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
-        }
-        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
 
         // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
         {
@@ -726,11 +826,11 @@ static void push_params_to_core1() {
                     loop_size = active_clk * 2;
                 }
             }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
+            p.glitch_loop_size = clamp_i32(loop_size, 128, 16380);
 
             int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
             int32_t cv1_offset = 0;
-            int32_t range = 32760 - p.glitch_loop_size;
+            int32_t range = 16380 - p.glitch_loop_size;
             if (range < 0) range = 0;
             int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
             int32_t target_offset = raw_offset + cv1_offset;
@@ -740,7 +840,7 @@ static void push_params_to_core1() {
                 int32_t step = (target_offset + (step_size / 2)) / step_size;
                 target_offset = step * step_size;
             }
-            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
+            p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
 
             int32_t active_speed = p.glitch_speed_mapped;
             const int32_t pitch_ratio_lut[25] = {
@@ -752,16 +852,10 @@ static void push_params_to_core1() {
             p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
         }
 
-        // Filter cutoff pre-scaling
-        int32_t raw_filter_cutoff = vp[4][0];
-        int32_t scaled_filter_cutoff = raw_filter_cutoff;
-        if (active_macro < 16384) {
-            int32_t diff = raw_filter_cutoff - 16384;
-            scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
-        }
-        p.filter_cutoff = scaled_filter_cutoff;
-        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro, 13107);
-        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro, 9830);
+        // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
+        p.filter_cutoff = vp[4][0];
+        p.filter_res    = vp[4][1];
+        p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
 
         p.freeze = freeze_latched;
         p.stutter = false;
@@ -778,16 +872,18 @@ static void push_params_to_core1() {
         p.input_balance = global_input_balance;
 
 
-        // Reverb params — computed with grittiness scaling on damping
-        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro, 13107);
+        // Reverb params — Reverb mix is clean (not scaled by macro).
+        p.reverb_mix  = apply_deadzone(vp[5][0]);
         {
             int32_t fb = vp[5][2];
             int32_t fb_glitch = fb;
-            if (active_macro < 16384) {
-                if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
-            } else {
-                int32_t target_max = fb + (((32767 - fb) * 13107) >> 15);
-                fb_glitch = fb + (((target_max - fb) * (active_macro - 16384)) / 16383);
+            if (fb > 12000) {
+                if (active_macro < 16384) {
+                    fb_glitch = 12000 + (((fb - 12000) * active_macro) >> 14);
+                } else {
+                    int32_t target_max = 32767; // Scale up to 100% full intensity
+                    fb_glitch = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
+                }
             }
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
@@ -833,7 +929,7 @@ static void push_params_to_core1() {
                 if (circuit_bent_level > 32767) circuit_bent_level = 32767;
             }
 
-            int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
+            int32_t damp = 30000 - ((lofi_level * 8000) >> 15);
 
             int32_t shift_q15 = (lofi_level * 6);
             int32_t int_shift = shift_q15 >> 15;
@@ -873,7 +969,7 @@ void BendsCard::tick_ui_once() {
     static uint32_t active_sw_held_ms = 0;
     static bool     hold_action_triggered = false;
     static int      pageBeforeUp = 0;
-    static bool     macro_adjusted_this_hold = false;
+    static bool     settings_adjusted_this_hold = false;
 
     // ── 1. Read & IIR-smooth knobs ────────────────────────────────────────
     // KnobVal returns 0..4095 (12-bit ADC). Scale to Q15 via <<3 → 0..32760.
@@ -975,76 +1071,121 @@ void BendsCard::tick_ui_once() {
 
     // ── 3b. Switch hold & flick state machine ────────────────────────────
     bool param_changed = false;
+    (void)param_changed;
 
     bool sw_down_entered = (last_debounced_sw != ComputerCard::Switch::Down && debounced_sw == ComputerCard::Switch::Down);
     bool sw_down_exited  = (last_debounced_sw == ComputerCard::Switch::Down && debounced_sw != ComputerCard::Switch::Down);
 
     if (sw_down_entered) {
-        lockMacro.engage(dzMain, grittiness_macro, true);
-        macro_adjusted_this_hold = false;
+        lockMacro.engage(dzMain, grittiness_macro, false); // No catchup logic on switch down
+        settings_adjusted_this_hold = false;
     }
     if (sw_down_exited) {
         if (active_sw_held_ms >= 350) {
-            // Bake Chorus parameters
-            vp[0][0] = scale_grit(vp[0][0], 32767, grittiness_macro, 16384);
-            vp[0][2] = scale_grit(vp[0][2], 32767, grittiness_macro, 16384);
-
-            // Bake Codec parameters
-            vp[1][0] = scale_grit(vp[1][0], 32767, grittiness_macro, 16384);
-            vp[1][1] = scale_grit(vp[1][1], 24000, grittiness_macro, 16384);
-            vp[1][2] = scale_grit(vp[1][2], 32767, grittiness_macro, 16384);
-
-            // Bake Delay parameters
-            vp[2][0] = scale_grit(vp[2][0], 32767, grittiness_macro, 16384);
+            // Bake the macro-scaled values into vp (both upward and downward scaling).
+            // The live scaling path uses active_macro=16384 when switch is not held,
+            // so knobs always retain their full range outside of macro mode.
             {
-                int32_t val = vp[2][1];
-                if (grittiness_macro < 16384) {
-                    if (val > 16384) {
-                        int32_t diff = val - 16384;
-                        vp[2][1] = 16384 + ((diff * grittiness_macro) >> 14);
+                int32_t macro_chorus = get_staggered_macro(grittiness_macro, 10000, 30000);
+                int32_t macro_codec  = get_staggered_macro(grittiness_macro, 0, 22000);
+                int32_t macro_delay  = get_staggered_macro(grittiness_macro, 12000, 32767);
+                int32_t macro_glitch = get_staggered_macro(grittiness_macro, 8000, 28000);
+                int32_t macro_filter = get_staggered_macro(grittiness_macro, 16000, 32767);
+                int32_t macro_reverb = get_staggered_macro(grittiness_macro, 20000, 32767);
+
+                // Bake Chorus parameters (feedback/destroy part above 16384 only)
+                {
+                    int32_t raw_depth_fb = vp[0][2];
+                    if (raw_depth_fb >= 16384) {
+                        int32_t base_fb = 0;
+                        int32_t base_xor = 0;
+                        if (raw_depth_fb < 26214) {
+                            base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
+                        } else {
+                            base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
+                            base_xor = (raw_depth_fb - 26214) >> 9;
+                        }
+                        int32_t chorus_feedback = 0;
+                        int32_t chorus_xor_mask = 0;
+                        if (grittiness_macro < 16384) {
+                            chorus_feedback = (base_fb * grittiness_macro) >> 14;
+                            chorus_xor_mask = (base_xor * grittiness_macro) >> 14;
+                        } else {
+                            int32_t diff_fb = 32767 - base_fb;
+                            int32_t diff_xor = 31 - base_xor;
+                            int32_t scale_q15 = (macro_chorus - 16384) * 2;
+                            chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
+                            chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
+                        }
+                        if (chorus_xor_mask > 0) {
+                            vp[0][2] = 26214 + (chorus_xor_mask << 9);
+                        } else {
+                            vp[0][2] = 16384 + ((chorus_feedback * 32768) / 65536);
+                        }
                     }
-                } else {
-                    int32_t diff = 32767 - val;
-                    vp[2][1] = val + ((diff * ((grittiness_macro - 16384) * 2)) >> 15);
                 }
-            }
-            vp[2][2] = scale_grit(vp[2][2], 32767, grittiness_macro, 13107);
 
-            // Bake Glitcher parameters
-            vp[3][0] = scale_grit(vp[3][0], 32767, grittiness_macro, 16384);
-            vp[3][2] = scale_grit(vp[3][2], 32767, grittiness_macro, 16384);
+                // Bake Codec parameters
+                vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
+                vp[1][1] = scale_grit(vp[1][1], 32767, macro_codec);
+                vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
 
-            // Bake Filter parameters
-            {
-                int32_t val = vp[4][0];
-                if (grittiness_macro < 16384) {
-                    int32_t diff = val - 16384;
-                    vp[4][0] = 16384 + ((diff * grittiness_macro) >> 14);
-                }
-            }
-            vp[4][1] = scale_grit(vp[4][1], 32767, grittiness_macro, 13107);
-            vp[4][2] = scale_grit(vp[4][2], 32767, grittiness_macro, 9830);
-
-            // Bake Reverb parameters
-            vp[5][0] = scale_grit(vp[5][0], 32767, grittiness_macro, 13107);
-            {
-                int32_t val = vp[5][2];
-                if (grittiness_macro < 16384) {
-                    if (val > 16384) {
-                        int32_t diff = val - 16384;
-                        vp[5][2] = 16384 + ((diff * grittiness_macro) >> 14);
+                // Bake Delay time
+                {
+                    int32_t val = vp[2][1];
+                    if (grittiness_macro < 16384) {
+                        if (val > 16384) {
+                            int32_t diff = val - 16384;
+                            vp[2][1] = 16384 + ((diff * grittiness_macro) >> 14);
+                        }
+                    } else {
+                        int32_t diff = 32767 - val;
+                        vp[2][1] = val + ((diff * ((macro_delay - 16384) * 2)) >> 15);
                     }
-                } else {
-                    int32_t target_max = val + (((32767 - val) * 13107) >> 15);
-                    vp[5][2] = val + (((target_max - val) * (grittiness_macro - 16384)) / 16383);
+                }
+                // Bake glitch/XOR feedback portion of delay feedback above 22937
+                {
+                    int32_t raw_fb = vp[2][2];
+                    if (raw_fb > 22937) {
+                        int32_t glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
+                        if (grittiness_macro < 16384) {
+                            glitch_fb = (glitch_fb * grittiness_macro) >> 14;
+                        } else {
+                            int32_t diff_fb = 32767 - glitch_fb;
+                            int32_t scale_q15 = (macro_delay - 16384) * 2;
+                            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
+                        }
+                        vp[2][2] = 22937 + ((glitch_fb * 32768) / 109224);
+                        if (vp[2][2] > 32767) vp[2][2] = 32767;
+                    }
+                }
+
+                // Bake Glitcher probability and speed
+                vp[3][0] = scale_grit(vp[3][0], 32767, macro_glitch);
+                vp[3][2] = scale_grit(vp[3][2], 32767, macro_glitch);
+
+                // Bake Filter morph/grit
+                vp[4][2] = scale_grit(vp[4][2], 32767, macro_filter);
+
+                // Bake Reverb lofi/damping above 12000
+                {
+                    int32_t fb = vp[5][2];
+                    if (fb > 12000) {
+                        if (grittiness_macro < 16384) {
+                            vp[5][2] = 12000 + (((fb - 12000) * grittiness_macro) >> 14);
+                        } else {
+                            int32_t target_max = 32767;
+                            vp[5][2] = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
+                        }
+                    }
                 }
             }
 
-            if (!macro_adjusted_this_hold) {
-                if (currentPage >= 6) {
-                    currentPage = 0;
-                    freeze_latched = false;
-                    is_frozen = freeze_latched || pulse2_freeze;
+            if (!settings_adjusted_this_hold) {
+                if (currentPage == 0) {
+                    currentPage = 7; // Go to Freeze Scrub page when going back from Chorus
+                } else if (currentPage == 7) {
+                    currentPage = 5; // Go to Reverb page when going back from Freeze
                 } else {
                     currentPage = (currentPage + 5) % 6;
                 }
@@ -1054,13 +1195,13 @@ void BendsCard::tick_ui_once() {
                 pageFlashTimer = 400;
             }
 
-            grittiness_macro = 16384;
+            grittiness_macro = 16384; // Reset to transparent center after bake
             g_macro_active = false;
             last_modified_macro_knob = 0;
             lockMain.engage(dzMain, vp[currentPage][0]);
             lockX.engage(dzX, vp[currentPage][1]);
             lockY.engage(dzY, vp[currentPage][2]);
-            lockMacro.engage(dzMain, grittiness_macro);
+            lockMacro.engage(dzMain, grittiness_macro, false);
             param_changed = true;
         } else {
             lockMain.engage(dzMain, vp[currentPage][0]);
@@ -1077,58 +1218,65 @@ void BendsCard::tick_ui_once() {
                     // Trigger hold action
                     if (debounced_sw == ComputerCard::Switch::Down) {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
-                        lockX.engage(dzX, global_input_width, true);
-                        lockY.engage(dzY, global_input_balance, true);
+                        lockX.engage(dzX, global_input_width, false); // No catchup logic on switch down
+                        lockY.engage(dzY, global_input_balance, false); // No catchup logic on switch down
                         last_modified_macro_knob = 0; // default view is Macro
                     } else if (debounced_sw == ComputerCard::Switch::Up) {
-                        // Hold UP
+                        // Hold UP: momentary freeze (Page 7 entry with knob locking)
                         if (currentPage != 7) {
                             if (currentPage < 6) {
                                 pageBeforeUp = currentPage;
                             }
+                            if (!is_frozen) {
+                                vp[7][0] = vp[3][0];
+                                vp[7][1] = vp[3][1];
+                                vp[7][2] = vp[3][2];
+                            }
                             currentPage = 7;
-                            freeze_latched = true;
-                            is_frozen = true;
                             lockMain.engage(dzMain, vp[currentPage][0]);
                             lockX.engage(dzX, vp[currentPage][1]);
                             lockY.engage(dzY, vp[currentPage][2]);
                             param_changed = true;
                         }
+                        freeze_latched = true;
+                        is_frozen = true;
                     }
                 }
             }
         }
     } else {
         // Transition detected
+        static bool was_frozen_on_press = false;
         if (last_debounced_sw == ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Up) {
-            // Instant freeze transition on switch press to eliminate 350ms latency!
+            // Instant freeze transition on switch press (go to Page 7 with knob locks)
+            was_frozen_on_press = is_frozen;
             if (currentPage != 7) {
                 if (currentPage < 6) {
                     pageBeforeUp = currentPage;
                 }
+                if (!is_frozen) {
+                    vp[7][0] = vp[3][0];
+                    vp[7][1] = vp[3][1];
+                    vp[7][2] = vp[3][2];
+                }
                 currentPage = 7;
-                freeze_latched = true;
-                is_frozen = true;
                 lockMain.engage(dzMain, vp[currentPage][0]);
                 lockX.engage(dzX, vp[currentPage][1]);
                 lockY.engage(dzY, vp[currentPage][2]);
                 param_changed = true;
             }
+            freeze_latched = true;
+            is_frozen = true;
         }
         if (last_debounced_sw != ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Middle) {
             // Switch was released
             if (active_sw_held_ms < 350) {
                 // Trigger flick action
                 if (last_debounced_sw == ComputerCard::Switch::Down) {
-                    // Flick DOWN
-                    if (!macro_adjusted_this_hold) {
-                        if (currentPage >= 6) {
-                            currentPage = 0;
-                            freeze_latched = false;
-                            is_frozen = freeze_latched || pulse2_freeze;
-                        } else {
-                            currentPage = (currentPage + 1) % 6;
-                        }
+                    // Flick DOWN — cycle pages 0→1→2→3→4→5→0
+                    // Page 7 (Freeze Scrub) is only accessible via Switch UP (freeze)
+                    if (!settings_adjusted_this_hold) {
+                        currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
                         lockMain.engage(dzMain, vp[currentPage][0]);
                         lockX.engage(dzX, vp[currentPage][1]);
                         lockY.engage(dzY, vp[currentPage][2]);
@@ -1136,30 +1284,45 @@ void BendsCard::tick_ui_once() {
                         param_changed = true;
                     }
                 } else if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Flick UP: unfreeze immediately since we froze instantly on press!
-                    freeze_latched = false;
-                    is_frozen = freeze_latched || pulse2_freeze;
-                    if (currentPage >= 6) {
-                        currentPage = pageBeforeUp;
-                        lockMain.engage(dzMain, vp[currentPage][0]);
-                        lockX.engage(dzX, vp[currentPage][1]);
-                        lockY.engage(dzY, vp[currentPage][2]);
+                    // Flick UP: toggle latch state
+                    if (was_frozen_on_press) {
+                        // We were already frozen, so this flick unlatches it
+                        freeze_latched = false;
+                        is_frozen = false;
+                        if (currentPage == 7) {
+                            currentPage = pageBeforeUp;
+                            lockMain.engage(dzMain, vp[currentPage][0]);
+                            lockX.engage(dzX, vp[currentPage][1]);
+                            lockY.engage(dzY, vp[currentPage][2]);
+                        }
+                        param_changed = true;
+                    } else {
+                        // We were not frozen, so this flick latches the freeze
+                        freeze_latched = true;
+                        is_frozen = true;
+                        // Return to pageBeforeUp so they can adjust other pages in the background
+                        if (currentPage == 7) {
+                            currentPage = pageBeforeUp;
+                            lockMain.engage(dzMain, vp[currentPage][0]);
+                            lockX.engage(dzX, vp[currentPage][1]);
+                            lockY.engage(dzY, vp[currentPage][2]);
+                        }
                         param_changed = true;
                     }
                 }
             } else {
                 // Hold release action
                 if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Releasing Switch UP: return to the page we were on before and unfreeze
+                    // Releasing Switch UP hold: momentarily unfreeze and return to original page
                     freeze_latched = false;
-                    is_frozen = freeze_latched || pulse2_freeze;
-                    if (currentPage >= 6) {
+                    is_frozen = false;
+                    if (currentPage == 7) {
                         currentPage = pageBeforeUp;
                         lockMain.engage(dzMain, vp[currentPage][0]);
                         lockX.engage(dzX, vp[currentPage][1]);
                         lockY.engage(dzY, vp[currentPage][2]);
-                        param_changed = true;
                     }
+                    param_changed = true;
                 }
             }
         }
@@ -1184,19 +1347,21 @@ void BendsCard::tick_ui_once() {
         int32_t nextMacro = lockMacro.update(dzMain);
         if (grittiness_macro != nextMacro) {
             grittiness_macro = nextMacro;
-            macro_adjusted_this_hold = true;
+            settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 0;
         }
         int32_t nextWidth = lockX.update(dzX);
         if (global_input_width != nextWidth) {
             global_input_width = nextWidth;
+            settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 1;
         }
         int32_t nextBalance = lockY.update(dzY);
         if (global_input_balance != nextBalance) {
             global_input_balance = nextBalance;
+            settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 2;
         }
@@ -1237,27 +1402,37 @@ void BendsCard::tick_ui_once() {
         g_macro_active = (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350);
         int32_t base_macro = g_macro_active ? grittiness_macro : 16384;
 
-        // Read CV1 and calculate active_macro on Core 0
+        // CV1 no longer modulates macro globally (dedicated to digital loss engine)
         int32_t cv1_val = cv1_live ? (CVIn1()) : 0;
-        int32_t cv1_offset = cv1_live ? (cv1_val * 8) : 0;
-        int32_t active_macro = clamp_i32(base_macro + cv1_offset, 0, 32767);
+        int32_t cv2_val = cv2_live ? (CVIn2()) : 0;
+        int32_t cv1_abs = cv1_val < 0 ? -cv1_val : cv1_val;
+        int32_t cv2_abs = cv2_val < 0 ? -cv2_val : cv2_val;
+        int32_t active_macro = base_macro;
 
-        // Precompute global noise scale first
+        // Precompute staggered macros for the grittiness sweep
+        int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 30000);
+        int32_t macro_codec  = get_staggered_macro(active_macro, 0, 22000);
+        int32_t macro_delay  = get_staggered_macro(active_macro, 12000, 32767);
+        int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
+        int32_t macro_filter = get_staggered_macro(active_macro, 16000, 32767);
+        int32_t macro_reverb = get_staggered_macro(active_macro, 20000, 32767);
+
+        // Precompute global noise scale first (tied to reverb/lofi entrance)
         int32_t noise_scale = 16384;
         int32_t rev_damping = vp[5][2];
         if (rev_damping > 16384) {
             int32_t diff = rev_damping - 16384;
             noise_scale = 16384 + (diff << 1);
         }
-        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, active_macro);
+        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, macro_reverb);
         p.global_noise_scale = globalNoiseScale;
 
-        p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, active_macro, 16384);
+        p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
         p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = scale_grit(vp[0][2], 32767, active_macro, 16384);
+        p.chorus_depth_fb  = vp[0][2];
 
         // Pre-decode Chorus depth, feedback, and destroy
-        int32_t raw_depth_fb = p.chorus_depth_fb;
+        int32_t raw_depth_fb = vp[0][2];
         int32_t chorus_depth = 0;
         int32_t chorus_feedback = 0;
         int32_t chorus_xor_mask = 0;
@@ -1266,90 +1441,90 @@ void BendsCard::tick_ui_once() {
             chorus_feedback = 0;
         } else {
             chorus_depth = 32767;
+            int32_t base_fb = 0;
+            int32_t base_xor = 0;
             if (raw_depth_fb < 26214) {
-                chorus_feedback = ((raw_depth_fb - 16384) * 65536) >> 15;
+                base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
             } else {
-                chorus_feedback = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
-                chorus_xor_mask = (raw_depth_fb - 26214) >> 9;
+                base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
+                base_xor = (raw_depth_fb - 26214) >> 9;
+            }
+            if (active_macro < 16384) {
+                chorus_feedback = (base_fb * active_macro) >> 14;
+                chorus_xor_mask = (base_xor * active_macro) >> 14;
+            } else {
+                int32_t diff_fb = 32767 - base_fb;
+                int32_t diff_xor = 31 - base_xor;
+                int32_t scale_q15 = (macro_chorus - 16384) * 2;
+                chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
+                chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
             }
         }
         p.chorus_depth = chorus_depth;
         p.chorus_feedback = chorus_feedback;
         p.chorus_xor_mask = chorus_xor_mask;
 
-        // Pre-calculate Codec levels
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, active_macro, 16384);
-        int32_t raw_downsample = scale_grit(vp[1][1], 24000, active_macro, 16384);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, active_macro, 16384);
+        // Pre-calculate Codec levels (Omitting 16384 fourth parameter allows 100% full intensity scaling)
+        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
+        int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
+        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
         
         p.codec_mix = raw_strength;
         p.codec_downsample = raw_downsample;
         p.codec_ringing_xor = raw_ringing_xor;
 
         int32_t X = raw_downsample;
-        int32_t warped_ringing = (raw_ringing_xor * raw_ringing_xor) >> 15;
+        int32_t Y = raw_ringing_xor;
+        Y = clamp_i32(Y, 0, 32767);
 
         int32_t mp3_ring_level = 0;
         int32_t fuzz_level = 0;
         int32_t decimate_level = 0;
 
-        if (X < 11000) {
-            mp3_ring_level = (X * 24402) >> 13;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 22000) {
-            int32_t t = X - 11000;
-            mp3_ring_level = 32767 - ((t * 24402) >> 13);
-            fuzz_level = (t * 24402) >> 13;
-            decimate_level = 0;
+        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
+        if (X < 16384) {
+            mp3_ring_level = 32767 - (X * 2);
         } else {
-            int32_t t = X - 22000;
             mp3_ring_level = 0;
-            fuzz_level = 32767 - ((t * 24931) >> 13);
-            decimate_level = (t * 24931) >> 13;
         }
 
-        int32_t cv2_val = cv2_live ? (CVIn2()) : 0;
-        int32_t Y = warped_ringing + (cv2_val * 8);
-        Y = clamp_i32(Y, 0, 32767);
+        if (X < 16384) {
+            fuzz_level = X * 2;
+        } else {
+            fuzz_level = 32767 - ((X - 16384) * 2);
+        }
 
-        // --- NEW Y KNOB REBALANCING ---
-        // 1. Tape/Vinyl Saturation & Noise (Y < 10000)
+        if (X < 16384) {
+            decimate_level = 0;
+        } else {
+            decimate_level = (X - 16384) * 2;
+            if (decimate_level > 32767) decimate_level = 32767;
+        }
+
+        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
-        if (Y < 10000) {
-            tape_sat = (Y * 3); // rises to 30000 at Y = 10000
-            tape_hiss = (Y * 30) >> 15; // gentle noise
-        } else {
-            tape_sat = 30000 - (((Y - 10000) * 30000) / 22767);
-            tape_hiss = 30 - (((Y - 10000) * 30) / 22767);
-            if (tape_sat < 0) tape_sat = 0;
-            if (tape_hiss < 0) tape_hiss = 0;
-        }
-
-        // 2. Vinyl Click slips (Y >= 10000 && Y < 16000)
         int32_t pop_prob = 0;
-        if (Y >= 10000 && Y < 13000) {
-            pop_prob = ((Y - 10000) * 12) / 3000; // rises 0..12
-        } else if (Y >= 13000 && Y < 16000) {
-            pop_prob = 12 - (((Y - 13000) * 12) / 3000); // falls 12..0
-        }
-
-        // 3. CD Skips & Packet drops (Y >= 16000 && Y < 24000, peaks at 20000)
         int32_t bad_conn_level = 0;
         int32_t sputter_prob = 0;
-        if (Y >= 16000 && Y < 20000) {
-            bad_conn_level = ((Y - 16000) * 32767) / 4000;
-            sputter_prob = ((Y - 16000) * 50) / 4000; // rises 0..50
-        } else if (Y >= 20000 && Y < 24000) {
-            bad_conn_level = 32767 - (((Y - 20000) * 32767) / 4000);
-            sputter_prob = 50 - (((Y - 20000) * 50) / 4000); // falls 50..0
+        int32_t scramble_level = 0;
+
+        if (Y < 16384) {
+            tape_sat = 30000 - (Y * 30000) / 16384;
+            tape_hiss = 30 - (Y * 30) / 16384;
+            pop_prob = 12 - (Y * 12) / 16384;
         }
 
-        // 4. Broken Connection Scramble (Y >= 24000, rises 0..32767)
-        int32_t scramble_level = 0;
-        if (Y >= 24000) {
-            scramble_level = ((Y - 24000) * 32767) / 8767;
+        if (Y < 16384) {
+            bad_conn_level = (Y * 32767) / 16384;
+            sputter_prob = (Y * 50) / 16384;
+        } else {
+            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
+            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
+        }
+
+        if (Y >= 16384) {
+            scramble_level = ((Y - 16384) * 32767) / 16383;
         }
 
         // Scale pop_prob by X quality
@@ -1385,36 +1560,28 @@ void BendsCard::tick_ui_once() {
         if (scramble_level > 32767) scramble_level = 32767;
 
         int32_t click_ratio = 0;
-        if (Y >= 10000 && Y < 13000) {
-            click_ratio = ((Y - 10000) * 16384) / 3000;
-        } else if (Y >= 13000 && Y < 16000) {
-            int32_t t = Y - 13000;
-            click_ratio = 16384 - ((t * 16384) / 3000);
+        if (Y < 16384) {
+            click_ratio = 16384 - Y;
         }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 4000) >> 15;
+        click_depth = (click_depth * 16000) >> 15;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
         // CV1 global circuit bending injection:
-        // Inject vinyl clicks and CD stutters when CV1 is plugged in and positive
-        if (cv1_live && cv1_val > 0) {
-            p.codec_mix = clamp_i32(p.codec_mix + (cv1_val * 8), 0, 32767);
-            pop_prob = clamp_i32(pop_prob + (cv1_val * 20) / 2048, 0, 50);
-            sputter_prob = clamp_i32(sputter_prob + (cv1_val * 40) / 2048, 0, 80);
-            int32_t pop_cv1_depth = (cv1_val * 4000) >> 11;
+        // Inject vinyl clicks and CD stutters when CV1 is plugged in
+        // (CV1 is now dedicated solely to the digital loss engine, using absolute magnitude)
+        if (cv1_live && cv1_abs > 0) {
+            p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 8), 0, 32767);
+            pop_prob = clamp_i32(pop_prob + (cv1_abs * 20) / 2048, 0, 50);
+            sputter_prob = clamp_i32(sputter_prob + (cv1_abs * 40) / 2048, 0, 80);
+            int32_t pop_cv1_depth = (cv1_abs * 16000) >> 11;
             if (click_depth < pop_cv1_depth) click_depth = pop_cv1_depth;
         }
 
-        // CV2 global circuit bending injection:
-        // Inject digital scramble static and packet dropouts when CV2 is plugged in and positive
-        if (cv2_live && cv2_val > 0) {
-            p.codec_mix = clamp_i32(p.codec_mix + (cv2_val * 8), 0, 32767);
-            scramble_level = clamp_i32(scramble_level + (cv2_val * 8), 0, 32767);
-            bad_conn_level = clamp_i32(bad_conn_level + (cv2_val * 8), 0, 32767);
-        }
+        // CV2 global codec injection removed (CV2 is dedicated solely to glitcher)
 
         int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
 
@@ -1430,7 +1597,7 @@ void BendsCard::tick_ui_once() {
         p.codec_tape_hiss = tape_hiss;
         p.codec_active_loss = active_loss;
 
-        p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, active_macro, 16384);
+        p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
         
         // Scale delay time by active_macro
         int32_t raw_delay_time = vp[2][1];
@@ -1438,44 +1605,99 @@ void BendsCard::tick_ui_once() {
         if (active_macro < 16384) {
             if (raw_delay_time > 16384) {
                 int32_t diff = raw_delay_time - 16384;
-                scaled_delay_time = 16384 + ((diff * active_macro) >> 14);
+                scaled_delay_time = 16384 + ((diff * macro_delay) >> 14);
             }
         } else {
             int32_t diff = 32767 - raw_delay_time;
-            scaled_delay_time = raw_delay_time + ((diff * (active_macro - 16384)) / 16383);
+            scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
         }
         p.delay_time     = scaled_delay_time;
-        p.delay_feedback = scale_grit(vp[2][2], 32767, active_macro, 13107);
+
+        // Custom Delay Feedback and Glitch Feedback scaling:
+        // Delay feedback below 22937 is clean. Only the glitch/XOR feedback portion above 22937 is scaled by macro.
+        int32_t raw_fb = vp[2][2];
+        int32_t clean_fb = raw_fb;
+        int32_t glitch_fb = 0;
+        if (raw_fb > 22937) {
+            clean_fb = 22937;
+            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
+        }
+
+        if (active_macro < 16384) {
+            glitch_fb = (glitch_fb * active_macro) >> 14;
+        } else {
+            int32_t diff_fb = 32767 - glitch_fb;
+            int32_t scale_q15 = (macro_delay - 16384) * 2;
+            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
+        }
+
+        if (raw_fb > 22937) {
+            p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
+            if (p.delay_feedback > 30000) p.delay_feedback = 30000;
+            p.glitch_feedback = glitch_fb;
+        } else {
+            p.delay_feedback = clean_fb;
+            p.glitch_feedback = 0;
+        }
 
         bool is_freeze_page = (currentPage == 7);
+        bool use_freeze_params = (is_freeze_page || (is_frozen && currentPage != 3));
         int32_t raw_glitch_speed = 16384;
-        if (is_freeze_page || is_frozen) {
-            p.glitch_mix   = vp[7][0]; // scrub offset
-            raw_glitch_speed = vp[7][2]; // speed (Y knob)
-            p.glitch_size  = vp[7][1]; // loop size (X knob)
+        if (use_freeze_params) {
+            p.glitch_mix     = vp[7][0]; // scrub offset (MAIN knob on Page 7)
+            raw_glitch_speed = vp[7][2]; // speed        (Y knob on Page 7)
+            p.glitch_size    = vp[7][1]; // loop size    (X knob on Page 7)
         } else {
-            p.glitch_mix   = scale_grit(apply_deadzone(vp[3][0]), 32767, active_macro, 16384);
+            int32_t raw_mix = apply_deadzone(vp[3][0]);
+            p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
             p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, active_macro, 16384);
+            raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
         }
         p.glitch_speed = raw_glitch_speed;
 
-        // Glitch speed mapping
+        // Glitch / Freeze speed mapping
         int32_t glitch_speed_mapped = 65536;
-        if (raw_glitch_speed > 18000) {
-            glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
-        } else if (raw_glitch_speed < 14000) {
-            glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+        if (use_freeze_params) {
+            // Freeze page Y knob: pitch control
+            //   Centre (16384) = 0 semitones (1× speed)
+            //   Right  (>16384) = smooth pitch shift  0 → +12 semitones (continuously variable)
+            //   Left   (<16384) = quantised pitch shift 0 → +12 semitones (whole-semitone steps)
+            // Both sides go UP so the whole knob is in the musical "faster / higher" direction.
+            // Quantised left side lets you land on exact notes; smooth right side lets you fine-tune.
+            static const int32_t freeze_pitch_lut[13] = {
+                65536, 69433, 73562, 77936, 82570, 87480,
+                92682, 98193, 104032, 110218, 116773, 123717, 131072
+            }; // 0..+12 semitones in Q16
+            int32_t knob = vp[7][2]; // 0..32767, centre = 16384
+            if (knob >= 16384) {
+                // Right half — smooth interpolation between semitones
+                int32_t t = knob - 16384;                   // 0..16383
+                int32_t semi_q8 = (t * 3072) / 16383;       // 0..3072  (12 semitones × 256)
+                int32_t si = semi_q8 >> 8;                  // whole semitone  0..12
+                int32_t sf = semi_q8 & 0xFF;                // fractional      0..255
+                if (si >= 12) {
+                    glitch_speed_mapped = freeze_pitch_lut[12];
+                } else {
+                    int32_t lo = freeze_pitch_lut[si];
+                    int32_t hi = freeze_pitch_lut[si + 1];
+                    glitch_speed_mapped = lo + (((hi - lo) * sf) >> 8);
+                }
+            } else {
+                // Left half — nearest whole-semitone quantisation
+                int32_t t = 16384 - knob;                   // 1..16384
+                int32_t semi = (t * 12 + 8191) / 16384;     // 0..12, rounded
+                if (semi > 12) semi = 12;
+                glitch_speed_mapped = freeze_pitch_lut[semi];
+            }
+        } else {
+            // Normal glitch-mode speed mapping (forward + reverse)
+            if (raw_glitch_speed > 18000) {
+                glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
+            } else if (raw_glitch_speed < 14000) {
+                glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+            }
         }
         p.glitch_speed_mapped = glitch_speed_mapped;
-
-        // Calculate Glitcher Feedback Loop scaled by grittiness macro
-        int32_t raw_fb = vp[2][2];
-        int32_t glitch_fb = 0;
-        if (raw_fb > 22937) {
-            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
-        }
-        p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
 
         // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
         {
@@ -1497,11 +1719,11 @@ void BendsCard::tick_ui_once() {
                     loop_size = active_clk * 2;
                 }
             }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
+            p.glitch_loop_size = clamp_i32(loop_size, 128, 16380);
 
             int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
             int32_t cv1_offset = p.cv1 * 6;
-            int32_t range = 32760 - p.glitch_loop_size;
+            int32_t range = 16380 - p.glitch_loop_size;
             if (range < 0) range = 0;
             int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
             int32_t target_offset = raw_offset + cv1_offset;
@@ -1511,35 +1733,29 @@ void BendsCard::tick_ui_once() {
                 int32_t step = (target_offset + (step_size / 2)) / step_size;
                 target_offset = step * step_size;
             }
-            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
+            p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
 
             int32_t active_speed = p.glitch_speed_mapped;
             const int32_t pitch_ratio_lut[25] = {
                 32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
                 69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
             };
-            int32_t semitones = (p.cv2 * 385) >> 16;
+            int32_t semitones = (cv2_val * 385) >> 16;
             semitones = clamp_i32(semitones, -12, 12);
             int32_t ratio = pitch_ratio_lut[semitones + 12];
             p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
         }
 
-        // Filter cutoff pre-scaling
-        int32_t raw_filter_cutoff = vp[4][0];
-        int32_t scaled_filter_cutoff = raw_filter_cutoff;
-        if (active_macro < 16384) {
-            int32_t diff = raw_filter_cutoff - 16384;
-            scaled_filter_cutoff = 16384 + ((diff * active_macro) >> 14);
-        }
-        p.filter_cutoff = scaled_filter_cutoff;
-        p.filter_res    = scale_grit(vp[4][1], 32767, active_macro, 13107);
-        p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro, 9830);
+        // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
+        p.filter_cutoff = vp[4][0];
+        p.filter_res    = vp[4][1];
+        p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
 
         p.freeze = is_frozen;
-        bool cv2_stutter = cv2_live && (cv2_val > 400);
+        bool cv2_stutter = cv2_live && (cv2_abs > 400);
         p.stutter = (pulse1_live && PulseIn1()) || cv2_stutter;
-        p.cv1 = cv1_live ? cv1_val : 0;
-        p.cv2 = cv2_live ? CVIn2() : 0;
+        p.cv1 = cv1_live ? cv1_abs : 0;
+        p.cv2 = cv2_val;
         p.pulse1_live = pulse1_live;
         p.pulse2_live = pulse2_live;
         p.cv1_live = cv1_live;
@@ -1556,16 +1772,18 @@ void BendsCard::tick_ui_once() {
 
 
 
-        // Reverb params
-        p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, active_macro, 13107);
+        // Reverb params — Reverb mix is clean (not scaled by macro).
+        p.reverb_mix  = apply_deadzone(vp[5][0]);
         {
             int32_t fb = vp[5][2];
             int32_t fb_glitch = fb;
-            if (active_macro < 16384) {
-                if (fb > 16384) fb_glitch = 16384 + (((fb - 16384) * active_macro) >> 14);
-            } else {
-                int32_t target_max = fb + (((32767 - fb) * 13107) >> 15);
-                fb_glitch = fb + (((target_max - fb) * (active_macro - 16384)) / 16383);
+            if (fb > 12000) {
+                if (active_macro < 16384) {
+                    fb_glitch = 12000 + (((fb - 12000) * active_macro) >> 14);
+                } else {
+                    int32_t target_max = 32767; // Scale up to 100% full intensity
+                    fb_glitch = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
+                }
             }
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
@@ -1611,7 +1829,9 @@ void BendsCard::tick_ui_once() {
                 if (circuit_bent_level > 32767) circuit_bent_level = 32767;
             }
 
-            int32_t damp = 30000 - ((lofi_level * 6000) >> 15);
+            // Damping: 30000 = bright (~25kHz at 24kHz SR), floor = 22000 = dark/muffled
+            // Extended floor (was 24000) allows genuinely woolly reverb tails
+            int32_t damp = 30000 - ((lofi_level * 8000) >> 15);
 
             int32_t shift_q15 = (lofi_level * 6);
             int32_t int_shift = shift_q15 >> 15;

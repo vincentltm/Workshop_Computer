@@ -1094,8 +1094,8 @@ inline int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &see
 }
 
 struct GlitcherBlock {
-    uint8_t  bufL[32768];
-    uint8_t  bufR[32768];
+    int16_t  bufL[16384];
+    int16_t  bufR[16384];
     uint16_t wr = 0;
 
     bool     active     = false;
@@ -1218,17 +1218,17 @@ struct GlitcherBlock {
         if (mainProb < 50 && !want_active && !active && dry_fade_ctr == 0) {
             outL = inL;
             outR = inR;
-            bufL[wr] = encode_mulaw(inL);
-            bufR[wr] = encode_mulaw(inR);
-            wr = (wr + 1) & 0x7FFF;
+            bufL[wr] = inL;
+            bufR[wr] = inR;
+            wr = (wr + 1) & 0x3FFF;
             return;
         }
         if (is_clock_sync && mainProb < 50 && !active && dry_fade_ctr == 0) {
             outL = inL;
             outR = inR;
-            bufL[wr] = encode_mulaw(inL);
-            bufR[wr] = encode_mulaw(inR);
-            wr = (wr + 1) & 0x7FFF;
+            bufL[wr] = inL;
+            bufR[wr] = inR;
+            wr = (wr + 1) & 0x3FFF;
             return;
         }
 
@@ -1257,7 +1257,7 @@ struct GlitcherBlock {
         if (finalProb > 32767) finalProb = 32767;
 
         // ── FREEZE MODE ──────────────────────────────────────────────────────
-        bool is_freezing = freezeGate || (pulse2_live && p2_gate);
+        bool is_freezing = freezeGate || (pulse2_live && p2_gate) || (mainProb >= 32760);
         if (is_freezing) {
             if (!last_freezeGate) {
                 active = false;
@@ -1274,7 +1274,7 @@ struct GlitcherBlock {
                 } else {
                     frozen_clk_period = 0;
                 }
-                freeze_wr = target_wr & 0x7FFF;
+                freeze_wr = target_wr & 0x3FFF;
                 
                 current_loop_len = target_loop_size;
                 active_offset = target_offset;
@@ -1301,7 +1301,7 @@ struct GlitcherBlock {
 
             speed_q16 = target_speed_q16;
 
-            int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
+            int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x3FFF) << 16;
 
             rd_q16 += speed_q16;
             sample_ctr++;
@@ -1334,7 +1334,7 @@ struct GlitcherBlock {
                     int32_t slip_prob = (chaos_depth * 10) >> 15;
                     if ((int32_t)slip_roll < slip_prob) {
                         int32_t slip_samples = (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - 16384) >> 4;
-                        freeze_wr = (freeze_wr + slip_samples) & 0x7FFF;
+                        freeze_wr = (freeze_wr + slip_samples) & 0x3FFF;
                     }
                 }
 
@@ -1357,22 +1357,22 @@ struct GlitcherBlock {
                     active_offset = target_offset;
                 }
                 
-                loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
+                loop_start = (((int32_t)freeze_wr - active_offset) & 0x3FFF) << 16;
             }
 
             int16_t sL = 0, sR = 0;
             auto read_buf = [&](int32_t ptr, int16_t &valL, int16_t &valR) {
-                int32_t  idx  = (ptr >> 16) & 0x7FFF;
-                int32_t  nxt  = (idx + 1)   & 0x7FFF;
+                int32_t  idx  = (ptr >> 16) & 0x3FFF;
+                int32_t  nxt  = (idx + 1)   & 0x3FFF;
                 uint16_t frac = (uint16_t)(ptr & 0xFFFF);
-                int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                int16_t y0L = bufL[idx], y1L = bufL[nxt];
                 valL = lerp_delay_q15(y0L, y1L, frac);
-                int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                int16_t y0R = bufR[idx], y1R = bufR[nxt];
                 valR = lerp_delay_q15(y0R, y1R, frac);
             };
 
             read_buf(loop_start + rd_q16, sL, sR);
-            current_g711_sample = bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x7FFF];
+            current_g711_sample = (bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x3FFF] >> 8) + 128;
 
 
 
@@ -1404,14 +1404,12 @@ struct GlitcherBlock {
 
             // Glitcher Feedback Loop (disabled when frozen to prevent volume build-up)
             if (glitchFeedback > 0 && !freezeGate) {
-                int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
+                int32_t idx = ((loop_start + rd_q16) >> 16) & 0x3FFF;
                 int32_t scaled_fb = (glitchFeedback * 29491) >> 15;
-                int16_t oldL = decode_mulaw(bufL[idx]);
-                int16_t oldR = decode_mulaw(bufR[idx]);
-                int16_t newL = soft_limit_q15(((int32_t)oldL * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
-                int16_t newR = soft_limit_q15(((int32_t)oldR * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
-                bufL[idx] = encode_mulaw(newL);
-                bufR[idx] = encode_mulaw(newR);
+                int16_t newL = soft_limit_q15(((int32_t)bufL[idx] * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
+                int16_t newR = soft_limit_q15(((int32_t)bufR[idx] * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
+                bufL[idx] = newL;
+                bufR[idx] = newR;
             }
 
             outL = lerp_q15(inL, sL, (int16_t)mainProb);
@@ -1425,7 +1423,7 @@ struct GlitcherBlock {
                 last_freezeGate = false;
                 if (active) {
                     active = false;
-                    int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
+                    int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x3FFF) << 16;
                     dry_fade_rd = loop_start + rd_q16;
                     dry_fade_len = 512;
                     dry_fade_ctr = 512;
@@ -1469,8 +1467,8 @@ struct GlitcherBlock {
             if (cur_xfade < 4) cur_xfade = 4;
 
             if (!active) {
-                bufL[wr] = encode_mulaw(inL);
-                bufR[wr] = encode_mulaw(inR);
+                bufL[wr] = inL;
+                bufR[wr] = inR;
 
                 bool boundary = false;
                 if (pulse1_live) {
@@ -1563,18 +1561,18 @@ struct GlitcherBlock {
                     onset_fade_step = (32767 << 15) / cur_xfade;
                     onset_fade_phase = 0;
                 }
-                wr = (wr + 1) & 0x7FFF;
+                wr = (wr + 1) & 0x3FFF;
             }
 
             if (active) {
                 active_duration_ctr++;
                 auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
-                    int32_t  idx  = (ptr >> 16) & 0x7FFF;
-                    int32_t  nxt  = (idx + 1)   & 0x7FFF;
+                    int32_t  idx  = (ptr >> 16) & 0x3FFF;
+                    int32_t  nxt  = (idx + 1)   & 0x3FFF;
                     uint16_t frac = (uint16_t)(ptr & 0xFFFF);
-                    int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                    int16_t y0L = bufL[idx], y1L = bufL[nxt];
                     sL = lerp_delay_q15(y0L, y1L, frac);
-                    int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                    int16_t y0R = bufR[idx], y1R = bufR[nxt];
                     sR = lerp_delay_q15(y0R, y1R, frac);
                 };
 
@@ -1583,7 +1581,7 @@ struct GlitcherBlock {
                 if (pulse1_live && clk_period_samples > 240) {
                     lookback = clk_period_samples;
                 }
-                int32_t loop_start = (((int32_t)freeze_wr - lookback - offset_samples) & 0x7FFF) << 16;
+                int32_t loop_start = (((int32_t)freeze_wr - lookback - offset_samples) & 0x3FFF) << 16;
 
                 // Step arpeggiator on Pulse 2 rising edge
                 if (pulse2_live && p2_rising) {
@@ -1627,7 +1625,7 @@ struct GlitcherBlock {
                         int32_t slip_prob = (chaos_depth * 10) >> 15;
                         if ((int32_t)slip_roll < slip_prob) {
                             int32_t slip_samples = (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - 16384) >> 4;
-                            freeze_wr = (freeze_wr + slip_samples) & 0x7FFF;
+                            freeze_wr = (freeze_wr + slip_samples) & 0x3FFF;
                         }
                     }
 
@@ -1749,7 +1747,7 @@ struct GlitcherBlock {
                         xfade_step = (32767 << 15) / cur_xfade;
                         xfade_phase = 0;
                         
-                        loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x7FFF) << 16;
+                        loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x3FFF) << 16;
                     } else {
                         active = false;
                         trigger_ctr = norm_loop_size < 3072 ? 3072 : norm_loop_size;
@@ -1764,7 +1762,7 @@ struct GlitcherBlock {
                 if (active) {
                     int16_t sL, sR;
                     read_buf(loop_start + rd_q16, sL, sR);
-                    current_g711_sample = bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x7FFF];
+                    current_g711_sample = bufL[((int32_t)(loop_start + rd_q16) >> 16) & 0x3FFF];
 
                     if (xfade_ctr > 0) {
                         int16_t xL, xR;
@@ -1791,14 +1789,14 @@ struct GlitcherBlock {
                     }
 
                     if (glitchFeedback > 0 && !freezeGate) {
-                        int32_t idx = ((loop_start + rd_q16) >> 16) & 0x7FFF;
+                        int32_t idx = ((loop_start + rd_q16) >> 16) & 0x3FFF;
                         int32_t scaled_fb = (glitchFeedback * 29491) >> 15;
-                        int16_t oldL = decode_mulaw(bufL[idx]);
-                        int16_t oldR = decode_mulaw(bufR[idx]);
+                        int16_t oldL = bufL[idx];
+                        int16_t oldR = bufR[idx];
                         int16_t newL = soft_limit_q15(((int32_t)oldL * (32768 - scaled_fb) + (int32_t)sL * scaled_fb) >> 15);
                         int16_t newR = soft_limit_q15(((int32_t)oldR * (32768 - scaled_fb) + (int32_t)sR * scaled_fb) >> 15);
-                        bufL[idx] = encode_mulaw(newL);
-                        bufR[idx] = encode_mulaw(newR);
+                        bufL[idx] = newL;
+                        bufR[idx] = newR;
                     }
 
                     outL = sL;
@@ -1810,12 +1808,12 @@ struct GlitcherBlock {
 
         if (dry_fade_ctr > 0) {
             auto read_buf = [&](int32_t ptr, int16_t &sL, int16_t &sR) {
-                int32_t  idx  = (ptr >> 16) & 0x7FFF;
-                int32_t  nxt  = (idx + 1)   & 0x7FFF;
+                int32_t  idx  = (ptr >> 16) & 0x3FFF;
+                int32_t  nxt  = (idx + 1)   & 0x3FFF;
                 uint16_t frac = (uint16_t)(ptr & 0xFFFF);
-                int16_t y0L = decode_mulaw(bufL[idx]), y1L = decode_mulaw(bufL[nxt]);
+                int16_t y0L = bufL[idx], y1L = bufL[nxt];
                 sL = lerp_delay_q15(y0L, y1L, frac);
-                int16_t y0R = decode_mulaw(bufR[idx]), y1R = decode_mulaw(bufR[nxt]);
+                int16_t y0R = bufR[idx], y1R = bufR[nxt];
                 sR = lerp_delay_q15(y0R, y1R, frac);
             };
 
