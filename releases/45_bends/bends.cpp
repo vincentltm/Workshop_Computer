@@ -97,6 +97,10 @@ struct Core1Params {
 
     int32_t grittiness_macro;
 
+    int32_t glitch_loop_size;
+    int32_t glitch_target_offset;
+    int32_t glitch_speed_q16;
+
     bool freeze;
     bool stutter;
     bool no_audio1;
@@ -111,7 +115,7 @@ struct Core1Params {
 
 volatile Core1Params g_params[2];
 std::atomic<uint32_t> g_params_idx{0};
-
+volatile uint32_t g_clk_period_samples = 0;
 // Grittiness macro state (written on Core 0, read in push_params_to_core1)
 static int32_t grittiness_macro = 16384;
 static bool g_macro_active = false;
@@ -196,6 +200,10 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_glitch_feedback = p.glitch_feedback;
     const int32_t eff_global_noise_scale = p.global_noise_scale;
 
+    const int32_t eff_glitch_loop_size    = p.glitch_loop_size;
+    const int32_t eff_glitch_target_offset = p.glitch_target_offset;
+    const int32_t eff_glitch_speed_q16     = p.glitch_speed_q16;
+
     const int32_t eff_filter_cutoff = p.filter_cutoff;
     const int32_t eff_filter_res    = p.filter_res;
     const int32_t eff_filter_morph  = p.filter_morph;
@@ -238,6 +246,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     if (pulse1_live && p1_rising) {
         if (clk_timer > 240) { // filter noise (>10ms)
             clk_period_samples = clk_timer;
+            g_clk_period_samples = clk_period_samples;
         }
         clk_timer = 0;
     }
@@ -294,13 +303,15 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     glitcher.process(L, L, R, R,
-                     is_freeze_page ? 32767 : eff_glitch_mix, eff_glitch_size, eff_glitch_speed, eff_glitch_speed_mapped,
+                     is_freeze_page ? 32767 : eff_glitch_mix,
+                     eff_glitch_size, eff_glitch_speed, eff_glitch_speed_mapped,
                      stutter, is_freeze_page || freeze,
                      cv1, cv2, rand_seed,
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
                      pulse1_live, p1_rising, p1_val,
                      pulse2_live, p2_rising, p2_val,
-                     clk_period_samples, clk_timer);
+                     clk_period_samples, clk_timer,
+                     eff_glitch_loop_size, eff_glitch_target_offset, eff_glitch_speed_q16);
 
     // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
     filter.process(L, L, R, R, eff_filter_cutoff, eff_filter_res, eff_filter_morph, 0);
@@ -666,6 +677,52 @@ static void push_params_to_core1() {
             glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
         }
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
+
+        // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
+        {
+            int32_t active_clk = g_clk_period_samples;
+            int32_t size = p.glitch_size;
+            int32_t loop_size = 128 + size;
+            if (active_clk > 240) {
+                if (size < 5000) {
+                    loop_size = active_clk / 16;
+                } else if (size < 10000) {
+                    loop_size = active_clk / 8;
+                } else if (size < 15000) {
+                    loop_size = active_clk / 4;
+                } else if (size < 20000) {
+                    loop_size = active_clk / 2;
+                } else if (size < 26000) {
+                    loop_size = active_clk;
+                } else {
+                    loop_size = active_clk * 2;
+                }
+            }
+            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
+
+            int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
+            int32_t cv1_offset = 0;
+            int32_t range = 32760 - p.glitch_loop_size;
+            if (range < 0) range = 0;
+            int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
+            int32_t target_offset = raw_offset + cv1_offset;
+            if (active_clk > 240) {
+                int32_t step_size = active_clk / 4;
+                if (step_size < 1) step_size = 1;
+                int32_t step = (target_offset + (step_size / 2)) / step_size;
+                target_offset = step * step_size;
+            }
+            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
+
+            int32_t active_speed = p.glitch_speed_mapped;
+            const int32_t pitch_ratio_lut[25] = {
+                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
+                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
+            };
+            int32_t semitones = 0;
+            int32_t ratio = pitch_ratio_lut[semitones + 12];
+            p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
+        }
 
         // Filter cutoff pre-scaling
         int32_t raw_filter_cutoff = vp[4][0];
@@ -1354,6 +1411,53 @@ void BendsCard::tick_ui_once() {
             glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
         }
         p.glitch_feedback = scale_grit(glitch_fb, 32767, active_macro, 13107);
+
+        // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
+        {
+            int32_t active_clk = g_clk_period_samples;
+            int32_t size = p.glitch_size;
+            int32_t loop_size = 128 + size;
+            if (active_clk > 240) {
+                if (size < 5000) {
+                    loop_size = active_clk / 16;
+                } else if (size < 10000) {
+                    loop_size = active_clk / 8;
+                } else if (size < 15000) {
+                    loop_size = active_clk / 4;
+                } else if (size < 20000) {
+                    loop_size = active_clk / 2;
+                } else if (size < 26000) {
+                    loop_size = active_clk;
+                } else {
+                    loop_size = active_clk * 2;
+                }
+            }
+            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
+
+            int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
+            int32_t cv1_offset = p.cv1 * 6;
+            int32_t range = 32760 - p.glitch_loop_size;
+            if (range < 0) range = 0;
+            int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
+            int32_t target_offset = raw_offset + cv1_offset;
+            if (active_clk > 240) {
+                int32_t step_size = active_clk / 4;
+                if (step_size < 1) step_size = 1;
+                int32_t step = (target_offset + (step_size / 2)) / step_size;
+                target_offset = step * step_size;
+            }
+            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
+
+            int32_t active_speed = p.glitch_speed_mapped;
+            const int32_t pitch_ratio_lut[25] = {
+                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
+                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
+            };
+            int32_t semitones = (p.cv2 * 385) >> 16;
+            semitones = clamp_i32(semitones, -12, 12);
+            int32_t ratio = pitch_ratio_lut[semitones + 12];
+            p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
+        }
 
         // Filter cutoff pre-scaling
         int32_t raw_filter_cutoff = vp[4][0];

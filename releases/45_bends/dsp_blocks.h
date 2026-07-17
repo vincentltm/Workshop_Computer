@@ -1194,7 +1194,8 @@ struct GlitcherBlock {
                  uint32_t &rand_seed, int32_t scrubOffset, int32_t glitchFeedback, int32_t globalNoiseScale,
                  bool pulse1_live, bool p1_rising, bool p1_gate,
                  bool pulse2_live, bool p2_rising, bool p2_gate,
-                 uint32_t clk_period_samples, uint32_t clk_timer = 0)
+                 uint32_t clk_period_samples, uint32_t clk_timer,
+                 int32_t target_loop_size, int32_t target_offset, int32_t target_speed_q16)
     {
         bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
         bool eff_glitchInjector = glitchInjector;
@@ -1257,15 +1258,6 @@ struct GlitcherBlock {
             }
             last_freezeGate = true;
 
-            // Determine active clock period to use (live clock takes priority and updates stored clock)
-            uint32_t active_clk = 0;
-            if (pulse1_live && clk_period_samples > 240) {
-                active_clk = clk_period_samples;
-                frozen_clk_period = clk_period_samples;
-            } else if (frozen_clk_period > 240) {
-                active_clk = frozen_clk_period;
-            }
-
             // 1. Lock recording and initialize freeze on transition
             if (!active) {
                 active = true;
@@ -1276,50 +1268,13 @@ struct GlitcherBlock {
                 } else {
                     frozen_clk_period = 0;
                 }
-                active_clk = frozen_clk_period;
                 freeze_wr = target_wr & 0x7FFF;
                 
-                int32_t init_len = 128 + size;
-                if (active_clk > 240) {
-                    if (size < 6000) {
-                        init_len = active_clk / 16;
-                    } else if (size < 12000) {
-                        init_len = active_clk / 8;
-                    } else if (size < 18000) {
-                        init_len = active_clk / 4;
-                    } else if (size < 24000) {
-                        init_len = active_clk / 2;
-                    } else {
-                        init_len = active_clk;
-                    }
-                }
-                current_loop_len = clamp_i32(init_len, 128, 32760);
-
-                int32_t range = 32760 - current_loop_len;
-                if (range < 0) range = 0;
-                int32_t init_offset = (((32767 - scrubOffset) * range) >> 15) + current_loop_len;
-                if (active_clk > 240) {
-                    int32_t step_size = active_clk / 4;
-                    if (step_size < 1) step_size = 1;
-                    int32_t total_steps = 32760 / step_size;
-                    if (total_steps < 1) total_steps = 1;
-                    int32_t step = (init_offset + (step_size / 2)) / step_size;
-                    init_offset = step * step_size;
-                }
-                active_offset = clamp_i32(init_offset, 0, 32760);
+                current_loop_len = target_loop_size;
+                active_offset = target_offset;
 
                 // Determine initial speed and rd_q16 direction
-                int32_t init_speed = speedMapped;
-                const int32_t pitch_ratio_lut[25] = {
-                    32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
-                    69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
-                };
-                int32_t semitones = (cv2Corruption * 385) >> 16;
-                semitones = clamp_i32(semitones, -12, 12);
-                int32_t ratio = pitch_ratio_lut[semitones + 12];
-                init_speed = ((int64_t)init_speed * ratio) >> 16;
-                
-                speed_q16 = init_speed;
+                speed_q16 = target_speed_q16;
                 rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
 
                 xfade_ctr = 0;
@@ -1334,57 +1289,11 @@ struct GlitcherBlock {
                 onset_fade_phase = 0;
             }
 
-            int32_t loop_size = 128 + size;
-            if (active_clk > 240) {
-                if (size < 5000) {
-                    loop_size = active_clk / 16;
-                } else if (size < 10000) {
-                    loop_size = active_clk / 8;
-                } else if (size < 15000) {
-                    loop_size = active_clk / 4;
-                } else if (size < 20000) {
-                    loop_size = active_clk / 2;
-                } else if (size < 26000) {
-                    loop_size = active_clk;
-                } else {
-                    loop_size = active_clk * 2;
-                }
-            }
-            loop_size = clamp_i32(loop_size, 128, 32760);
+            int32_t loop_size = target_loop_size;
             int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
             if (cur_xfade < 4) cur_xfade = 4;
 
-            // CV1 scrubs loop position when frozen:
-            int32_t cv1_offset = cv1Warp * 6; // sweeps ~±12288 samples
-            int32_t range = 32760 - loop_size;
-            if (range < 0) range = 0;
-            int32_t raw_offset = (((32767 - scrubOffset) * range) >> 15) + loop_size;
-            int32_t target_offset = raw_offset + cv1_offset;
-            if (active_clk > 240) {
-                // Snap scrub position to 1/16 note steps of the clock
-                int32_t step_size = active_clk / 4;
-                if (step_size < 1) step_size = 1;
-                int32_t total_steps = 32760 / step_size;
-                if (total_steps < 1) total_steps = 1;
-                int32_t step = (target_offset + (step_size / 2)) / step_size;
-                target_offset = step * step_size;
-            }
-            target_offset = clamp_i32(target_offset, 0, 32760);
-            
-            // Continuous tape speed mapping with a wide 1.0x center deadzone [14000..18000]
-            int32_t active_speed = speedMapped;
-
-            // CV2 pitch ratio tracking
-            const int32_t pitch_ratio_lut[25] = {
-                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
-                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
-            };
-            int32_t semitones = (cv2Corruption * 385) >> 16;
-            semitones = clamp_i32(semitones, -12, 12);
-            int32_t ratio = pitch_ratio_lut[semitones + 12];
-            active_speed = ((int64_t)active_speed * ratio) >> 16;
-            
-            speed_q16 = active_speed;
+            speed_q16 = target_speed_q16;
 
             int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x7FFF) << 16;
 
