@@ -1351,6 +1351,24 @@ void BendsCard::tick_ui_once() {
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
+        // CV1 global circuit bending injection:
+        // Inject vinyl clicks and CD stutters when CV1 is plugged in and positive
+        if (cv1_live && cv1_val > 0) {
+            p.codec_mix = clamp_i32(p.codec_mix + (cv1_val * 8), 0, 32767);
+            pop_prob = clamp_i32(pop_prob + (cv1_val * 20) / 2048, 0, 50);
+            sputter_prob = clamp_i32(sputter_prob + (cv1_val * 40) / 2048, 0, 80);
+            int32_t pop_cv1_depth = (cv1_val * 4000) >> 11;
+            if (click_depth < pop_cv1_depth) click_depth = pop_cv1_depth;
+        }
+
+        // CV2 global circuit bending injection:
+        // Inject digital scramble static and packet dropouts when CV2 is plugged in and positive
+        if (cv2_live && cv2_val > 0) {
+            p.codec_mix = clamp_i32(p.codec_mix + (cv2_val * 8), 0, 32767);
+            scramble_level = clamp_i32(scramble_level + (cv2_val * 8), 0, 32767);
+            bad_conn_level = clamp_i32(bad_conn_level + (cv2_val * 8), 0, 32767);
+        }
+
         int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
 
         p.codec_mp3_ring = mp3_ring_level;
@@ -1471,7 +1489,8 @@ void BendsCard::tick_ui_once() {
         p.filter_morph  = scale_grit(vp[4][2], 32767, active_macro, 9830);
 
         p.freeze = is_frozen;
-        p.stutter = pulse1_live && PulseIn1();
+        bool cv2_stutter = cv2_live && (cv2_val > 400);
+        p.stutter = (pulse1_live && PulseIn1()) || cv2_stutter;
         p.cv1 = cv1_live ? cv1_val : 0;
         p.cv2 = cv2_live ? CVIn2() : 0;
         p.pulse1_live = pulse1_live;
