@@ -116,7 +116,7 @@ struct ChorusBlock {
         hp_x1L = hp_y1L = hp_x1R = hp_y1R = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t rate, int16_t depth, int32_t feedback, int32_t xor_mask,
                  int32_t cv1Warp)
     {
@@ -365,7 +365,7 @@ struct CodecDemolisherBlock {
         }
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t strength,
                  int32_t mp3_ring_level, int32_t fuzz_level, int32_t decimate_level,
                  int32_t pop_prob, int32_t click_depth, int32_t bad_conn_level, int32_t scramble_level,
@@ -635,7 +635,8 @@ struct CodecDemolisherBlock {
         compLi = (compLi * gain_coef) >> 15;
         compRi = (compRi * gain_coef) >> 15;
 
-        int32_t makeup_gain = 32768 + ((strength * 11468) >> 15);
+        // Compensated makeup gain to keep overall wet path loudness constant
+        int32_t makeup_gain = 32768 - ((strength * 6000) >> 15);
         compLi = (compLi * makeup_gain) >> 15;
         compRi = (compRi * makeup_gain) >> 15;
 
@@ -796,7 +797,7 @@ struct MultiTapDelayBlock {
         dcR.init();
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t mainMix, int32_t time, int32_t feedback,
                  bool freeze, int32_t cv1Warp, int32_t cv2Corruption, int32_t globalNoiseScale = 16384,
                  bool pulse1_live = false, uint32_t clk_period_samples = 0)
@@ -1068,19 +1069,7 @@ inline int32_t determine_speed_zoned(int32_t sq, int32_t cv2_corr, uint32_t &see
         }
     }
 
-    // Quantize CV2 to ±12 chromatic semitones using a lookup table
-    // CV2 ranges -2048 to 2047. 2048 / 170 ≈ 12
-    static const int32_t chromatic_scale_q16[25] = {
-        32768, 34716, 36780, 38967, 41284, 43739, 46340, 49096, 52016, 55109, 58386, 61858,
-        65536,
-        69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116772, 123715, 131072
-    };
-    int32_t semitones = (cv2_corr * 385) >> 16;
-    if (semitones < -12) semitones = -12;
-    if (semitones > 12) semitones = 12;
-    int32_t scale_factor = chromatic_scale_q16[semitones + 12];
-
-    int32_t speed = ((int64_t)base_speed * scale_factor) >> 16;
+    int32_t speed = base_speed;
 
     // Add micro pitch jitter under chaos
     int32_t eff_chaos = cv2_corr < 0 ? -cv2_corr : cv2_corr;
@@ -1194,8 +1183,8 @@ struct GlitcherBlock {
         trigger_ctr = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
-                 int32_t mainProb, int32_t size, int32_t speedQuant, int32_t speedMapped,
+    __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+                 int32_t mainProb, int32_t size, int32_t speedQuant, bool isFreezePage,
                  bool glitchInjector, bool freezeGate, int32_t cv1Warp, int32_t cv2Corruption,
                  uint32_t &rand_seed, int32_t scrubOffset, int32_t glitchFeedback, int32_t globalNoiseScale,
                  bool pulse1_live, bool p1_rising, bool p1_gate,
@@ -1213,6 +1202,7 @@ struct GlitcherBlock {
         if (pulse1_live) {
             want_active = p1_gate || freezeGate;
         }
+        bool is_loop_frozen = freezeGate || (mainProb >= 32760);
         int32_t speed_q16 = 65536;
 
         if (mainProb < 50 && !want_active && !active && dry_fade_ctr == 0) {
@@ -1257,7 +1247,7 @@ struct GlitcherBlock {
         if (finalProb > 32767) finalProb = 32767;
 
         // ── FREEZE MODE ──────────────────────────────────────────────────────
-        bool is_freezing = freezeGate || (pulse2_live && p2_gate) || (mainProb >= 32760);
+        bool is_freezing = freezeGate || (pulse2_live && p2_gate);
         if (is_freezing) {
             if (!last_freezeGate) {
                 active = false;
@@ -1280,7 +1270,8 @@ struct GlitcherBlock {
                 active_offset = target_offset;
 
                 // Determine initial speed and rd_q16 direction
-                speed_q16 = target_speed_q16;
+                current_speed_q16 = isFreezePage ? target_speed_q16 : 65536;
+                speed_q16 = current_speed_q16;
                 rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
 
                 xfade_ctr = 0;
@@ -1299,7 +1290,7 @@ struct GlitcherBlock {
             int32_t cur_xfade = loop_size < 512 ? (loop_size >> 1) : 256;
             if (cur_xfade < 4) cur_xfade = 4;
 
-            speed_q16 = target_speed_q16;
+            speed_q16 = isFreezePage ? target_speed_q16 : 65536;
 
             int32_t loop_start = (((int32_t)freeze_wr - active_offset) & 0x3FFF) << 16;
 
@@ -1532,8 +1523,8 @@ struct GlitcherBlock {
                         uint32_t r = fast_rand(rand_seed) & 7;
                         if (pulse1_live && clk_period_samples > 240) {
                             uint32_t r_div = ((fast_rand(rand_seed) & 0xFFFF) * 5) >> 16;
-                            static const int32_t divs[5] = {16, 8, 4, 2, 1};
-                            final_size = clk_period_samples / divs[r_div];
+                            static const int32_t shifts[5] = {4, 3, 2, 1, 0};
+                            final_size = clk_period_samples >> shifts[r_div];
                         } else {
                             static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
                             final_size = size_lut[r];
@@ -1548,7 +1539,11 @@ struct GlitcherBlock {
                     current_loop_len = clamp_i32(final_size, 128, 16384);
                     
                     arpeggio_step = 0;
-                    current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+                    if (is_loop_frozen) {
+                        current_speed_q16 = isFreezePage ? target_speed_q16 : 65536;
+                    } else {
+                        current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
+                    }
                     speed_q16 = current_speed_q16;
                     
                     rd_q16 = (speed_q16 >= 0) ? 0 : (int64_t)(current_loop_len << 16);
@@ -1581,10 +1576,13 @@ struct GlitcherBlock {
                 if (pulse1_live && clk_period_samples > 240) {
                     lookback = clk_period_samples;
                 }
+                if (is_loop_frozen) {
+                    lookback = 0;
+                }
                 int32_t loop_start = (((int32_t)freeze_wr - lookback - offset_samples) & 0x3FFF) << 16;
 
-                // Step arpeggiator on Pulse 2 rising edge
-                if (pulse2_live && p2_rising) {
+                // Step arpeggiator on Pulse 2 rising edge (disabled when loop is frozen)
+                if (!is_loop_frozen && pulse2_live && p2_rising) {
                     if (speedQuant >= 19661 && speedQuant < 26214) {
                         arpeggio_step++;
                         current_speed_q16 = determine_speed_zoned(speedQuant, cv2Corruption, rand_seed, arpeggio_step, current_loop_len);
@@ -1592,6 +1590,11 @@ struct GlitcherBlock {
                     }
                 }
 
+                if (isFreezePage) {
+                    current_speed_q16 = target_speed_q16;
+                } else if (is_loop_frozen) {
+                    current_speed_q16 = 65536; // force unison pitch
+                }
                 speed_q16 = current_speed_q16;
                 rd_q16 += speed_q16;
                 sample_ctr++;
@@ -1643,7 +1646,6 @@ struct GlitcherBlock {
                     if (loop_prob > 28000 && finalProb < 28000) {
                         loop_prob = 28000; // Cap repeat probability at ~85% unless Main knob is turned high
                     }
-                    if (loop_prob > 32767) loop_prob = 32767;
 
                     if (is_clock_sync) {
                         if (current_loop_len < (int32_t)(clk_period_samples >> 1)) {
@@ -1652,6 +1654,11 @@ struct GlitcherBlock {
                             loop_prob = finalProb;
                         }
                     }
+
+                    if (finalProb >= 32760) {
+                        loop_prob = 32767; // 100% loop probability at fully right (kind of freezes)
+                    }
+                    if (loop_prob > 32767) loop_prob = 32767;
 
                     bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
@@ -1680,8 +1687,8 @@ struct GlitcherBlock {
                     if (keep_looping) {
                         xfade_rd = loop_start + rd_q16;
                         
-                        bool reroll_every_boundary = (speedQuant >= 19661);
-                        if (reroll_every_boundary || sample_ctr >= 1024) {
+                        bool reroll_every_boundary = (speedQuant >= 19661) && !is_loop_frozen;
+                        if (reroll_every_boundary || (sample_ctr >= 1024 && !is_loop_frozen)) {
                             if (!pulse2_live) {
                                 arpeggio_step++;
                                 trig_out2 = true;
@@ -1722,8 +1729,8 @@ struct GlitcherBlock {
                             uint32_t r = fast_rand(rand_seed) & 7;
                             if (pulse1_live && clk_period_samples > 240) {
                                 uint32_t r_div = ((fast_rand(rand_seed) & 0xFFFF) * 5) >> 16;
-                                static const int32_t divs[5] = {16, 8, 4, 2, 1};
-                                final_size = clk_period_samples / divs[r_div];
+                                static const int32_t shifts[5] = {4, 3, 2, 1, 0};
+                                final_size = clk_period_samples >> shifts[r_div];
                             } else {
                                 static const int32_t size_lut[8] = {128, 256, 512, 1024, 2048, 4096, 8192, 16384};
                                 final_size = size_lut[r];
@@ -1747,7 +1754,11 @@ struct GlitcherBlock {
                         xfade_step = (32767 << 15) / cur_xfade;
                         xfade_phase = 0;
                         
-                        loop_start = (((int32_t)freeze_wr - current_loop_len - offset_samples) & 0x3FFF) << 16;
+                        int32_t active_lookback = current_loop_len;
+                        if (is_loop_frozen) {
+                            active_lookback = 0;
+                        }
+                        loop_start = (((int32_t)freeze_wr - active_lookback - offset_samples) & 0x3FFF) << 16;
                     } else {
                         active = false;
                         trigger_ctr = norm_loop_size < 3072 ? 3072 : norm_loop_size;
@@ -1893,7 +1904,7 @@ struct FilterBlock {
         env = 0;
     }
 
-    void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
+    __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
                  int32_t cutoff, int32_t resonance, int32_t grit_param,
                  int32_t cv1Warp, int32_t cv2Corruption = 0)
     {
@@ -2324,7 +2335,7 @@ struct ReverbBlock {
         lp_size_scale = 32767;
     }
 
-    void process(int16_t &L, int16_t &R, int32_t mix, int32_t size_scale,
+    __attribute__((always_inline)) inline void process(int16_t &L, int16_t &R, int32_t mix, int32_t size_scale,
                  int32_t decay, int32_t damp, int32_t lofi_level,
                  int32_t sparkle_level, int32_t circuit_bent_level,
                  int32_t lofi_shift, int32_t lofi_frac) {

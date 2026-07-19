@@ -225,7 +225,6 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const int32_t eff_glitch_mix      = p.glitch_mix;
     const int32_t eff_glitch_size     = p.glitch_size;
     const int32_t eff_glitch_speed    = p.glitch_speed;
-    const int32_t eff_glitch_speed_mapped = p.glitch_speed_mapped;
     const int32_t eff_glitch_feedback = p.glitch_feedback;
     const int32_t eff_global_noise_scale = p.global_noise_scale;
 
@@ -397,7 +396,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
     glitcher.process(L, L, R, R,
                      freeze ? 32767 : eff_glitch_mix,
-                     eff_glitch_size, eff_glitch_speed, eff_glitch_speed_mapped,
+                     eff_glitch_size, eff_glitch_speed, is_freeze_page,
                      stutter, freeze,
                      0, cv2, rand_seed,
                      scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
@@ -415,8 +414,10 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
                    eff_reverb_sparkle_level, eff_reverb_circuit_bent_level,
                    eff_reverb_lofi_shift, eff_reverb_lofi_frac);
 
-    // --- CV Outputs (Envelope Follower and Arpeggiator CV / LFO) ---
-    // CV Out 1: envelope follower of the audio signal (fast attack, slow decay)
+    // Capture the loop trigger before it's cleared by the Pulse 1 generator
+    bool loop_triggered = glitcher.trig_out1;
+
+    // Calculate envelope follower once for use in both CV and Pulse 2 outputs
     int32_t env_in = (L < 0 ? -L : L) + (R < 0 ? -R : R);
     static int32_t env_followed = 0;
     if (env_in > env_followed) {
@@ -424,23 +425,70 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     } else {
         env_followed += ((env_in - env_followed) * 256) >> 15;
     }
-    int16_t cv_out1_val = -2048 + ((env_followed * 4095) >> 15);
-    CVOut1(cv_out1_val);
 
-    // CV Out 2: subtle stepped CV in Zone 3 (matching tape-drift vibe), or slow LFO in other zones
-    if (glitcher.active && (eff_glitch_speed >= 19661 && eff_glitch_speed < 26214)) {
-        static const int16_t steps[8] = {0, 120, -120, 0, -80, 160, -160, 80};
-        int16_t cv_val = steps[glitcher.arpeggio_step & 7];
-        CVOut2(cv_val);
-    } else {
-        static uint16_t lfo_phase = 0;
-        lfo_phase += 16;
-        int32_t lfo_tri = (lfo_phase < 32768) ? ((lfo_phase << 1) - 32768) : (32767 - ((lfo_phase - 32768) << 1));
-        int16_t cv_out2_val = (lfo_tri * 2047) >> 15;
-        CVOut2(cv_out2_val);
+    // --- CV Out 1 & 2: Semi-Random Matched Harmonic Voltages ---
+    static int16_t last_cv1 = 0;
+    static int16_t last_cv2 = 0;
+    static uint32_t slow_clock_ctr = 0;
+    
+    // Check if we need to update our stepped CV values:
+    // Either on a loop boundary (loop_triggered) or every ~500ms (24000 samples) when not glitching
+    bool trigger_cv_update = loop_triggered;
+    slow_clock_ctr++;
+    if (slow_clock_ctr >= 24000) {
+        slow_clock_ctr = 0;
+        if (!glitcher.active) {
+            trigger_cv_update = true;
+        }
     }
+    
+    if (trigger_cv_update) {
+        // Harmonically weighted semitone options:
+        // Index 0..4: consonant (unison, 4th, 5th, octave) -> {-12, -5, 0, 7, 12}
+        // Index 5..9: slightly more tense (3rds, 6ths) -> {-9, -8, -3, 4, 9}
+        // Index 10..14: dissonant (tritones, 7ths, seconds) -> {-11, -6, -1, 6, 11}
+        static const int16_t semitone_table[15] = {
+            -12, -5, 0, 7, 12,
+            -9, -8, -3, 4, 9,
+            -11, -6, -1, 6, 11
+        };
+        
+        int32_t active_grit = p.cv1_live ? p.cv1 : 0;
+        
+        // Pick a semitone for CV1:
+        // If grit is low, limit choice to consonant (first 5 values).
+        // If grit is high, allow tense and dissonant values.
+        int32_t max_choice = 5;
+        if (active_grit > 500) max_choice = 10;
+        if (active_grit > 1200) max_choice = 15;
+        
+        int32_t choice1 = (fast_rand(rand_seed) & 0x7FFF) % max_choice;
+        int16_t semi1 = semitone_table[choice1];
+        
+        // Choose a harmonic interval for CV2:
+        // Typically a consonant interval (major 3rd, minor 3rd, 4th, 5th)
+        // If grit is high, can also be dissonant intervals
+        static const int16_t interval_table[6] = {3, 4, 5, 7, 1, 6};
+        int32_t max_interval = 4; // 3, 4, 5, 7
+        if (active_grit > 1000) max_interval = 6;
+        
+        int32_t choice2 = (fast_rand(rand_seed) & 0x7FFF) % max_interval;
+        int16_t interval = interval_table[choice2];
+        int16_t semi2 = semi1 + interval;
+        if (semi2 > 12) semi2 -= 12; // keep within ±12 semitones
+        if (semi2 < -12) semi2 += 12;
+        
+        // Convert semitones to DAC counts:
+        // Eurorack CV standard here: Q11 output where ±1 octave = ±820 DAC counts (approx ±0.8V).
+        // Standard calibration is ±2048 = ±2 octaves, so 1 semitone = 820 / 12 = 68 DAC counts.
+        last_cv1 = semi1 * 68;
+        last_cv2 = semi2 * 68;
+    }
+    
+    CVOut1(last_cv1);
+    CVOut2(last_cv2);
 
-    // Rhythmic trigger outputs & Glitchy Square-Wave Audio Output
+    // --- Pulse Out 1: Loop Boundary Clock / Sync Pulses ---
     static int16_t p1_trig_timer = 0;
     if (glitcher.trig_out1) {
         glitcher.trig_out1 = false;
@@ -454,48 +502,70 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         PulseOut1(false);
     }
 
-    // Pulse 2 outputs raw composite glitchy noise when active for Eurorack mixing/filtering
-    static uint32_t square_phase = 0;
-    if (glitcher.active) {
-        uint8_t g711 = glitcher.current_g711_sample;
-        
-        // Layer 1: Audio-rate 1-bit comparator fuzz (sign bit) to track audio waveforms
-        bool audio_fuzz = (g711 & 0x80) != 0;
-        
-        // Layer 2: Sub-harmonic frequency tracking square wave (tracks active loop speed)
-        int32_t abs_speed = glitcher.current_speed_q16 < 0 ? -glitcher.current_speed_q16 : glitcher.current_speed_q16;
-        square_phase += (abs_speed * 11) / 1200; // maps 1.0x speed to 220Hz C3 pitch
-        bool speed_sq = (square_phase & 0x80000000) != 0;
-        
-        // Combine Layer 1 and 2 (ring-modulated digital fuzz)
-        bool composite_val = audio_fuzz ^ speed_sq;
-        
-        // Layer 3: Lower-bit G.711 textures injected at 25% rate for digital crackling and gating
-        if ((fast_rand(rand_seed) & 0x7FFF) < 8192) {
-            composite_val ^= ((g711 & 0x10) != 0); // bit 4 texture
-        }
-        
-        // Layer 4: High-frequency digital static / crackle spits (modulated by CV2 corruption and noise scale)
-        int32_t cv2_abs = cv2 < 0 ? -cv2 : cv2;
-        int32_t static_prob = 1000 + ((cv2_abs * eff_global_noise_scale) >> 15); // ranges 1000 to ~6000
-        bool digital_static = (int32_t)(fast_rand(rand_seed) & 0x7FFF) < static_prob;
-        composite_val ^= digital_static;
-        
-        // Layer 5: Vinyl CD-skip loop clicks / pops on loop boundary crossings (trig_out1)
-        static int16_t click_timer = 0;
-        if (glitcher.trig_out1) {
-            click_timer = 48; // 2 ms click burst
-        }
-        if (click_timer > 0) {
-            click_timer--;
-            // Toggles at 12 kHz to generate a bright, scratchy high-frequency pop
-            composite_val = (click_timer & 2) != 0;
-        }
+    // --- Pulse Out 2: Texture, Clicks & Pops Generator ---
+    bool composite_pulse2 = false;
 
-        PulseOut2(composite_val);
-    } else {
-        PulseOut2(false);
+    // 1. Vinyl Dust / Crackle (modulating with p.cv1 / degradation)
+    // We want a sparse, irregular stream of single-sample pops.
+    int32_t crackle_prob = 1; // background crackle
+    if (p.cv1_live) {
+        crackle_prob += (p.cv1 * 80) >> 11; // scales up to ~80 when p.cv1 is 2048
     }
+    if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < crackle_prob) {
+        composite_pulse2 = true;
+    }
+
+    // 2. Loop Boundary / Stutter Clicks
+    // On every stutter trigger, generate a distinct high-frequency pop (alternating 1 and 0).
+    static int16_t click_burst_timer = 0;
+    if (loop_triggered) {
+        click_burst_timer = 32; // ~0.7 ms pop
+    }
+    if (click_burst_timer > 0) {
+        click_burst_timer--;
+        if (click_burst_timer & 2) {
+            composite_pulse2 = true;
+        }
+    }
+
+    // 3. Transient Spits
+    // Compare env_followed to a running average, generate bursts on transients
+    static int32_t env_avg = 0;
+    env_avg += ((env_followed - env_avg) * 32) >> 15; // very slow tracking
+    int32_t transient_strength = env_followed - env_avg;
+    if (transient_strength > 4000) {
+        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < 300) {
+            composite_pulse2 = true;
+        }
+    }
+
+    // 4. Sub-harmonic rhythmic pops (halfway loop division)
+    if (glitcher.active) {
+        int32_t current_len = glitcher.current_loop_len;
+        int32_t current_pos = (glitcher.rd_q16 >> 16);
+        static int32_t last_pos = 0;
+        bool half_way_trigger = false;
+        if (current_len > 128) {
+            int32_t half = current_len / 2;
+            if (last_pos < half && current_pos >= half) {
+                half_way_trigger = true;
+            }
+        }
+        last_pos = current_pos;
+
+        static int16_t rhythmic_pop_timer = 0;
+        if (half_way_trigger) {
+            rhythmic_pop_timer = 24; // ~0.5ms pop
+        }
+        if (rhythmic_pop_timer > 0) {
+            rhythmic_pop_timer--;
+            if (rhythmic_pop_timer & 2) {
+                composite_pulse2 = true;
+            }
+        }
+    }
+
+    PulseOut2(composite_pulse2);
 
     // --- Output ---
     // Unity gain: input << 3 and output >> 4 cancel exactly (±16384 Q15 → ±1024 DAC ≡ ±3V).
@@ -530,7 +600,7 @@ static int32_t vp[8][3] = {
     // Page 2 — Delay:    Wet,   Time,   Feedback
     {     0, 16384, 16384 },
     // Page 3 — Glitcher: Mix,   Size,   Speed Probability
-    {     0, 16384, 16384 },
+    {     0, 19661,  8192 },
     // Page 4 — Filter:   Cutoff (DJ LP/HP), Resonance, Grit (Wavefolder)
     { 16384,  4000,  8000 },
     // Page 5 — Reverb:   Wet,   Decay,  Damping
@@ -538,7 +608,7 @@ static int32_t vp[8][3] = {
     // Page 6 — Sample Player: Start, Speed, Sample Select
     {     0, 16384,     0 },
     // Page 7 — Freeze Scrub: Scrub Pos, Loop Size, Playback Speed
-    { 32767, 23000, 16384 },
+    { 32767, 12000, 16384 },
 };
 
 // KnobLock instances — one per physical knob
@@ -842,14 +912,7 @@ static void push_params_to_core1() {
             }
             p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
 
-            int32_t active_speed = p.glitch_speed_mapped;
-            const int32_t pitch_ratio_lut[25] = {
-                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
-                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
-            };
-            int32_t semitones = 0;
-            int32_t ratio = pitch_ratio_lut[semitones + 12];
-            p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
+            p.glitch_speed_q16 = p.glitch_speed_mapped;
         }
 
         // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
@@ -1228,9 +1291,9 @@ void BendsCard::tick_ui_once() {
                                 pageBeforeUp = currentPage;
                             }
                             if (!is_frozen) {
-                                vp[7][0] = vp[3][0];
+                                vp[7][0] = 0; // default to most recent audio (0 offset)
                                 vp[7][1] = vp[3][1];
-                                vp[7][2] = vp[3][2];
+                                vp[7][2] = 16384; // default to normal pitch (1x speed)
                             }
                             currentPage = 7;
                             lockMain.engage(dzMain, vp[currentPage][0]);
@@ -1255,9 +1318,9 @@ void BendsCard::tick_ui_once() {
                     pageBeforeUp = currentPage;
                 }
                 if (!is_frozen) {
-                    vp[7][0] = vp[3][0];
+                    vp[7][0] = 0; // default to most recent audio (0 offset)
                     vp[7][1] = vp[3][1];
-                    vp[7][2] = vp[3][2];
+                    vp[7][2] = 16384; // default to normal pitch (1x speed)
                 }
                 currentPage = 7;
                 lockMain.engage(dzMain, vp[currentPage][0]);
@@ -1297,16 +1360,9 @@ void BendsCard::tick_ui_once() {
                         }
                         param_changed = true;
                     } else {
-                        // We were not frozen, so this flick latches the freeze
+                        // Lock on Page 7 so knobs (Main=Pos, X=Size, Y=Speed) can control freeze
                         freeze_latched = true;
                         is_frozen = true;
-                        // Return to pageBeforeUp so they can adjust other pages in the background
-                        if (currentPage == 7) {
-                            currentPage = pageBeforeUp;
-                            lockMain.engage(dzMain, vp[currentPage][0]);
-                            lockX.engage(dzX, vp[currentPage][1]);
-                            lockY.engage(dzY, vp[currentPage][2]);
-                        }
                         param_changed = true;
                     }
                 }
@@ -1405,6 +1461,21 @@ void BendsCard::tick_ui_once() {
         // CV1 no longer modulates macro globally (dedicated to digital loss engine)
         int32_t cv1_val = cv1_live ? (CVIn1()) : 0;
         int32_t cv2_val = cv2_live ? (CVIn2()) : 0;
+
+        // Scale CV inputs so that the 4 Voltages button presses (max ~1.62V for CV1, ~1.82V for CV2 on Volt3/4)
+        // can sweep the full range, while normal CV still functions correctly (clamping at the limits).
+        if (cv1_live) {
+            // Capped at 1000 (approx 48% of full scale) so button-triggered degradation is tasteful and not too strong
+            cv1_val = (cv1_val * 1000) / 553;
+            if (cv1_val > 1000) cv1_val = 1000;
+            if (cv1_val < -1000) cv1_val = -1000;
+        }
+        if (cv2_live) {
+            cv2_val = (cv2_val * 2048) / 621;
+            if (cv2_val > 2048) cv2_val = 2048;
+            if (cv2_val < -2048) cv2_val = -2048;
+        }
+
         int32_t cv1_abs = cv1_val < 0 ? -cv1_val : cv1_val;
         int32_t cv2_abs = cv2_val < 0 ? -cv2_val : cv2_val;
         int32_t active_macro = base_macro;
@@ -1573,12 +1644,55 @@ void BendsCard::tick_ui_once() {
         // CV1 global circuit bending injection:
         // Inject vinyl clicks and CD stutters when CV1 is plugged in
         // (CV1 is now dedicated solely to the digital loss engine, using absolute magnitude)
-        if (cv1_live && cv1_abs > 0) {
-            p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 8), 0, 32767);
-            pop_prob = clamp_i32(pop_prob + (cv1_abs * 20) / 2048, 0, 50);
-            sputter_prob = clamp_i32(sputter_prob + (cv1_abs * 40) / 2048, 0, 80);
+        if (cv1_live && cv1_abs > 100) {
+            // Overall mix injection
+            p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 16), 0, 32767);
+
+            // Shift degradation type from Fuzz -> Decimation by adding a bias to X
+            int32_t cv1_x_mod = (cv1_abs * 16);
+            X = clamp_i32(X + cv1_x_mod, 0, 32767);
+
+            // Recompute MP3, fuzz, and decimation levels based on modulated X
+            if (X < 16384) {
+                mp3_ring_level = 32767 - (X * 2);
+                fuzz_level = X * 2;
+                decimate_level = 0;
+            } else {
+                mp3_ring_level = 0;
+                fuzz_level = 32767 - ((X - 16384) * 2);
+                decimate_level = (X - 16384) * 2;
+                if (decimate_level > 32767) decimate_level = 32767;
+            }
+
+            // Apply strength/noise scaling to the newly computed levels
+            fuzz_level = (fuzz_level * raw_strength) >> 15;
+            decimate_level = (decimate_level * raw_strength) >> 15;
+            mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
+            
+            fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
+            decimate_level = (decimate_level * globalNoiseScale) >> 14;
+            mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
+            
+            if (fuzz_level > 32767) fuzz_level = 32767;
+            if (decimate_level > 32767) decimate_level = 32767;
+            if (mp3_ring_level > 32767) mp3_ring_level = 32767;
+
+            // Vinyl pops (pop_prob) - active across all non-zero buttons
+            pop_prob = clamp_i32(pop_prob + (cv1_abs * 45) / 2048, 0, 50);
             int32_t pop_cv1_depth = (cv1_abs * 16000) >> 11;
             if (click_depth < pop_cv1_depth) click_depth = pop_cv1_depth;
+
+            // CD stutter (sputter_prob) - triggers only at medium/high voltages (Button 1 & 2)
+            if (cv1_abs > 500) {
+                int32_t sputter_mod = ((cv1_abs - 500) * 80) / 1548;
+                sputter_prob = clamp_i32(sputter_prob + sputter_mod, 0, 80);
+            }
+
+            // Full scramble - triggers only at high voltage (Button 2)
+            if (cv1_abs > 1200) {
+                int32_t scramble_mod = ((cv1_abs - 1200) * 32767) / 848;
+                scramble_level = clamp_i32(scramble_level + scramble_mod, 0, 32767);
+            }
         }
 
         // CV2 global codec injection removed (CV2 is dedicated solely to glitcher)
@@ -1652,43 +1766,42 @@ void BendsCard::tick_ui_once() {
             p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
             p.glitch_size  = vp[3][1];
             raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
+
+            // CV2 Button Injection Overrides — proportional scaling:
+            // The 4V knob position maps directly to glitch intensity so exploration is smooth.
+            // Glitch onset at cv2_abs > 800 (Key 1 zone starts much earlier in knob sweep).
+            // Key 1 zone (800-1900): mix scales 0→24000 over the full 1100-unit span.
+            // Key 2 zone (>1900):    mix scales 24000→32767 over the final 148 units.
+            // glitch_size always comes from Page 3 X knob.
+            if (cv2_live && cv2_abs > 800) {
+                int32_t mix_inject;
+                if (cv2_abs > 1900) {
+                    // Key 2 zone: ramp 24000→32767 over the remaining 148 units
+                    int32_t t = clamp_i32(cv2_abs - 1900, 0, 148);
+                    mix_inject = 24000 + (t * 8767) / 148;
+                } else {
+                    // Ramp 0→24000 over the 1100-unit span (800→1900)
+                    int32_t t = cv2_abs - 800;
+                    mix_inject = (t * 24000) / 1100;
+                }
+                p.glitch_mix = clamp_i32(p.glitch_mix + mix_inject, 0, 32767);
+            }
         }
         p.glitch_speed = raw_glitch_speed;
 
         // Glitch / Freeze speed mapping
         int32_t glitch_speed_mapped = 65536;
         if (use_freeze_params) {
-            // Freeze page Y knob: pitch control
-            //   Centre (16384) = 0 semitones (1× speed)
-            //   Right  (>16384) = smooth pitch shift  0 → +12 semitones (continuously variable)
-            //   Left   (<16384) = quantised pitch shift 0 → +12 semitones (whole-semitone steps)
-            // Both sides go UP so the whole knob is in the musical "faster / higher" direction.
-            // Quantised left side lets you land on exact notes; smooth right side lets you fine-tune.
-            static const int32_t freeze_pitch_lut[13] = {
-                65536, 69433, 73562, 77936, 82570, 87480,
-                92682, 98193, 104032, 110218, 116773, 123717, 131072
-            }; // 0..+12 semitones in Q16
-            int32_t knob = vp[7][2]; // 0..32767, centre = 16384
-            if (knob >= 16384) {
-                // Right half — smooth interpolation between semitones
-                int32_t t = knob - 16384;                   // 0..16383
-                int32_t semi_q8 = (t * 3072) / 16383;       // 0..3072  (12 semitones × 256)
-                int32_t si = semi_q8 >> 8;                  // whole semitone  0..12
-                int32_t sf = semi_q8 & 0xFF;                // fractional      0..255
-                if (si >= 12) {
-                    glitch_speed_mapped = freeze_pitch_lut[12];
-                } else {
-                    int32_t lo = freeze_pitch_lut[si];
-                    int32_t hi = freeze_pitch_lut[si + 1];
-                    glitch_speed_mapped = lo + (((hi - lo) * sf) >> 8);
-                }
-            } else {
-                // Left half — nearest whole-semitone quantisation
-                int32_t t = 16384 - knob;                   // 1..16384
-                int32_t semi = (t * 12 + 8191) / 16384;     // 0..12, rounded
-                if (semi > 12) semi = 12;
-                glitch_speed_mapped = freeze_pitch_lut[semi];
+            // Freeze page Y knob: playback speed 0× → 2×
+            //   Left  (0)     = fully stopped (speed 0)
+            //   Centre (16384) = normal speed (1×)
+            //   Right (32767) = double speed (2×)
+            // Simple linear map: speed_q16 = knob * 2 * 65536 / 32767
+            int32_t knob = vp[7][2]; // 0..32767
+            if (knob > 15300 && knob < 17400) {
+                knob = 16384; // snap to exactly 100% speed / unison
             }
+            glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767); // 0..131072 (0×..2× in Q16)
         } else {
             // Normal glitch-mode speed mapping (forward + reverse)
             if (raw_glitch_speed > 18000) {
@@ -1703,6 +1816,10 @@ void BendsCard::tick_ui_once() {
         {
             int32_t active_clk = g_clk_period_samples;
             int32_t size = p.glitch_size;
+            // Sensible default minimum size during button/CV exploration to prevent buzzy ranges
+            if (cv2_live && cv2_abs > 800 && size < 4000) {
+                size = 4000;
+            }
             int32_t loop_size = 128 + size;
             if (active_clk > 240) {
                 if (size < 5000) {
@@ -1735,15 +1852,7 @@ void BendsCard::tick_ui_once() {
             }
             p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
 
-            int32_t active_speed = p.glitch_speed_mapped;
-            const int32_t pitch_ratio_lut[25] = {
-                32768, 34716, 36780, 38968, 41285, 43740, 46341, 49097, 52016, 55109, 58386, 61858, 65536,
-                69433, 73562, 77936, 82570, 87480, 92682, 98193, 104032, 110218, 116773, 123717, 131072
-            };
-            int32_t semitones = (cv2_val * 385) >> 16;
-            semitones = clamp_i32(semitones, -12, 12);
-            int32_t ratio = pitch_ratio_lut[semitones + 12];
-            p.glitch_speed_q16 = ((int64_t)active_speed * ratio) >> 16;
+            p.glitch_speed_q16 = p.glitch_speed_mapped;
         }
 
         // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
@@ -1752,7 +1861,8 @@ void BendsCard::tick_ui_once() {
         p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
 
         p.freeze = is_frozen;
-        bool cv2_stutter = cv2_live && (cv2_abs > 400);
+        // Only trigger infinite loop stutter if CV2 is at maximum (Button 2, cv2_abs > 1900)
+        bool cv2_stutter = cv2_live && (cv2_abs > 1900);
         p.stutter = (pulse1_live && PulseIn1()) || cv2_stutter;
         p.cv1 = cv1_live ? cv1_abs : 0;
         p.cv2 = cv2_val;
@@ -1844,6 +1954,42 @@ void BendsCard::tick_ui_once() {
             p.reverb_circuit_bent_level = circuit_bent_level;
             p.reverb_lofi_shift = int_shift;
             p.reverb_lofi_frac = frac_shift;
+        }
+
+        // Glitch Keyboard Tasteful Modulations — all proportional to CV level:
+        // As the 4V knob sweeps from left→right each effect fades in continuously.
+        // CV1 axis (degradation character): wavefolder grit + digital shredding scale with cv1_abs.
+        if (cv1_live && cv1_abs > 100) {
+            if (cv1_abs > 1200) {
+                // Scale morph and XOR proportionally across 1200→2048
+                int32_t t = clamp_i32(cv1_abs - 1200, 0, 848);  // 0..848
+                p.filter_morph    = clamp_i32(p.filter_morph + (t * 3000) / 848, 0, 32767);
+                // XOR mask: ramp from 0 to 2 — only crosses integer steps at ~56% and 100%
+                int32_t xor_add   = (t * 2) / 848;
+                p.chorus_xor_mask = clamp_i32(p.chorus_xor_mask + xor_add, 0, 31);
+            }
+        }
+
+        // CV2 axis: chorus/tape-drift and reverb/shimmer scale proportionally with cv2_abs.
+        if (cv2_live && cv2_abs > 800) {
+            if (cv2_abs <= 1900) {
+                // Ramp tape-drift effects 0→max across the full 1100-unit span (800→1900)
+                int32_t t = (cv2_abs - 800) * 32767 / 1100; // 0..32767
+                p.chorus_mix    = clamp_i32(p.chorus_mix    + ((4000 * t) >> 15), 0, 32767);
+                p.chorus_depth  = clamp_i32(p.chorus_depth  + ((2000 * t) >> 15), 0, 32767);
+                p.chorus_rate   = clamp_i32(p.chorus_rate   + ((1000 * t) >> 15), 0, 32767);
+                p.filter_cutoff = clamp_i32(p.filter_cutoff - ((1500 * t) >> 15), 0, 32767);
+            } else {
+                // Key 2 zone: apply full tape-drift (zone was crossed), then ramp in shimmer reverb
+                p.chorus_mix    = clamp_i32(p.chorus_mix    + 4000, 0, 32767);
+                p.chorus_depth  = clamp_i32(p.chorus_depth  + 2000, 0, 32767);
+                p.chorus_rate   = clamp_i32(p.chorus_rate   + 1000, 0, 32767);
+                p.filter_cutoff = clamp_i32(p.filter_cutoff - 1500, 0, 32767);
+                int32_t t = clamp_i32(cv2_abs - 1900, 0, 148) * 32767 / 148; // 0..32767
+                p.reverb_mix           = clamp_i32(p.reverb_mix           + ((4000 * t) >> 15), 0, 32767);
+                p.reverb_decay         = clamp_i32(p.reverb_decay         + ((3000 * t) >> 15), 0, 32767);
+                p.reverb_sparkle_level = clamp_i32(p.reverb_sparkle_level + ((2000 * t) >> 15), 0, 32767);
+            }
         }
 
         g_params_idx.store(next_idx, std::memory_order_release);
