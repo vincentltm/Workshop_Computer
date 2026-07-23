@@ -1883,14 +1883,34 @@ void BendsCard::tick_ui_once() {
         int32_t Y = raw_ringing_xor;
         Y = clamp_i32(Y, 0, 32767);
 
-        // Knob X: Direct Decimation & Bitcrush Downsampler (0 = clean 24kHz, 32767 = 1.5kHz 2-bit decimation)
-        int32_t decimate_level = X;
-        int32_t fuzz_level = (X * X) >> 15; // Smooth quadratic fuzz / bit-reduction curve
+        // Knob X: 3 Degradation Stages (0% = Clean, 1-25% = Analog Tape Saturation, 25-60% = Warm Fuzz, 60-100% = Bitcrush Decimation)
+        int32_t decimate_level = 0;
+        int32_t fuzz_level = 0;
         int32_t mp3_ring_level = 0;
+        int32_t tape_sat = 0;
+
+        if (X < 8192) {
+            // Zone 1 (0% -> 25%): Clean (0) -> Analog Tape Saturation & Warmth
+            int32_t ratio = (X * 32768) / 8192;
+            tape_sat = (28000 * ratio) >> 15;
+            fuzz_level = 0;
+            decimate_level = 0;
+        } else if (X < 19660) {
+            // Zone 2 (25% -> 60%): Tape Saturation -> Warm Fuzz / Compander Distortion
+            int32_t ratio = ((X - 8192) * 32768) / 11468;
+            tape_sat = 28000 - ((28000 * ratio) >> 15);
+            fuzz_level = (32767 * ratio) >> 15;
+            decimate_level = 0;
+        } else {
+            // Zone 3 (60% -> 100%): Warm Fuzz -> Bitcrush & Sample-Rate Decimation
+            int32_t ratio = ((X - 19660) * 32768) / 13107;
+            tape_sat = 0;
+            fuzz_level = 32767 - ((32767 * ratio) >> 15);
+            decimate_level = (32767 * ratio) >> 15;
+        }
 
         // Knob Y: 4 Distinct Temporal & Rhythmic Corruption Zones across the knob sweep
         // 0% = Clean, 25% = Vinyl Dust Pops, 50% = CD-Skip Stutters, 75% = Packet Drops, 100% = Data Shred
-        int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
         int32_t tape_hicut = 0;
         int32_t pop_prob = 0;
@@ -1941,6 +1961,7 @@ void BendsCard::tick_ui_once() {
 
         // Scale ALL parameters directly & linearly by Main knob (raw_strength)
         // (When Main knob is 0, ALL artifact levels become 0 for clean bypass!)
+        tape_sat       = (tape_sat * raw_strength) >> 15;
         fuzz_level     = (fuzz_level * raw_strength) >> 15;
         decimate_level = (decimate_level * raw_strength) >> 15;
         mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
@@ -1951,6 +1972,7 @@ void BendsCard::tick_ui_once() {
         sputter_prob   = (sputter_prob * raw_strength) >> 15;
 
         // Global Noise Scale modifier (unity Q15 scaling)
+        tape_sat       = (tape_sat * globalNoiseScale) >> 15;
         fuzz_level     = (fuzz_level * globalNoiseScale) >> 15;
         decimate_level = (decimate_level * globalNoiseScale) >> 15;
         mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 15;
