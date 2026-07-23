@@ -1796,8 +1796,10 @@ struct GlitcherBlock {
                 if (!mono_mode) buf[BUF_HALF + idx] = encode_mulaw(newR);
             }
 
-            int32_t mix_coef = (mainProb * 5) >> 1;
-            if (mix_coef > 32767) mix_coef = 32767;
+            int32_t mix_coef = 32767;
+            if (mainProb < 8192) {
+                mix_coef = (mainProb * 32767) / 8192;
+            }
             outL = lerp_q15(inL, sL, (int16_t)mix_coef);
             outR = lerp_q15(inR, sR, (int16_t)mix_coef);
             return;
@@ -2211,8 +2213,10 @@ struct GlitcherBlock {
                         if (!mono_mode) buf[BUF_HALF + idx] = encode_mulaw(newR);
                     }
 
-                    int32_t mix_coef = (mainProb * 5) >> 1;
-                    if (mix_coef > 32767) mix_coef = 32767;
+                    int32_t mix_coef = 32767;
+                    if (mainProb < 8192) {
+                        mix_coef = (mainProb * 32767) / 8192;
+                    }
                     outL = lerp_q15(inL, sL, (int16_t)mix_coef);
                     outR = lerp_q15(inR, sR, (int16_t)mix_coef);
                     return;
