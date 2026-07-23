@@ -122,7 +122,6 @@ struct Core1Params {
     bool pulse2_live;
     bool cv1_live;
     bool cv2_live;
-    bool trigger_wavelet;
 };
 
 volatile Core1Params g_params[2];
@@ -501,11 +500,6 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     static int32_t  ms_freq = 0;         // phase delta
     static int32_t  ms_pitch_sweep = 0;  // pitch sweep delta
     static int32_t  ms_type = 0;         // 0 = click, 1 = chirp, 2 = squeal, 3 = noise pop
-    static int16_t  last_cv1 = 0, last_cv2 = 0;
-
-    if (p.trigger_wavelet && p.no_audio1 && p.no_audio2) {
-        ms_event_timer = 0; // Force immediate wavelet pluck on physical knob movement
-    }
 
     if (ms_event_timer > 0) {
         ms_event_timer--;
@@ -530,21 +524,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         ms_phase = 0;
 
         // 3. Codec X Knob (Downsample) scales chirp pitch/frequency, decay time, and sweep speed:
-        int32_t pitch_offset = (p.codec_downsample * 60000000) >> 15;
-
-        // Musical Pentatonic Scale Degrees (Q16 delta for lookup_sine)
-        static const int32_t pentatonic_scale[10] = {
-            32000000, 38000000, 42700000, 48000000, 57000000,
-            64000000, 76000000, 85400000, 96000000, 114000000
-        };
-        static const int16_t scale_semis[10] = {0, 3, 5, 7, 10, 12, 15, 17, 19, 22};
-        uint32_t scale_idx = (r >> 20) % 10;
-        int32_t base_scale_freq = pentatonic_scale[scale_idx];
-
-        if (p.no_audio1 && p.no_audio2) {
-            last_cv1 = scale_semis[scale_idx] * 68;
-            last_cv2 = scale_semis[(scale_idx + 3) % 10] * 68;
-        }
+        int32_t pitch_offset = (p.codec_downsample * 100000000) >> 15;
 
         if (ms_type == 0) {
             ms_decay = 0; // single sample click
@@ -552,13 +532,13 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
             // Digital chirp: rapid pitch sweep down.
             // High X makes chirps shorter (snappier decay) and sweeps pitch faster.
             ms_decay = 31200 - ((p.codec_downsample * 4000) >> 15);
-            ms_freq = base_scale_freq + pitch_offset;
+            ms_freq = 40000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
             ms_pitch_sweep = -120000 - ((p.codec_downsample * 200000) >> 15);
         } else if (ms_type == 2) {
             // High squeal: slow pitch slide up.
             // High X makes squeals shorter and sweeps faster.
             ms_decay = 32500 - ((p.codec_downsample * 6000) >> 15);
-            ms_freq = base_scale_freq + pitch_offset + 20000000;
+            ms_freq = 90000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
             ms_pitch_sweep = 15000 + ((p.codec_downsample * 30000) >> 15);
         } else {
             // Short noise pop.
@@ -773,6 +753,8 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     }
 
     // --- CV Out 1 & 2: Semi-Random Matched Harmonic Voltages ---
+    static int16_t last_cv1 = 0;
+    static int16_t last_cv2 = 0;
     static uint32_t slow_clock_ctr = 0;
     
     // Check if we need to update our stepped CV values:
@@ -2269,7 +2251,6 @@ void BendsCard::tick_ui_once() {
         p.pulse2_live = pulse2_live;
         p.cv1_live = cv1_live;
         p.cv2_live = cv2_live;
-        p.trigger_wavelet = param_changed;
 
         p.no_audio1 = debounced_no_audio1;
         p.no_audio2 = debounced_no_audio2;

@@ -1526,14 +1526,7 @@ struct GlitcherBlock {
 
         bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
         bool eff_glitchInjector = glitchInjector;
-        if (is_clock_sync) {
-            eff_glitchInjector = false;
-        }
-
-        bool want_active = eff_glitchInjector || freezeGate;
-        if (pulse1_live) {
-            want_active = p1_gate || freezeGate;
-        }
+        bool want_active = eff_glitchInjector || freezeGate || p1_gate;
         bool is_loop_frozen = freezeGate || (mainProb >= 32760);
         int32_t speed_q16 = 65536;
 
@@ -1856,7 +1849,7 @@ struct GlitcherBlock {
                 write_buf(wr, inL, inR);
 
                 bool boundary = false;
-                if (pulse1_live) {
+                if (pulse1_live && (clk_period_samples > 240)) {
                     boundary = p1_rising;
                 } else {
                     trigger_ctr--;
