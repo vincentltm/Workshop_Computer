@@ -2748,7 +2748,8 @@ struct ReverbBlock {
     __attribute__((always_inline)) inline void process(int16_t &L, int16_t &R, int32_t mix, int32_t size_scale,
                  int32_t decay, int32_t damp, int32_t lofi_level,
                  int32_t sparkle_level, int32_t circuit_bent_level,
-                 int32_t lofi_shift, int32_t lofi_frac, int32_t reverb_mode = 0) {
+                 int32_t lofi_shift, int32_t lofi_frac, int32_t reverb_mode = 0,
+                 bool dual_mono_mode = false) {
         if (mix < 50) {
             return;
         }
@@ -2802,43 +2803,33 @@ struct ReverbBlock {
         scale_modL = clamp_scale(scale_modL);
         scale_modR = clamp_scale(scale_modR);
 
-        // Input mono summing — no pre-filter, keep full bandwidth into the tank.
-        // Send level is scaled by mix so at low mix settings less signal feeds the
-        // tank (reverb doesn't build up independently of the wet knob).
-        // Send reaches full level at mix >= 16384 (mid-knob) so the tank is always
-        // fully saturated in the upper half of the mix range.
-        int16_t mono = (int16_t)(((int32_t)L + (int32_t)R) >> 1);
+        // Send level is scaled by mix so at low mix settings less signal feeds the tank
+        int16_t monoL = dual_mono_mode ? L : (int16_t)(((int32_t)L + (int32_t)R) >> 1);
+        int16_t monoR = dual_mono_mode ? R : (int16_t)(((int32_t)L + (int32_t)R) >> 1);
         {
             int32_t send = (mix < 16384) ? (mix * 2) : 32767;
-            mono = (int16_t)(((int32_t)mono * send) >> 15);
+            monoL = (int16_t)(((int32_t)monoL * send) >> 15);
+            monoR = (int16_t)(((int32_t)monoR * send) >> 15);
         }
 
 
-        // Input soft-limiter — prevents clipped transients / pops from slamming
-        // the tank and ringing out as sustained metallic distortion.
-        // Fast attack (~0.4 ms): gain snaps down immediately when peak exceeds threshold.
-        // Slow release (~80 ms): gain recovers gradually so brief clips are absorbed cleanly.
+        // Input soft-limiter — prevents clipped transients / pops from slamming the tank
         {
-            int32_t peak = (int32_t)mono < 0 ? -(int32_t)mono : (int32_t)mono;
-            // Threshold: 28000 (~85% of full scale). Above this gain is reduced.
-            // gain_target = threshold / peak, clamped to [0..32767]
+            int32_t peakL = (int32_t)monoL < 0 ? -(int32_t)monoL : (int32_t)monoL;
             int32_t gain_target = 32767;
-            if (peak > 28000) {
-                gain_target = (28000 * 32767) / peak;
+            if (peakL > 28000) {
+                gain_target = (28000 * 32767) / peakL;
             }
-            // Fast attack: pull gain down in ~10 samples when over threshold
             if (gain_target < limiter_gain) {
                 limiter_gain += (gain_target - limiter_gain) >> 3;
             } else {
-                // Slow release: recover over ~2000 samples (~83 ms)
                 limiter_gain += (gain_target - limiter_gain) >> 11;
             }
-            mono = (int16_t)(((int32_t)mono * limiter_gain) >> 15);
+            monoL = (int16_t)(((int32_t)monoL * limiter_gain) >> 15);
+            monoR = (int16_t)(((int32_t)monoR * limiter_gain) >> 15);
         }
 
         // ── Spring Reverb Dispersion & Drip (OP-1 Style Dual Spring Tank) ────────
-        int16_t monoL = mono;
-        int16_t monoR = mono;
         if (reverb_mode == 1) {
             // High-pass filter to cut sub-bass rumble from spring tank (< 180Hz)
             monoL = dc_loopL.process(monoL);
@@ -2870,8 +2861,12 @@ struct ReverbBlock {
         int16_t tOutL = d2L.read_integer(scale_d2L);
         int16_t tOutR = d2R.read_integer(scale_d2R);
 
+        // Isolate Left and Right reverb tank feedback in Dual Mono Mode
+        int16_t fb_L = dual_mono_mode ? tOutL : tOutR;
+        int16_t fb_R = dual_mono_mode ? tOutR : tOutL;
+
         // Left Tank
-        int32_t iL = (int32_t)monoL_ap + (((int32_t)decay * tOutR) >> 15);
+        int32_t iL = (int32_t)monoL_ap + (((int32_t)decay * fb_L) >> 15);
         int16_t iL_soft = soft_limit_q15(iL);
         int16_t sL = iL_soft + (int16_t)((16384 * modL.read_integer(scale_modL)) >> 15);
         modL.write(soft_limit_q15((int32_t)iL_soft - (int16_t)((16384 * sL) >> 15)));
@@ -2884,7 +2879,7 @@ struct ReverbBlock {
         d2L.write(sL);
 
         // Right Tank
-        int32_t iR = (int32_t)monoR_ap + (((int32_t)decay * tOutL) >> 15);
+        int32_t iR = (int32_t)monoR_ap + (((int32_t)decay * fb_R) >> 15);
         int16_t iR_soft = soft_limit_q15(iR);
         int16_t sR = iR_soft + (int16_t)((16384 * modR.read_integer(scale_modR)) >> 15);
         modR.write(soft_limit_q15((int32_t)iR_soft - (int16_t)((16384 * sR) >> 15)));

@@ -423,7 +423,8 @@ __attribute__((noinline)) void __not_in_flash_func(run_reverb)(int16_t &L, int16
     reverb.process(L, R, p.reverb_mix, p.reverb_size,
                    p.reverb_decay, p.reverb_damp, p.reverb_lofi_level,
                    p.reverb_sparkle_level, p.reverb_circuit_bent_level,
-                   p.reverb_lofi_shift, p.reverb_lofi_frac, p.reverb_mode);
+                   p.reverb_lofi_shift, p.reverb_lofi_frac, p.reverb_mode,
+                   p.dual_mono_mode);
 }
 
 // ============================================================================
