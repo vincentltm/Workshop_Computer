@@ -1641,19 +1641,6 @@ struct GlitcherBlock {
                     crossed = true;
                 }
             }
-            if (pulse1_live && p1_rising) {
-                clock_pulse_counter++;
-                int32_t beats_needed = 1;
-                int32_t abs_speed = speed_q16 < 0 ? -speed_q16 : speed_q16;
-                if (abs_speed > 512) {
-                    beats_needed = (int32_t)(((int64_t)current_loop_len * 65536) / ((int64_t)abs_speed * clk_period_samples));
-                    if (beats_needed < 1) beats_needed = 1;
-                }
-                if (clock_pulse_counter >= (uint32_t)beats_needed) {
-                    crossed = true;
-                    clock_pulse_counter = 0;
-                }
-            }
 
             if (crossed) {
                 clock_pulse_counter = 0;
