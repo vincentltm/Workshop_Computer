@@ -1558,17 +1558,10 @@ struct GlitcherBlock {
             cluster_state += (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - cluster_state) >> 5;
         }
 
-        // Warp input probability curve for sparser, more musical triggering at medium knob settings.
-        // Free-running: cubic warp gives very sparse triggering until high knob values.
-        // Clocked: quadratic warp so center clock pulse (~50%) triggers occasionally, not on every beat.
-        int32_t warpedProb = 0;
-        if (pulse1_live) {
-            // Quadratic curve: x^2 — at 50% knob, probability is ~25% per clock pulse
-            warpedProb = (mainProb * mainProb) >> 15;
-        } else {
-            int32_t mainProbSq = (mainProb * mainProb) >> 15;
-            warpedProb = (mainProbSq * mainProb) >> 15;
-        }
+        // Warp input probability curve cubicly for sparser, more musical triggering at medium knob settings.
+        // Same cubic response whether clocked or free-running for a consistent feel.
+        int32_t mainProbSq = (mainProb * mainProb) >> 15;
+        int32_t warpedProb = (mainProbSq * mainProb) >> 15;
 
         // Modulate probability with cluster state, scaling down depth near 0% and 100% knob
         int32_t mod_depth = (mainProb * (32767 - mainProb)) >> 14;
