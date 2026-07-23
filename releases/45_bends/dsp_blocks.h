@@ -2829,32 +2829,42 @@ struct ReverbBlock {
             mono = (int16_t)(((int32_t)mono * limiter_gain) >> 15);
         }
 
-        // ── Spring Reverb Dispersion & Drip (OP-1 Style Spring Tank) ───────────
+        // ── Spring Reverb Dispersion & Drip (OP-1 Style Dual Spring Tank) ────────
+        int16_t monoL = mono;
+        int16_t monoR = mono;
         if (reverb_mode == 1) {
             // High-pass filter to cut sub-bass rumble from spring tank (< 180Hz)
-            mono = dc_loopL.process(mono);
-            // All-pass phase dispersion creates the iconic metallic spring drip/boing on transients!
-            int32_t sp1 = ((int32_t)mono * 23000) >> 15;
-            int32_t sp2 = ((int32_t)sp1 * 23000) >> 15;
-            mono = saturate_q15(mono + sp1 - sp2);
+            monoL = dc_loopL.process(monoL);
+            monoR = dc_loopR.process(monoR);
+
+            // Left Spring Coil Dispersion (high-density chirp)
+            int32_t sp1L = ((int32_t)monoL * 24000) >> 15;
+            int32_t sp2L = ((int32_t)sp1L * 20000) >> 15;
+            monoL = saturate_q15(monoL + sp1L - sp2L);
+
+            // Right Spring Coil Dispersion (prime offset chirp for wide 3D stereo drip)
+            int32_t sp1R = ((int32_t)monoR * 20000) >> 15;
+            int32_t sp2R = ((int32_t)sp1R * 25000) >> 15;
+            monoR = saturate_q15(monoR + sp1R - sp2R);
             
-            // Add spring tank wobble/flutter modulation
-            scale_modL += (get_tri(lfo_phase1 * 3) * 350) >> 15;
-            scale_modR += (get_tri(lfo_phase3 * 3) * 350) >> 15;
+            // Add asymmetric 14Hz spring coil wobble/flutter modulation
+            scale_modL += (get_tri(lfo_phase1 * 3) * 450) >> 15;
+            scale_modR += (get_tri(lfo_phase3 * 3 + 16384) * 450) >> 15;
         }
 
         // Input all-passes are kept at fixed scale to prevent pitch-glide in the diffusion network
-        mono = apIn[0].process_fixed(mono);
-        mono = apIn[1].process_fixed(mono);
-        mono = apIn[2].process_fixed(mono);
-        mono = apIn[3].process_fixed(mono);
+        int16_t monoL_ap = apIn[0].process_fixed(monoL);
+        monoL_ap = apIn[1].process_fixed(monoL_ap);
+
+        int16_t monoR_ap = apIn[2].process_fixed(monoR);
+        monoR_ap = apIn[3].process_fixed(monoR_ap);
 
         // Read tank loop outputs using independent scales
         int16_t tOutL = d2L.read_integer(scale_d2L);
         int16_t tOutR = d2R.read_integer(scale_d2R);
 
         // Left Tank
-        int32_t iL = (int32_t)mono + (((int32_t)decay * tOutR) >> 15);
+        int32_t iL = (int32_t)monoL_ap + (((int32_t)decay * tOutR) >> 15);
         int16_t iL_soft = soft_limit_q15(iL);
         int16_t sL = iL_soft + (int16_t)((16384 * modL.read_integer(scale_modL)) >> 15);
         modL.write(soft_limit_q15((int32_t)iL_soft - (int16_t)((16384 * sL) >> 15)));
@@ -2867,7 +2877,7 @@ struct ReverbBlock {
         d2L.write(sL);
 
         // Right Tank
-        int32_t iR = (int32_t)mono + (((int32_t)decay * tOutL) >> 15);
+        int32_t iR = (int32_t)monoR_ap + (((int32_t)decay * tOutL) >> 15);
         int16_t iR_soft = soft_limit_q15(iR);
         int16_t sR = iR_soft + (int16_t)((16384 * modR.read_integer(scale_modR)) >> 15);
         modR.write(soft_limit_q15((int32_t)iR_soft - (int16_t)((16384 * sR) >> 15)));
