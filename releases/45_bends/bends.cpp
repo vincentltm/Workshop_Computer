@@ -89,6 +89,7 @@ struct Core1Params {
     int32_t filter_morph;
 
     int32_t reverb_mix;
+    int32_t reverb_mode;
     int32_t reverb_size;
     int32_t reverb_decay;
     int32_t reverb_damp;
@@ -410,7 +411,7 @@ __attribute__((noinline)) void __not_in_flash_func(run_reverb)(int16_t &L, int16
     reverb.process(L, R, p.reverb_mix, p.reverb_size,
                    p.reverb_decay, p.reverb_damp, p.reverb_lofi_level,
                    p.reverb_sparkle_level, p.reverb_circuit_bent_level,
-                   p.reverb_lofi_shift, p.reverb_lofi_frac);
+                   p.reverb_lofi_shift, p.reverb_lofi_frac, p.reverb_mode);
 }
 
 // ============================================================================
@@ -2009,8 +2010,9 @@ void BendsCard::tick_ui_once() {
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
         // CV1 global circuit bending injection:
-        // Inject vinyl clicks and CD stutters when CV1 voltage or Button 1 is active
-        if (cv1_abs > 100) {
+        // Inject vinyl clicks and CD stutters when CV1 is plugged in
+        // (CV1 is now dedicated solely to the digital loss engine, using absolute magnitude)
+        if (cv1_live && cv1_abs > 100) {
             // Overall mix injection
             p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 16), 0, 32767);
 
@@ -2135,7 +2137,7 @@ void BendsCard::tick_ui_once() {
             // Key 1 zone (800-1900): mix scales 0→24000 over the full 1100-unit span.
             // Key 2 zone (>1900):    mix scales 24000→32767 over the final 148 units.
             // glitch_size always comes from Page 3 X knob.
-            if (cv2_abs > 800) {
+            if (cv2_live && cv2_abs > 800) {
                 int32_t mix_inject;
                 if (cv2_abs > 1900) {
                     // Key 2 zone: ramp 24000→32767 over the remaining 148 units
@@ -2191,7 +2193,7 @@ void BendsCard::tick_ui_once() {
             int32_t active_clk = g_clk_period_samples;
             int32_t size = p.glitch_size;
             // Sensible default minimum size during button/CV exploration to prevent buzzy ranges
-            if (cv2_abs > 800 && size < 4000) {
+            if (cv2_live && cv2_abs > 800 && size < 4000) {
                 size = 4000;
             }
             int32_t loop_size = 128;
@@ -2278,11 +2280,25 @@ void BendsCard::tick_ui_once() {
                 }
             }
             
-            int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
+            int32_t raw_x = vp[5][1];
+            int32_t reverb_mode = 0; // 0 = Ambient Hall, 1 = Spring
+            int32_t size_scale = 16384;
+
+            if (raw_x < 15300) {
+                reverb_mode = 1; // Spring Reverb Mode (OP-1 Style Metallic Spring Tank)
+                size_scale = 3276 + ((raw_x * 13108) / 15300);
+            } else if (raw_x > 17400) {
+                reverb_mode = 0; // Ambient Hall Reverb Mode (Lush Plate/Cathedral)
+                size_scale = 16384 + (((raw_x - 17400) * 16383) / 15367);
+            } else {
+                reverb_mode = 0; // Center Studio Plate
+                size_scale = 16384;
+            }
+
+            p.reverb_mode = reverb_mode;
             p.reverb_size = size_scale;
-            // max_decay scales from ~28000 (small room) to 32400 (largest room).
-            // 32400/32767 ≈ 98.9% feedback — near-infinite ambience at max X + max size.
-            int32_t max_decay = 28000 + (((size_scale - 4915) * 60817) >> 20);
+            // max_decay scales from ~28000 (small spring/room) to 32400 (largest room).
+            int32_t max_decay = 28000 + (((size_scale - 3276) * 60817) >> 20);
 
             int32_t decay = 0;
             if (fb_glitch < 24000) {

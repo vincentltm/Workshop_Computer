@@ -2741,7 +2741,7 @@ struct ReverbBlock {
     __attribute__((always_inline)) inline void process(int16_t &L, int16_t &R, int32_t mix, int32_t size_scale,
                  int32_t decay, int32_t damp, int32_t lofi_level,
                  int32_t sparkle_level, int32_t circuit_bent_level,
-                 int32_t lofi_shift, int32_t lofi_frac) {
+                 int32_t lofi_shift, int32_t lofi_frac, int32_t reverb_mode = 0) {
         if (mix < 50) {
             return;
         }
@@ -2827,6 +2827,20 @@ struct ReverbBlock {
                 limiter_gain += (gain_target - limiter_gain) >> 11;
             }
             mono = (int16_t)(((int32_t)mono * limiter_gain) >> 15);
+        }
+
+        // ── Spring Reverb Dispersion & Drip (OP-1 Style Spring Tank) ───────────
+        if (reverb_mode == 1) {
+            // High-pass filter to cut sub-bass rumble from spring tank (< 180Hz)
+            mono = dc_loopL.process(mono);
+            // All-pass phase dispersion creates the iconic metallic spring drip/boing on transients!
+            int32_t sp1 = ((int32_t)mono * 23000) >> 15;
+            int32_t sp2 = ((int32_t)sp1 * 23000) >> 15;
+            mono = saturate_q15(mono + sp1 - sp2);
+            
+            // Add spring tank wobble/flutter modulation
+            scale_modL += (get_tri(lfo_phase1 * 3) * 350) >> 15;
+            scale_modR += (get_tri(lfo_phase3 * 3) * 350) >> 15;
         }
 
         // Input all-passes are kept at fixed scale to prevent pitch-glide in the diffusion network
