@@ -1883,33 +1883,12 @@ void BendsCard::tick_ui_once() {
         int32_t Y = raw_ringing_xor;
         Y = clamp_i32(Y, 0, 32767);
 
+        // Knob X: Direct Decimation & Bitcrush Downsampler (0 = clean 24kHz, 32767 = 1.5kHz 2-bit decimation)
+        int32_t decimate_level = X;
+        int32_t fuzz_level = (X * X) >> 15; // Smooth quadratic fuzz / bit-reduction curve
         int32_t mp3_ring_level = 0;
-        int32_t fuzz_level = 0;
-        int32_t decimate_level = 0;
 
-        // Knob X Transitions: Smooth progression across 3 degradation zones
-        // 0% = Clean, 1-33% = Lossy MP3 Ringing, 33-66% = Warm Fuzz, 66-100% = Bitcrush Decimation
-        if (X < 10922) {
-            // Zone 1: Clean (0) -> Lossy MP3 Ringing (100%)
-            int32_t ratio = (X * 32768) / 10922;
-            mp3_ring_level = (32767 * ratio) >> 15;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 21845) {
-            // Zone 2: Lossy MP3 Ringing -> Warm Fuzz / Compander
-            int32_t ratio = ((X - 10922) * 32768) / 10923;
-            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
-            fuzz_level = (32767 * ratio) >> 15;
-            decimate_level = 0;
-        } else {
-            // Zone 3: Warm Fuzz -> Extreme Bitcrush Decimation
-            int32_t ratio = ((X - 21845) * 32768) / 10922;
-            mp3_ring_level = 0;
-            fuzz_level = 32767 - ((32767 * ratio) >> 15);
-            decimate_level = (32767 * ratio) >> 15;
-        }
-
-        // Knob Y Transitions: 0% = Clean Tape Warmth, 25% = Vinyl Dust, 50% = Telecom Dropouts, 75%+ = Data Shred
+        // Knob Y: Corruption, Vinyl Crackle, Lossy MP3 Ringing & Packet Dropouts
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
         int32_t tape_hicut = 0;
@@ -1919,45 +1898,36 @@ void BendsCard::tick_ui_once() {
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 8192) {
-            // Zone 0: Clean Tape Warmth (0) -> Gentle Vinyl Dust (25%)
-            int32_t ratio = (Y * 32768) / 8192;
-            tape_sat = 16384 + ((12000 * ratio) >> 15);
-            tape_hiss = (20 * ratio) >> 15;
-            pop_prob = (8 * ratio) >> 15;
+        if (Y < 10922) {
+            // Zone 1: Clean (0) -> Tape Warmth & Vinyl Crackle (33%)
+            int32_t ratio = (Y * 32768) / 10922;
+            tape_sat = (24000 * ratio) >> 15;
+            tape_hiss = (25 * ratio) >> 15;
+            pop_prob = (12 * ratio) >> 15;
+            click_ratio = (8000 * ratio) >> 15;
+            mp3_ring_level = 0;
             bad_conn_level = 0;
             sputter_prob = 0;
             scramble_level = 0;
-            click_ratio = (6000 * ratio) >> 15;
-        } else if (Y < 16384) {
-            // Zone 1: Vinyl Dust -> Lossy Telecom & Bad Connection Dropouts
-            int32_t ratio = ((Y - 8192) * 32768) / 8192;
-            tape_sat = 28384 - ((28384 * ratio) >> 15);
-            tape_hiss = 20 - ((20 * ratio) >> 15);
-            pop_prob = 8 - ((8 * ratio) >> 15);
-            bad_conn_level = (32767 * ratio) >> 15;
-            sputter_prob = (40 * ratio) >> 15;
+        } else if (Y < 21845) {
+            // Zone 2: Vinyl Crackle -> Lossy MP3 Ringing & Telecom Compression (66%)
+            int32_t ratio = ((Y - 10922) * 32768) / 10923;
+            tape_sat = 24000 - ((24000 * ratio) >> 15);
+            tape_hiss = 25 - ((25 * ratio) >> 15);
+            pop_prob = 12 - ((12 * ratio) >> 15);
+            click_ratio = 8000 - ((8000 * ratio) >> 15);
+            mp3_ring_level = (32767 * ratio) >> 15;
+            bad_conn_level = (16384 * ratio) >> 15;
+            sputter_prob = (30 * ratio) >> 15;
             scramble_level = 0;
-            click_ratio = 6000 - ((6000 * ratio) >> 15);
-        } else if (Y < 24576) {
-            // Zone 2: Bad Connection Dropouts -> Bursty Packet Stutters
-            int32_t ratio = ((Y - 16384) * 32768) / 8192;
-            tape_sat = 0;
-            tape_hiss = 0;
-            pop_prob = 0;
-            bad_conn_level = 32767;
-            sputter_prob = 40 + ((20 * ratio) >> 15);
-            scramble_level = (16384 * ratio) >> 15;
-            click_ratio = 0;
         } else {
-            // Zone 3: Packet Stutters -> Extreme Data Shredding & Memory Scrambling
-            int32_t ratio = ((Y - 24576) * 32768) / 8192;
-            tape_sat = 0;
-            tape_hiss = 0;
+            // Zone 3: Lossy MP3 Ringing -> Bad Connection Packet Drops & Data Shredding (100%)
+            int32_t ratio = ((Y - 21845) * 32768) / 10922;
+            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
+            bad_conn_level = 16384 + ((16383 * ratio) >> 15);
+            sputter_prob = 30 + ((30 * ratio) >> 15);
+            scramble_level = (32767 * ratio) >> 15;
             pop_prob = 0;
-            bad_conn_level = 32767 - ((16384 * ratio) >> 15);
-            sputter_prob = 60 - ((40 * ratio) >> 15);
-            scramble_level = 16384 + ((16383 * ratio) >> 15);
             click_ratio = 0;
         }
 
