@@ -1965,9 +1965,6 @@ struct GlitcherBlock {
 
                 int32_t offset_samples = (scrubOffset * 32768) >> 15;
                 int32_t lookback = current_loop_len;
-                if (pulse1_live && clk_period_samples > 240) {
-                    lookback = clk_period_samples;
-                }
                 if (is_loop_frozen) {
                     lookback = 0;
                 }
