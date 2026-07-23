@@ -1812,18 +1812,15 @@ struct GlitcherBlock {
             last_freezeGate = false;
             int32_t norm_loop_size = 512;
             if (pulse1_live && clk_period_samples > 240) {
-                // Clock-synced subdivisions (straight & dotted: 13 steps)
-                static const int32_t clk_div_num[13] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128};
-                int32_t num_steps = 13;
+                // Clock-synced subdivisions (straight 4/4 grid: 7 steps)
+                // step 0: 1/16 beat, step 1: 1/8 beat, step 2: 1/16th note, step 3: 1/8th note, step 4: 1 beat, step 5: 2 beats, step 6: 4 beats
+                static const int32_t clk_div_num[7] = {1, 2, 4, 8, 16, 32, 64};
+                int32_t num_steps = 7;
                 int32_t size_sq = (size * size) >> 15;
                 int32_t step = (size_sq * num_steps) >> 15;
                 if (step < 0) step = 0;
                 if (step > num_steps - 1) step = num_steps - 1;
-                if (step == num_steps - 1) {
-                    norm_loop_size = buf_size; // Max knob position ALWAYS freezes full buffer capacity!
-                } else {
-                    norm_loop_size = (clk_period_samples * clk_div_num[step]) / 16;
-                }
+                norm_loop_size = (clk_period_samples * clk_div_num[step]) / 16;
                 if (norm_loop_size < 128) norm_loop_size = 128;
                 if (norm_loop_size > buf_size) norm_loop_size = buf_size;
             } else {
@@ -1965,6 +1962,9 @@ struct GlitcherBlock {
 
                 int32_t offset_samples = (scrubOffset * 32768) >> 15;
                 int32_t lookback = current_loop_len;
+                if (pulse1_live && clk_period_samples > 240) {
+                    lookback = 0; // Capture drum hit transient directly at freeze_wr
+                }
                 if (is_loop_frozen) {
                     lookback = 0;
                 }
