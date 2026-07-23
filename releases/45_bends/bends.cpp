@@ -598,8 +598,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     int32_t rawL = event_sig + surface_crackle;
     int32_t rawR = (ms_type == 3) ? -rawL : (event_sig + surface_crackle);
 
-    // Control overall gain: base level of 6 (inaudible seed) to 8192 (full microsound bleeps)
-    int32_t gain_level = 6 + ((p.filter_morph * 8192) >> 15);
+    // Page 1 (Codec Engine) directly controls the internal microsound generator level when no input is plugged in!
+    int32_t codec_level = (p.codec_mix > 4000) ? p.codec_mix : 4000;
+    int32_t gain_level = 16 + ((codec_level * 16384) >> 15);
 
     // --- Read Audio Inputs & Attenuate for Headroom ---
     // AudioIn() returns ±2048 (12-bit). Net << 3 → ±16384 in Q15 (50% FS, 6dB headroom).
