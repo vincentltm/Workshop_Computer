@@ -2090,7 +2090,9 @@ void BendsCard::tick_ui_once() {
             int32_t diff = 32767 - raw_delay_time;
             scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
         }
-        p.delay_time     = scaled_delay_time;
+        static int32_t slewed_delay_time = 12000;
+        slewed_delay_time += (scaled_delay_time - slewed_delay_time) >> 3; // ~45ms tape inertia pitch-glide
+        p.delay_time     = slewed_delay_time;
 
         // Custom Delay Feedback and Glitch Feedback scaling:
         // Delay feedback below 22937 is clean. Only the glitch/XOR feedback portion above 22937 is scaled by macro.
@@ -2301,7 +2303,10 @@ void BendsCard::tick_ui_once() {
             int32_t max_decay = 28000 + (((size_scale - 3276) * 60817) >> 20);
 
             int32_t decay = 0;
-            if (fb_glitch < 24000) {
+            if (vp[5][2] > 31500) {
+                // Infinite Reverb Hold Mode: locks feedback at 100% (32767) for endless pad wash
+                decay = 32767;
+            } else if (fb_glitch < 24000) {
                 // Clean decay zone: linear ramp from 0 to max_decay
                 int32_t val = (fb_glitch * 87381) >> 16; // fb/24000 in Q15
                 decay = (val * max_decay) >> 15;
@@ -2492,10 +2497,17 @@ void BendsCard::tick_ui_once() {
             for (int i = 0; i < 6; i++) {
                 bar_leds[i] = (bar_leds[i] * 300) >> 12; // dim it down
             }
-            // Flash the physical position at 5Hz
+            // Dynamic Knob-Lock Proximity Pulse: pulse rate accelerates as physical knob approaches target
+            int32_t dist = phys_val - val_to_show;
+            if (dist < 0) dist = -dist;
+            uint32_t blink_period = 200;
+            if (dist < 4000) blink_period = 40;        // Very close (< 12%): 25Hz rapid pulse
+            else if (dist < 14000) blink_period = 80;  // Approaching (< 40%): 12.5Hz pulse
+            else blink_period = 200;                    // Far away: 5Hz pulse
+
             static uint32_t blink_counter = 0;
             blink_counter++;
-            bool blink_on = (blink_counter % 200 < 100);
+            bool blink_on = ((blink_counter % blink_period) < (blink_period / 2));
             if (blink_on) {
                 int phys_idx = phys_val / 5461;
                 if (phys_idx < 0) phys_idx = 0;
