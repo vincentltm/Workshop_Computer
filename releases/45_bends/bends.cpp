@@ -1902,32 +1902,32 @@ void BendsCard::tick_ui_once() {
         if (Y < 8192) {
             // Zone 1 (0% -> 25%): Organic Vinyl Dust Pops & Surface Crackle
             int32_t ratio = (Y * 32768) / 8192;
-            pop_prob = (20 * ratio) >> 15;        // Organic needle pops and dust crackle
-            click_ratio = (24000 * ratio) >> 15;  // Low-pass filtered dust thud depth
+            pop_prob = (5 * ratio) >> 15;         // Pleasant 1-2 organic vinyl pops per second
+            click_ratio = (18000 * ratio) >> 15;  // Warm, low-pass filtered dust thud depth
             sputter_prob = 0;
             bad_conn_level = 0;
             scramble_level = 0;
         } else if (Y < 16384) {
-            // Zone 2 (25% -> 50%): CD-Skip Buffer Stutters & Temporal Micro-Frame Repeats
+            // Zone 2 (25% -> 50%): CD-Skip Buffer Stutters & Micro-Frame Repeats
             int32_t ratio = ((Y - 8192) * 32768) / 8192;
-            pop_prob = 20 - ((20 * ratio) >> 15);
-            click_ratio = 24000 - ((24000 * ratio) >> 15);
-            sputter_prob = (80 * ratio) >> 15;    // Skipping CD player buffer stutters (10-20ms frame loops)
+            pop_prob = 5 - ((5 * ratio) >> 15);
+            click_ratio = 18000 - ((18000 * ratio) >> 15);
+            sputter_prob = (22 * ratio) >> 15;    // Musical CD-skipping frame repeats (occasional 10-20ms loops)
             bad_conn_level = 0;
             scramble_level = 0;
         } else if (Y < 24576) {
-            // Zone 3 (50% -> 75%): Lossy Telecom Packet Drops & Gilbert-Elliott Framing Skips
+            // Zone 3 (50% -> 75%): Lossy Telecom Packet Drops & Framing Skips
             int32_t ratio = ((Y - 16384) * 32768) / 8192;
-            sputter_prob = 80 - ((80 * ratio) >> 15);
-            bad_conn_level = (32767 * ratio) >> 15; // Bursty network packet drops (100-300ms dropouts)
+            sputter_prob = 22 - ((22 * ratio) >> 15);
+            bad_conn_level = (24000 * ratio) >> 15; // Bursty network packet drops
             scramble_level = 0;
             pop_prob = 0;
             click_ratio = 0;
         } else {
             // Zone 4 (75% -> 100%): Bit-Mask Data Shredding & Dynamic Byte Scrambling
             int32_t ratio = ((Y - 24576) * 32768) / 8192;
-            bad_conn_level = 32767;
-            scramble_level = (32767 * ratio) >> 15; // Memory bit-flipping and XOR byte destruction
+            bad_conn_level = 24000;
+            scramble_level = (24000 * ratio) >> 15; // Memory bit-flipping and XOR byte destruction
             sputter_prob = 0;
             pop_prob = 0;
             click_ratio = 0;
@@ -1939,26 +1939,26 @@ void BendsCard::tick_ui_once() {
         // Fuzz level quadratic warp
         fuzz_level = (fuzz_level * fuzz_level) >> 15;
 
-        // Scale by Main knob (strength)
-        int32_t glitch_strength = 16384 + (raw_strength >> 1);
-        fuzz_level = (fuzz_level * raw_strength) >> 15;
+        // Scale ALL parameters directly & linearly by Main knob (raw_strength)
+        // (When Main knob is 0, ALL artifact levels become 0 for clean bypass!)
+        fuzz_level     = (fuzz_level * raw_strength) >> 15;
         decimate_level = (decimate_level * raw_strength) >> 15;
         mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
-        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
-        scramble_level = (scramble_level * glitch_strength) >> 15;
-        tape_hicut = (tape_hicut * raw_strength) >> 15;
+        bad_conn_level = (bad_conn_level * raw_strength) >> 15;
+        scramble_level = (scramble_level * raw_strength) >> 15;
+        tape_hicut     = (tape_hicut * raw_strength) >> 15;
+        pop_prob       = (pop_prob * raw_strength) >> 15;
+        sputter_prob   = (sputter_prob * raw_strength) >> 15;
 
-        int32_t pop_strength = 16384 + (raw_strength >> 1);
-        pop_prob = (pop_prob * pop_strength) >> 15;
-
-        // Global Noise Scale modifier
-        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
-        decimate_level = (decimate_level * globalNoiseScale) >> 14;
-        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
-        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
-        scramble_level = (scramble_level * globalNoiseScale) >> 14;
-        pop_prob = (pop_prob * globalNoiseScale) >> 14;
-        tape_hiss = (tape_hiss * globalNoiseScale) >> 14;
+        // Global Noise Scale modifier (unity Q15 scaling)
+        fuzz_level     = (fuzz_level * globalNoiseScale) >> 15;
+        decimate_level = (decimate_level * globalNoiseScale) >> 15;
+        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 15;
+        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 15;
+        scramble_level = (scramble_level * globalNoiseScale) >> 15;
+        pop_prob       = (pop_prob * globalNoiseScale) >> 15;
+        sputter_prob   = (sputter_prob * globalNoiseScale) >> 15;
+        tape_hiss      = (tape_hiss * globalNoiseScale) >> 15;
 
         if (fuzz_level > 32767) fuzz_level = 32767;
         if (decimate_level > 32767) decimate_level = 32767;
@@ -1968,7 +1968,7 @@ void BendsCard::tick_ui_once() {
         if (tape_hicut > 32767) tape_hicut = 32767;
 
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
-        click_depth = (click_depth * globalNoiseScale) >> 14;
+        click_depth = (click_depth * globalNoiseScale) >> 15;
         if (click_depth > 32767) click_depth = 32767;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
