@@ -70,6 +70,7 @@ struct Core1Params {
     int32_t codec_sputter_prob;
     int32_t codec_tape_sat;
     int32_t codec_tape_hiss;
+    int32_t codec_tape_hicut;
     int32_t codec_active_loss;
 
     int32_t delay_mix;
@@ -98,12 +99,13 @@ struct Core1Params {
     int32_t reverb_lofi_frac;
 
     int32_t cv1;
+    int32_t cv1_bipolar;
     int32_t cv2;
 
     int32_t grittiness_macro;
 
     int32_t input_width;
-    int32_t input_balance;
+    int32_t routing_mode;
 
     int32_t glitch_loop_size;
     int32_t glitch_target_offset;
@@ -113,6 +115,7 @@ struct Core1Params {
     bool stutter;
     bool no_audio1;
     bool no_audio2;
+    bool mono_mode;       // Extended Mono Mode active (Input 2 unplugged + user setting)
     bool is_freeze_page;
     bool flash_writing;
     bool pulse1_live;
@@ -128,8 +131,181 @@ volatile uint32_t g_clk_period_samples = 0;
 static int32_t grittiness_macro = 16384; // 50% = transparent: baking at this value changes nothing
 static bool g_macro_active = false;
 static int32_t global_input_width = 9830;
-static int32_t global_input_balance = 16384;
-static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Balance
+static int32_t global_routing_mode = 0;
+static bool    global_mono_mode    = false; // Extended Mono Mode: doubles delay+glitch time (requires Input 2 unplugged)
+static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Routing
+
+// ============================================================================
+// Core 0: UI State & Virtual Parameters
+// ============================================================================
+static int     currentPage          = 0;    // [0, 5]
+static uint32_t pageFlashTimer      = 0;    // ms remaining in page-change flash
+
+// Virtual parameter table -- 6 pages x 3 knobs [Main, X, Y]
+// Values are Q15 [0..32767].
+static int32_t vp[6][3] = {
+    // Page 0 -- Chorus / Tape Loss: Mix, Rate/Drift, Saturation/Damping
+    {     0, 12000, 16384 },
+    // Page 1 -- Digital Loss: Mix/Strength, Decimate/Bitcrush, Corruption/Glitches
+    {     0, 10000, 12000 },
+    // Page 2 -- Delay:    Wet,   Time,   Feedback
+    {     0, 12000,  8000 },
+    // Page 3 -- Glitcher: Mix,   Size,   Speed
+    {     0, 16384, 16384 },
+    // Page 4 -- Filter:   Cutoff, Res,   Type/Morph
+    { 16384,     0,     0 },
+    // Page 5 -- Reverb:   Wet,   Decay,  Damping
+    {     0, 16384, 16384 }
+};
+
+// Dedicated freeze scrub buffer -- completely separate from vp[3] (Glitcher page)
+// so that freeze knob adjustments never corrupt the live Glitcher settings.
+static int32_t freeze_vp[3] = { 0, 19661, 16384 }; // scrub offset, loop size, speed
+
+static uint32_t chainVisTimer = 0;
+static int      chainVisMode = 0;
+static bool     chainVisMono = false;
+
+static void get_routing_chain(int routing_mode, bool mono_mode, int chain[6]) {
+    switch (routing_mode) {
+        case 1: // Space Wash
+            if (mono_mode) {
+                chain[0] = 5; chain[1] = 4; chain[2] = 2; chain[3] = 3; chain[4] = 0; chain[5] = 1;
+            } else {
+                chain[0] = 5; chain[1] = 4; chain[2] = 0; chain[3] = 2; chain[4] = 3; chain[5] = 1;
+            }
+            break;
+        case 2: // Scatter Cloud
+            chain[0] = 3; chain[1] = 1; chain[2] = 2; chain[3] = 0; chain[4] = 4; chain[5] = 5;
+            break;
+        case 3: // Filtered Dub
+            if (mono_mode) {
+                chain[0] = 4; chain[1] = 1; chain[2] = 2; chain[3] = 3; chain[4] = 0; chain[5] = 5;
+            } else {
+                chain[0] = 4; chain[1] = 1; chain[2] = 0; chain[3] = 2; chain[4] = 3; chain[5] = 5;
+            }
+            break;
+        case 0:
+        default: // Series Standard
+            if (mono_mode) {
+                chain[0] = 1; chain[1] = 2; chain[2] = 3; chain[3] = 0; chain[4] = 4; chain[5] = 5;
+            } else {
+                chain[0] = 0; chain[1] = 1; chain[2] = 2; chain[3] = 3; chain[4] = 4; chain[5] = 5;
+            }
+            break;
+    }
+}
+
+static void bends_trigger_chain_vis(int routing_mode, bool mono_mode) {
+    chainVisMode = routing_mode;
+    chainVisMono = mono_mode;
+    chainVisTimer = 2100;
+}
+
+// ============================================================================
+// Flash Persistence (last 4 KB sector)
+// ============================================================================
+static constexpr uint32_t BENDS_SETTINGS_FLASH_OFFSET =
+    (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE); // top sector of 2 MB flash
+
+static uint32_t saveFlashTimer = 0;         // ms remaining for manual save LED animation
+static uint32_t factoryResetFlashTimer = 0; // ms remaining for factory reset LED animation
+
+struct BendsSettings {
+    uint32_t magic;           // 0xBE4D0003 -- version tag v3 (full 7-page preset)
+    int32_t  routing_mode;    // global_routing_mode (0-3)
+    int32_t  input_width;     // global_input_width
+    uint8_t  mono_mode;       // Extended Mono Mode on/off (1/0)
+    uint8_t  current_page;    // active page index (0..5)
+    uint8_t  _reserved[10];   // reserved space
+    int32_t  vp[6][3];        // 18 x 4 = 72 bytes: 6 main page knob states
+    int32_t  freeze_vp[3];   // 3 x 4 = 12 bytes: Freeze scrub page knob state
+    uint8_t  _pad[18];        // padding so crc lands at offset 126
+    uint16_t crc;             // simple additive checksum of first 126 bytes
+};
+static_assert(sizeof(BendsSettings) == 128, "BendsSettings must be 128 bytes");
+
+static uint16_t bends_settings_checksum(const BendsSettings &s) {
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(&s);
+    uint16_t sum = 0;
+    for (int i = 0; i < 126; i++) sum += p[i];
+    return sum;
+}
+
+static void bends_load_settings() {
+    const BendsSettings *s = reinterpret_cast<const BendsSettings *>(
+        XIP_BASE + BENDS_SETTINGS_FLASH_OFFSET);
+    if (s->crc != bends_settings_checksum(*s)) return; // corrupt or blank
+    if (s->magic == 0xBE4D0003u) {
+        global_routing_mode = s->routing_mode;
+        global_input_width  = s->input_width;
+        global_mono_mode    = (s->mono_mode != 0);
+        // Do NOT restore currentPage from flash -- always start on Page 0 (Chorus)
+        memcpy(vp, s->vp, sizeof(vp));
+        memcpy(freeze_vp, s->freeze_vp, sizeof(freeze_vp));
+    } else if (s->magic == 0xBE4D0002u) {
+        global_routing_mode = s->routing_mode;
+        global_input_width  = s->input_width;
+        global_mono_mode    = (s->mono_mode != 0);
+        // Do NOT restore currentPage from flash -- always start on Page 0 (Chorus)
+        memcpy(vp, s->vp, sizeof(vp));
+    } else if (s->magic == 0xBE4D0001u) {
+        global_routing_mode = s->routing_mode;
+        global_input_width  = s->input_width;
+        global_mono_mode    = (s->mono_mode != 0);
+    }
+}
+
+// Must be called from Core 0 only. Pauses Core 1 via multicore_lockout to
+// prevent flash-fetch crashes during erase/program.
+static void bends_save_settings() {
+    static uint8_t page_buf[FLASH_PAGE_SIZE]; // 256 bytes
+    memset(page_buf, 0xFF, sizeof(page_buf));
+    BendsSettings *s = reinterpret_cast<BendsSettings *>(page_buf);
+    s->magic        = 0xBE4D0003u;
+    s->routing_mode = global_routing_mode;
+    s->input_width  = global_input_width;
+    s->mono_mode    = global_mono_mode ? 1 : 0;
+    s->current_page = (uint8_t)currentPage;
+    memcpy(s->vp, vp, sizeof(vp));
+    memcpy(s->freeze_vp, freeze_vp, sizeof(freeze_vp));
+    s->crc          = bends_settings_checksum(*s);
+
+    // Pause Core 1 so it cannot fetch flash instructions during erase/program.
+    multicore_lockout_start_blocking();
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(BENDS_SETTINGS_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(BENDS_SETTINGS_FLASH_OFFSET, page_buf, FLASH_PAGE_SIZE);
+    restore_interrupts(ints);
+    multicore_lockout_end_blocking();
+}
+
+static void bends_reset_factory_defaults() {
+    global_routing_mode = 0; // Preset 0: Standard
+    global_input_width  = 32767;
+    global_mono_mode    = false;
+    currentPage         = 0;
+    static const int32_t default_vp[6][3] = {
+        {     0, 12000, 16384 },
+        {     0, 10000, 12000 },
+        {     0, 12000,  8000 },
+        {     0, 16384, 16384 },
+        { 16384,     0,     0 },
+        {     0, 16384, 16384 }
+    };
+    memcpy(vp, default_vp, sizeof(vp));
+    freeze_vp[0] = 0;
+    freeze_vp[1] = 19661;
+    freeze_vp[2] = 16384;
+}
+
+static void bends_erase_settings() {
+    multicore_lockout_start_blocking();
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(BENDS_SETTINGS_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
+    multicore_lockout_end_blocking();
+}
 
 // Visual feedback (Core 1 → Core 0)
 std::atomic<uint16_t> vis_lfo_phase{0};       // Chorus LFO phase for LED glow
@@ -140,6 +316,8 @@ std::atomic<bool>     vis_frame_dropped{false}; // Codec dropout for LED flash
 // ============================================================================
 class BendsCard : public ComputerCard {
 public:
+    BendsCard() {}
+
     void ProcessSample() override;
     void BackgroundLoop() override {}
 
@@ -189,6 +367,53 @@ inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x
 }
 
 // ============================================================================
+// Core 1 DSP Stage Helper Wrappers (noinline to prevent duplicate RAM bloat)
+// ============================================================================
+__attribute__((noinline)) void __not_in_flash_func(run_chorus)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
+    chorus.process(L, L, R, R, p.chorus_mix, p.chorus_rate, p.chorus_depth, p.chorus_feedback, p.chorus_xor_mask, p.cv1_bipolar, p.chorus_depth_fb);
+}
+
+__attribute__((noinline)) void __not_in_flash_func(run_codec)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
+    codec.process(L, L, R, R,
+                  p.codec_mix,
+                  p.codec_mp3_ring, p.codec_fuzz, p.codec_decimate,
+                  p.codec_pop_prob, p.codec_click_depth, p.codec_bad_conn, p.codec_scramble,
+                  p.codec_sputter_prob, p.codec_tape_sat, p.codec_tape_hiss, p.codec_active_loss,
+                  p.codec_tape_hicut, rand_seed);
+}
+
+__attribute__((noinline)) void __not_in_flash_func(run_delay)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool freeze, bool pulse1_live, uint32_t clk_period_samples) {
+    delay_fx.process(L, L, R, R,
+                     p.delay_mix, p.delay_time, p.delay_feedback, freeze, 0, 0, p.global_noise_scale,
+                     pulse1_live, clk_period_samples, p.mono_mode);
+}
+
+__attribute__((noinline)) void __not_in_flash_func(run_glitcher)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool freeze, bool stutter, bool is_freeze_page, int32_t cv2, int32_t scrub_offset, bool pulse1_live, bool p1_rising, bool p1_val, bool pulse2_live, bool p2_rising, bool p2_val, uint32_t clk_period_samples, uint32_t clk_timer) {
+    glitcher.process(L, L, R, R,
+                     freeze ? 32767 : p.glitch_mix,
+                     p.glitch_size, p.glitch_speed, is_freeze_page,
+                     stutter, freeze,
+                     0, cv2, rand_seed,
+                     scrub_offset, p.glitch_feedback, p.global_noise_scale,
+                     pulse1_live, p1_rising, p1_val,
+                     pulse2_live, p2_rising, p2_val,
+                     clk_period_samples, clk_timer,
+                     p.glitch_loop_size, p.glitch_target_offset, p.glitch_speed_q16,
+                     p.mono_mode);
+}
+
+__attribute__((noinline)) void __not_in_flash_func(run_filter)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
+    filter.process(L, L, R, R, p.filter_cutoff, p.filter_res, p.filter_morph, 0);
+}
+
+__attribute__((noinline)) void __not_in_flash_func(run_reverb)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
+    reverb.process(L, R, p.reverb_mix, p.reverb_size,
+                   p.reverb_decay, p.reverb_damp, p.reverb_lofi_level,
+                   p.reverb_sparkle_level, p.reverb_circuit_bent_level,
+                   p.reverb_lofi_shift, p.reverb_lofi_frac);
+}
+
+// ============================================================================
 // Core 1: ProcessSample() — 24 kHz audio interrupt
 // ============================================================================
 // ALL DSP including reverb runs here on Core 1.
@@ -199,55 +424,10 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     const uint32_t params_idx     = g_params_idx.load(std::memory_order_relaxed);
     const volatile Core1Params &p = g_params[params_idx];
 
-    const int32_t eff_chorus_mix      = p.chorus_mix;
-    const int32_t chorus_rate         = p.chorus_rate;
-    const int32_t eff_chorus_depth    = p.chorus_depth;
-    const int32_t eff_chorus_feedback = p.chorus_feedback;
-    const int32_t eff_chorus_xor_mask = p.chorus_xor_mask;
-
-    const int32_t eff_codec_mix         = p.codec_mix;
-    const int32_t eff_codec_mp3_ring    = p.codec_mp3_ring;
-    const int32_t eff_codec_fuzz        = p.codec_fuzz;
-    const int32_t eff_codec_decimate    = p.codec_decimate;
-    const int32_t eff_codec_pop_prob    = p.codec_pop_prob;
-    const int32_t eff_codec_click_depth = p.codec_click_depth;
-    const int32_t eff_codec_bad_conn    = p.codec_bad_conn;
-    const int32_t eff_codec_scramble    = p.codec_scramble;
-    const int32_t eff_codec_sputter_prob = p.codec_sputter_prob;
-    const int32_t eff_codec_tape_sat    = p.codec_tape_sat;
-    const int32_t eff_codec_tape_hiss   = p.codec_tape_hiss;
-    const int32_t eff_codec_active_loss = p.codec_active_loss;
-
-    const int32_t eff_delay_mix      = p.delay_mix;
-    const int32_t eff_delay_time     = p.delay_time;
-    const int32_t eff_delay_feedback = p.delay_feedback;
-
-    const int32_t eff_glitch_mix      = p.glitch_mix;
-    const int32_t eff_glitch_size     = p.glitch_size;
-    const int32_t eff_glitch_speed    = p.glitch_speed;
-    const int32_t eff_glitch_feedback = p.glitch_feedback;
-    const int32_t eff_global_noise_scale = p.global_noise_scale;
-
-    const int32_t eff_glitch_loop_size    = p.glitch_loop_size;
-    const int32_t eff_glitch_target_offset = p.glitch_target_offset;
-    const int32_t eff_glitch_speed_q16     = p.glitch_speed_q16;
+    const int32_t eff_glitch_mix          = p.glitch_mix;
 
     const int32_t eff_input_width   = p.input_width;
-    const int32_t eff_input_balance = p.input_balance;
-
-    const int32_t eff_filter_cutoff = p.filter_cutoff;
-    const int32_t eff_filter_res    = p.filter_res;
-    const int32_t eff_filter_morph  = p.filter_morph;
-
-    const int32_t eff_reverb_mix      = p.reverb_mix;
-    const int32_t reverb_size_scale   = p.reverb_size;
-    const int32_t eff_reverb_decay    = p.reverb_decay;
-    const int32_t eff_reverb_damp     = p.reverb_damp;
-    const int32_t eff_reverb_lofi_level = p.reverb_lofi_level;
-    const int32_t eff_reverb_sparkle_level = p.reverb_sparkle_level;
-    const int32_t eff_reverb_circuit_bent_level = p.reverb_circuit_bent_level;
-    const int32_t eff_reverb_lofi_shift = p.reverb_lofi_shift;
-    const int32_t eff_reverb_lofi_frac  = p.reverb_lofi_frac;
+    const int32_t eff_routing_mode  = p.routing_mode;
 
     const bool    freeze  = p.freeze;
     const bool    stutter = p.stutter;
@@ -271,19 +451,166 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     // Track clock period on Pulse 1 (Stutter Clock)
     static uint32_t clk_timer = 0;
     static uint32_t clk_period_samples = 0;
+    static uint32_t clk_lockout = 0;
     clk_timer++;
-    if (pulse1_live && p1_rising) {
-        if (clk_timer > 240) { // filter noise (>10ms)
-            clk_period_samples = clk_timer;
-            g_clk_period_samples = clk_period_samples;
-        }
-        clk_timer = 0;
+
+    // Timeout Check: if no clock pulse received for 2.5 seconds (120,000 samples @ 48kHz)
+    // or if the cable is unplugged, disable clock sync.
+    if (clk_timer > 120000 || !pulse1_live) {
+        clk_period_samples = 0;
+        g_clk_period_samples = 0;
+        clk_lockout = 0;
     }
+
+    if (pulse1_live && p1_rising) {
+        if (clk_timer > 240 && clk_timer > clk_lockout) {
+            clk_period_samples = clk_timer;
+            // Set dynamic lockout to 35% of the raw period to ignore bounce/secondary peaks
+            clk_lockout = (clk_period_samples * 35) / 100;
+            if (clk_lockout < 240) clk_lockout = 240;
+
+            // Multi-Standard Clock Auto-Detection (1 PPQN, 2 PPQN, 4 PPQN, 24 PPQN DIN Sync)
+            // Measures raw pulse interval and normalises to 1 PPQN (quarter note), biased towards finer subdivisions
+            uint32_t eff_clk_period = clk_period_samples;
+            if (eff_clk_period < 1500) {
+                // 24 PPQN (DIN Sync / Roland sync): 24 pulses per quarter note (< 62.5ms)
+                eff_clk_period *= 24;
+            } else if (eff_clk_period < 4000) {
+                // 4 PPQN (16th note sync / Elektron / DAW pulse): 4 pulses per quarter note (62.5ms..166ms)
+                eff_clk_period *= 4;
+            } else if (eff_clk_period < 8000) {
+                // 2 PPQN (8th note sync / Korg Volca / TE Pocket Operator): 2 pulses per quarter note (166ms..333ms)
+                eff_clk_period *= 2;
+            }
+            // Clamped to valid 1 PPQN quarter-note period range (4000..96000 samples = 15..360 BPM)
+            eff_clk_period = clamp_i32(eff_clk_period, 4000, 96000);
+            g_clk_period_samples = eff_clk_period;
+            clk_timer = 0;
+        }
+    }
+
+    // --- Generative Microsound Engine (always active in the background) ---
+    // (clicks, digital sweeps, squeals, vinyl crackle, geiger pops)
+    // Level is controlled by Page 4 Y knob (filter_morph).
+    // Bleep density, pitch, and type are controlled by Page 1 (Codec) knobs.
+    static uint32_t ms_event_timer = 0;
+    static int32_t  ms_env = 0;          // Q15 envelope
+    static int32_t  ms_decay = 0;        // Q15 decay factor
+    static uint32_t ms_phase = 0;        // phase accumulator
+    static int32_t  ms_freq = 0;         // phase delta
+    static int32_t  ms_pitch_sweep = 0;  // pitch sweep delta
+    static int32_t  ms_type = 0;         // 0 = click, 1 = chirp, 2 = squeal, 3 = noise pop
+
+    if (ms_event_timer > 0) {
+        ms_event_timer--;
+    } else {
+        // 1. Codec Mix (Main Knob) scales event density:
+        // Sweeps max interval from 28800 samples (1.2s) down to 2800 samples (116ms)
+        int32_t max_interval = 28800 - ((p.codec_mix * 26000) >> 15);
+        if (max_interval < 2800) max_interval = 2800;
+
+        uint32_t r = fast_rand(rand_seed);
+        ms_event_timer = 960 + (((r & 0xFFFF) * (max_interval - 960)) >> 16);
+        
+        // 2. Event type distribution (always active so "blips and blups" are always heard):
+        // 0..2 = click, 3..4 = chirp (blip), 5..6 = squeal (bleep), 7 = noise pop
+        uint32_t type_roll = (r >> 16) & 7;
+        if (type_roll <= 2)      ms_type = 0; // Click
+        else if (type_roll <= 4) ms_type = 1; // Chirp / Sweep
+        else if (type_roll <= 6) ms_type = 2; // Squeal / EMI
+        else                     ms_type = 3; // Noise pop
+
+        ms_env = 32767;
+        ms_phase = 0;
+
+        // 3. Codec X Knob (Downsample) scales chirp pitch/frequency, decay time, and sweep speed:
+        int32_t pitch_offset = (p.codec_downsample * 100000000) >> 15;
+
+        if (ms_type == 0) {
+            ms_decay = 0; // single sample click
+        } else if (ms_type == 1) {
+            // Digital chirp: rapid pitch sweep down.
+            // High X makes chirps shorter (snappier decay) and sweeps pitch faster.
+            ms_decay = 31200 - ((p.codec_downsample * 4000) >> 15);
+            ms_freq = 40000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
+            ms_pitch_sweep = -120000 - ((p.codec_downsample * 200000) >> 15);
+        } else if (ms_type == 2) {
+            // High squeal: slow pitch slide up.
+            // High X makes squeals shorter and sweeps faster.
+            ms_decay = 32500 - ((p.codec_downsample * 6000) >> 15);
+            ms_freq = 90000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
+            ms_pitch_sweep = 15000 + ((p.codec_downsample * 30000) >> 15);
+        } else {
+            // Short noise pop.
+            // High X makes it a tiny, high-passed click.
+            ms_decay = 29000 - ((p.codec_downsample * 5000) >> 15);
+        }
+    }
+
+    // Calculate event signal
+    int32_t event_sig = 0;
+    if (ms_env > 0) {
+        if (ms_type == 0) {
+            event_sig = ms_env;
+            ms_env = 0;
+        } else if (ms_type == 1 || ms_type == 2) {
+            ms_phase += ms_freq;
+            ms_freq += ms_pitch_sweep;
+            if (ms_freq < 1000000) ms_freq = 1000000;
+
+            uint16_t lookup_idx = (uint16_t)(ms_phase >> 16);
+            int16_t sine_val = lookup_sine(lookup_idx);
+            
+            // Shred active parameter (scramble) applies digital XOR ring modulation to the bleeps,
+            // morphing clean analog sine chirps into robotic, bit-reduced digital "blups".
+            if (p.codec_scramble > 0) {
+                int16_t xor_val = (p.codec_scramble >> 9); // 0..63
+                sine_val ^= (xor_val << 6);
+            }
+
+            event_sig = (sine_val * ms_env) >> 15;
+
+            ms_env = (ms_env * ms_decay) >> 15;
+            if (ms_env < 100) ms_env = 0;
+        } else if (ms_type == 3) {
+            int32_t noise = ((int32_t)(fast_rand(rand_seed) & 0xFFFF)) - 32768;
+            event_sig = (noise * ms_env) >> 15;
+
+            ms_env = (ms_env * ms_decay) >> 15;
+            if (ms_env < 100) ms_env = 0;
+        }
+    }
+
+    // Calculate continuous background surface crackles (dust/EMI)
+    // Scales dynamically with active Vinyl pop_prob and Shred scramble_level
+    int32_t active_noise = (p.codec_pop_prob * 2730) + p.codec_scramble;
+    if (active_noise > 32767) active_noise = 32767;
+
+    int32_t crackle_mask = 0xFFF - ((active_noise * 3840) >> 15);
+    if (crackle_mask < 255) crackle_mask = 255;
+
+    int32_t surface_crackle = 0;
+    uint32_t crackle_roll = fast_rand(rand_seed);
+    if ((crackle_roll & crackle_mask) == 0) {
+        surface_crackle = (((int32_t)(crackle_roll & 0xFF)) - 128) * 8; // [-1024, 1024]
+    }
+
+    int32_t rawL = event_sig + surface_crackle;
+    int32_t rawR = (ms_type == 3) ? -rawL : (event_sig + surface_crackle);
+
+    // Control overall gain: base level of 6 (inaudible seed) to 8192 (full microsound bleeps)
+    int32_t gain_level = 6 + ((p.filter_morph * 8192) >> 15);
 
     // --- Read Audio Inputs & Attenuate for Headroom ---
     // AudioIn() returns ±2048 (12-bit). Net << 3 → ±16384 in Q15 (50% FS, 6dB headroom).
     int16_t L = (int16_t)((AudioIn1() << 4) >> 1);
     int16_t R = no_audio2 ? L : (int16_t)((AudioIn2() << 4) >> 1);
+
+    // If both input jacks are unplugged, route organic microsounds to the main audio path
+    if (p.no_audio1 && p.no_audio2) {
+        L = (int16_t)((rawL * gain_level) >> 15);
+        R = (int16_t)((rawR * gain_level) >> 15);
+    }
 
     // --- Anti-Aliasing Lowpass (1-pole, coef=30500 → -3dB @ ~8.5 kHz @ 24 kHz) ---
     // ComputerCard applies a 12 kHz notch (Q=100) inside BufferFull() to remove the
@@ -298,8 +625,8 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     L = dc_inL.process(L);
     R = dc_inR.process(R);
 
-    // --- Input Noise Gate (suppress digital USB ground noise) ---
-    {
+    // Bypassed when both inputs are unplugged to let the self-oscillation seed pass through.
+    if (!(p.no_audio1 && p.no_audio2)) {
         // 1-pole low-pass filter at ~300Hz in the sidechain to ignore high-frequency USB whine
         static int32_t gate_lpL = 0;
         static int32_t gate_lpR = 0;
@@ -332,23 +659,12 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         R = (int16_t)(((int32_t)R * gate_gain) >> 15);
     }
 
-    // --- Apply Global Stereo Width & Balance Controls (Switch Down hold tweaks) ---
+    // --- Apply Global Stereo Width Control (Switch Down hold tweaks) ---
     {
-        // 1. Balance control (linear / equal-power split)
-        int32_t gainL = 32768;
-        int32_t gainR = 32768;
-        if (eff_input_balance < 16384) {
-            gainR = (eff_input_balance * 2);
-        } else if (eff_input_balance > 16384) {
-            gainL = ((32767 - eff_input_balance) * 2);
-        }
-        int32_t balancedL = ((int32_t)L * gainL) >> 15;
-        int32_t balancedR = ((int32_t)R * gainR) >> 15;
-
-        // 2. Width cross-mixing (0 = mono sum, 32767 = full hard panned stereo)
-        int32_t mono_sum = (balancedL + balancedR) >> 1;
-        L = (int16_t)(mono_sum + (((balancedL - mono_sum) * eff_input_width) >> 15));
-        R = (int16_t)(mono_sum + (((balancedR - mono_sum) * eff_input_width) >> 15));
+        // Width cross-mixing (0 = mono sum, 32767 = full hard panned stereo)
+        int32_t mono_sum = ((int32_t)L + (int32_t)R) >> 1;
+        L = (int16_t)(mono_sum + (((L - mono_sum) * eff_input_width) >> 15));
+        R = (int16_t)(mono_sum + (((R - mono_sum) * eff_input_width) >> 15));
     }
 
     // --- Dynamic Transient Softener for Hot/Clipping Inputs ---
@@ -372,47 +688,56 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         R = (int16_t)lp_inR;
     }
 
-    // ── STAGE 1: Chorus ──────────────────────────────────────────────────────
-    chorus.process(L, L, R, R, eff_chorus_mix, chorus_rate, eff_chorus_depth, eff_chorus_feedback, eff_chorus_xor_mask, 0);
-
-    // ── STAGE 2: Codec Demolisher ────────────────────────────────────────────
-    codec.process(L, L, R, R,
-                  eff_codec_mix,
-                  eff_codec_mp3_ring, eff_codec_fuzz, eff_codec_decimate,
-                  eff_codec_pop_prob, eff_codec_click_depth, eff_codec_bad_conn, eff_codec_scramble,
-                  eff_codec_sputter_prob, eff_codec_tape_sat, eff_codec_tape_hiss, eff_codec_active_loss,
-                  rand_seed);
-
-    // ── STAGE 3: Multi-Tap Delay ─────────────────────────────────────────────
-    delay_fx.process(L, L, R, R,
-                     eff_delay_mix, eff_delay_time, eff_delay_feedback, freeze, 0, 0, eff_global_noise_scale,
-                     pulse1_live, clk_period_samples);
-
-    // ── STAGE 4: Granular Glitcher ───────────────────────────────────────────
-    // scrub_offset: seek position within the frozen loop (MAIN knob on Page 7)
-    // mainProb:     in freeze mode always 100% wet so MAIN only controls scrub,
-    //               in glitch mode controls glitch probability / blend
+    // scrub_offset: seek position within the frozen loop (MAIN knob on Page 6)
     int32_t scrub_offset = is_freeze_page ? eff_glitch_mix : 0;
 
-    glitcher.process(L, L, R, R,
-                     freeze ? 32767 : eff_glitch_mix,
-                     eff_glitch_size, eff_glitch_speed, is_freeze_page,
-                     stutter, freeze,
-                     0, cv2, rand_seed,
-                     scrub_offset, eff_glitch_feedback, eff_global_noise_scale,
-                     pulse1_live, p1_rising, p1_val,
-                     pulse2_live, p2_rising, p2_val,
-                     clk_period_samples, clk_timer,
-                     eff_glitch_loop_size, eff_glitch_target_offset, eff_glitch_speed_q16);
+    // --- Selectable DSP Routing Matrix ---
+    // In Extended Mono Mode (mono_mode), Chorus is moved after Glitcher in all
+    // presets so mono delay/stutter tails are spatialised into wide stereo before Reverb.
+    const bool mono_mode = p.mono_mode;
+    switch (eff_routing_mode) {
+        case 1: // Space Wash
+            run_reverb(L, R, p);
+            run_filter(L, R, p);
+            if (!mono_mode) run_chorus(L, R, p);
+            run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            if (mono_mode) run_chorus(L, R, p);
+            run_codec(L, R, p);
+            break;
 
-    // ── STAGE 5: Resonant Filter ─────────────────────────────────────────────
-    filter.process(L, L, R, R, eff_filter_cutoff, eff_filter_res, eff_filter_morph, 0);
+        case 2: // Scatter Cloud (Chorus already post-delay in this preset)
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            run_codec(L, R, p);
+            // Delay follows glitcher: don't freeze delay write pointer so it keeps recording
+            // the frozen glitch output -- passing freeze=true would stale the delay buffer.
+            run_delay(L, R, p, false, pulse1_live, clk_period_samples);
+            run_chorus(L, R, p);
+            run_filter(L, R, p);
+            run_reverb(L, R, p);
+            break;
 
-    // ── STAGE 6: Reverb ──────────────────────────────────────────────────────
-    reverb.process(L, R, eff_reverb_mix, reverb_size_scale,
-                   eff_reverb_decay, eff_reverb_damp, eff_reverb_lofi_level,
-                   eff_reverb_sparkle_level, eff_reverb_circuit_bent_level,
-                   eff_reverb_lofi_shift, eff_reverb_lofi_frac);
+        case 3: // Filtered Dub
+            run_filter(L, R, p);
+            run_codec(L, R, p);
+            if (!mono_mode) run_chorus(L, R, p);
+            run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            if (mono_mode) run_chorus(L, R, p);
+            run_reverb(L, R, p);
+            break;
+
+        case 0:
+        default: // Series Standard
+            if (!mono_mode) run_chorus(L, R, p);
+            run_codec(L, R, p);
+            run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            if (mono_mode) run_chorus(L, R, p);
+            run_filter(L, R, p);
+            run_reverb(L, R, p);
+            break;
+    }
 
     // Capture the loop trigger before it's cleared by the Pulse 1 generator
     bool loop_triggered = glitcher.trig_out1;
@@ -502,70 +827,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         PulseOut1(false);
     }
 
-    // --- Pulse Out 2: Texture, Clicks & Pops Generator ---
-    bool composite_pulse2 = false;
 
-    // 1. Vinyl Dust / Crackle (modulating with p.cv1 / degradation)
-    // We want a sparse, irregular stream of single-sample pops.
-    int32_t crackle_prob = 1; // background crackle
-    if (p.cv1_live) {
-        crackle_prob += (p.cv1 * 80) >> 11; // scales up to ~80 when p.cv1 is 2048
-    }
-    if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < crackle_prob) {
-        composite_pulse2 = true;
-    }
-
-    // 2. Loop Boundary / Stutter Clicks
-    // On every stutter trigger, generate a distinct high-frequency pop (alternating 1 and 0).
-    static int16_t click_burst_timer = 0;
-    if (loop_triggered) {
-        click_burst_timer = 32; // ~0.7 ms pop
-    }
-    if (click_burst_timer > 0) {
-        click_burst_timer--;
-        if (click_burst_timer & 2) {
-            composite_pulse2 = true;
-        }
-    }
-
-    // 3. Transient Spits
-    // Compare env_followed to a running average, generate bursts on transients
-    static int32_t env_avg = 0;
-    env_avg += ((env_followed - env_avg) * 32) >> 15; // very slow tracking
-    int32_t transient_strength = env_followed - env_avg;
-    if (transient_strength > 4000) {
-        if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < 300) {
-            composite_pulse2 = true;
-        }
-    }
-
-    // 4. Sub-harmonic rhythmic pops (halfway loop division)
-    if (glitcher.active) {
-        int32_t current_len = glitcher.current_loop_len;
-        int32_t current_pos = (glitcher.rd_q16 >> 16);
-        static int32_t last_pos = 0;
-        bool half_way_trigger = false;
-        if (current_len > 128) {
-            int32_t half = current_len / 2;
-            if (last_pos < half && current_pos >= half) {
-                half_way_trigger = true;
-            }
-        }
-        last_pos = current_pos;
-
-        static int16_t rhythmic_pop_timer = 0;
-        if (half_way_trigger) {
-            rhythmic_pop_timer = 24; // ~0.5ms pop
-        }
-        if (rhythmic_pop_timer > 0) {
-            rhythmic_pop_timer--;
-            if (rhythmic_pop_timer & 2) {
-                composite_pulse2 = true;
-            }
-        }
-    }
-
-    PulseOut2(composite_pulse2);
 
     // --- Output ---
     // Unity gain: input << 3 and output >> 4 cancel exactly (±16384 Q15 → ±1024 DAC ≡ ±3V).
@@ -577,39 +839,18 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
 // Core 1 entry point
 void core1_entry() {
+    // Register this core as a lockout victim so Core 0 can safely pause us
+    // during flash erase/program operations (settings save).
+    multicore_lockout_victim_init();
+
     // Configure hardware interpolators for Core 1's audio ISR:
-    //   INTERP0 = blend mode  → lerp_delay_q15() (1-cycle delay interpolation)
-    //   INTERP1 = clamp mode  → saturate_q15()   (branch-free Q15 saturation)
+    //   INTERP0 = blend mode  -> lerp_delay_q15() (1-cycle delay interpolation)
+    //   INTERP1 = clamp mode  -> saturate_q15()   (branch-free Q15 saturation)
     init_hardware_interp();
     card.Run();
 }
 
-// ============================================================================
-// Core 0: UI State
-// ============================================================================
-static int     currentPage          = 0;    // [0, 5]
-static uint32_t pageFlashTimer      = 0;    // ms remaining in page-change flash
 
-// Virtual parameter table — 8 pages × 3 knobs [Main, X, Y]
-// Values are Q15 [0..32767]. Match atomic defaults above.
-static int32_t vp[8][3] = {
-    // Page 0 — Chorus / Tape Loss: Mix, Rate/Drift, Saturation/Damping
-    {     0, 12000, 16384 },
-    // Page 1 — Digital Loss: Mix/Strength, Decimate/Bitcrush, Corruption/Glitches
-    {     0, 10000, 12000 },
-    // Page 2 — Delay:    Wet,   Time,   Feedback
-    {     0, 16384, 16384 },
-    // Page 3 — Glitcher: Mix,   Size,   Speed Probability
-    {     0, 19661,  8192 },
-    // Page 4 — Filter:   Cutoff (DJ LP/HP), Resonance, Grit (Wavefolder)
-    { 16384,  4000,  8000 },
-    // Page 5 — Reverb:   Wet,   Decay,  Damping
-    {     0, 16384,  8000 },
-    // Page 6 — Sample Player: Start, Speed, Sample Select
-    {     0, 16384,     0 },
-    // Page 7 — Freeze Scrub: Scrub Pos, Loop Size, Playback Speed
-    { 32767, 12000, 16384 },
-};
 
 // KnobLock instances — one per physical knob
 static KnobLock lockMain, lockX, lockY, lockMacro;
@@ -703,51 +944,87 @@ static void push_params_to_core1() {
         int32_t fuzz_level = 0;
         int32_t decimate_level = 0;
 
-        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
-        if (X < 16384) {
-            mp3_ring_level = 32767 - (X * 2);
+        // Knob X Transitions (Islands & Bridges)
+        if (X < 5000) {
+            mp3_ring_level = 32767;
+            fuzz_level = 0;
+            decimate_level = 0;
+        } else if (X < 12000) {
+            int32_t ratio = (X - 5000) * 32768 / 7000;
+            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
+            fuzz_level = (32767 * ratio) >> 15;
+            decimate_level = 0;
+        } else if (X < 20000) {
+            mp3_ring_level = 0;
+            fuzz_level = 32767;
+            decimate_level = 0;
+        } else if (X < 27000) {
+            int32_t ratio = (X - 20000) * 32768 / 7000;
+            mp3_ring_level = 0;
+            fuzz_level = 32767 - ((32767 * ratio) >> 15);
+            decimate_level = (32767 * ratio) >> 15;
         } else {
             mp3_ring_level = 0;
+            fuzz_level = 0;
+            decimate_level = 32767;
         }
 
-        if (X < 16384) {
-            fuzz_level = X * 2;
-        } else {
-            fuzz_level = 32767 - ((X - 16384) * 2);
-        }
-
-        if (X < 16384) {
-            decimate_level = 0;
-        } else {
-            decimate_level = (X - 16384) * 2;
-            if (decimate_level > 32767) decimate_level = 32767;
-        }
-
-        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
+        // Knob Y Transitions (Islands & Bridges)
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
+        int32_t tape_hicut = 0;
         int32_t pop_prob = 0;
+        int32_t click_ratio = 0;
         int32_t bad_conn_level = 0;
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 16384) {
-            tape_sat = 30000 - (Y * 30000) / 16384;
-            tape_hiss = 30 - (Y * 30) / 16384;
-            pop_prob = 12 - (Y * 12) / 16384;
-        }
-
-        if (Y < 16384) {
-            bad_conn_level = (Y * 32767) / 16384;
-            sputter_prob = (Y * 50) / 16384;
+        if (Y < 5000) {
+            tape_sat = 30000;
+            tape_hiss = 30;
+            pop_prob = 12;
+            bad_conn_level = 0;
+            sputter_prob = 0;
+            scramble_level = 0;
+            click_ratio = 12000;
+        } else if (Y < 12000) {
+            int32_t ratio = (Y - 5000) * 32768 / 7000;
+            tape_sat = 30000 - ((30000 * ratio) >> 15);
+            tape_hiss = 30 - ((30 * ratio) >> 15);
+            pop_prob = 12 - ((12 * ratio) >> 15);
+            bad_conn_level = (32767 * ratio) >> 15;
+            sputter_prob = (50 * ratio) >> 15;
+            scramble_level = 0;
+            click_ratio = 12000 - ((12000 * ratio) >> 15);
+        } else if (Y < 20000) {
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 32767;
+            sputter_prob = 50;
+            scramble_level = 0;
+            click_ratio = 0;
+        } else if (Y < 27000) {
+            int32_t ratio = (Y - 20000) * 32768 / 7000;
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 32767 - ((20000 * ratio) >> 15);
+            sputter_prob = 50 - ((30 * ratio) >> 15);
+            scramble_level = (32767 * ratio) >> 15;
+            click_ratio = 0;
         } else {
-            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
-            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 12767;
+            sputter_prob = 20;
+            scramble_level = 32767;
+            click_ratio = 0;
         }
 
-        if (Y >= 16384) {
-            scramble_level = ((Y - 16384) * 32767) / 16383;
-        }
+        // Link MP3 low-bitrate filter roll-off directly to Knob X's MP3 Ringing level
+        tape_hicut = (mp3_ring_level * 22000) >> 15;
 
         // Scale pop_prob by X quality
         int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
@@ -763,6 +1040,7 @@ static void push_params_to_core1() {
         mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
         bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
         scramble_level = (scramble_level * glitch_strength) >> 15;
+        tape_hicut = (tape_hicut * raw_strength) >> 15;
 
         int32_t pop_strength = 16384 + (raw_strength >> 1);
         pop_prob = (pop_prob * pop_strength) >> 15;
@@ -774,23 +1052,18 @@ static void push_params_to_core1() {
         bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
         scramble_level = (scramble_level * globalNoiseScale) >> 14;
         pop_prob = (pop_prob * globalNoiseScale) >> 14;
+        tape_hiss = (tape_hiss * globalNoiseScale) >> 14;
 
         if (fuzz_level > 32767) fuzz_level = 32767;
         if (decimate_level > 32767) decimate_level = 32767;
         if (mp3_ring_level > 32767) mp3_ring_level = 32767;
         if (bad_conn_level > 32767) bad_conn_level = 32767;
         if (scramble_level > 32767) scramble_level = 32767;
+        if (tape_hicut > 32767) tape_hicut = 32767;
 
-        int32_t click_ratio = 0;
-        if (Y >= 10000 && Y < 13000) {
-            click_ratio = ((Y - 10000) * 16384) / 3000;
-        } else if (Y >= 13000 && Y < 16000) {
-            int32_t t = Y - 13000;
-            click_ratio = 16384 - ((t * 16384) / 3000);
-        }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 16000) >> 15;
+        click_depth = (click_depth * 8000) >> 15;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
@@ -807,6 +1080,7 @@ static void push_params_to_core1() {
         p.codec_sputter_prob = sputter_prob;
         p.codec_tape_sat = tape_sat;
         p.codec_tape_hiss = tape_hiss;
+        p.codec_tape_hicut = tape_hicut;
         p.codec_active_loss = active_loss;
 
         p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
@@ -845,20 +1119,18 @@ static void push_params_to_core1() {
 
         if (raw_fb > 22937) {
             p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
-            if (p.delay_feedback > 30000) p.delay_feedback = 30000;
-            p.glitch_feedback = glitch_fb;
+            if (p.delay_feedback > 32767) p.delay_feedback = 32767;
         } else {
             p.delay_feedback = clean_fb;
-            p.glitch_feedback = 0;
         }
+        p.glitch_feedback = 0; // Disable glitcher's internal feedback loop
 
-        bool is_freeze_page = (currentPage == 7);
-        bool use_freeze_params = (is_freeze_page || (freeze_latched && currentPage != 3));
+        bool use_freeze_params = is_frozen;
         int32_t raw_glitch_speed = 16384;
         if (use_freeze_params) {
-            p.glitch_mix   = vp[7][0]; // scrub offset
-            raw_glitch_speed = vp[7][2]; // speed (Y knob)
-            p.glitch_size  = vp[7][1]; // loop size (X knob)
+            p.glitch_mix   = freeze_vp[0]; // scrub offset
+            raw_glitch_speed = freeze_vp[2]; // speed (Y knob)
+            p.glitch_size  = freeze_vp[1]; // loop size (X knob)
         } else {
             int32_t raw_mix = apply_deadzone(vp[3][0]);
             p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
@@ -867,12 +1139,20 @@ static void push_params_to_core1() {
         }
         p.glitch_speed = raw_glitch_speed;
 
-        // Glitch speed mapping
+        // Glitch / Freeze speed mapping
         int32_t glitch_speed_mapped = 65536;
-        if (raw_glitch_speed > 18000) {
-            glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
-        } else if (raw_glitch_speed < 14000) {
-            glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+        if (use_freeze_params) {
+            int32_t knob = freeze_vp[2];
+            if (knob > 15300 && knob < 17400) {
+                knob = 16384;
+            }
+            glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767);
+        } else {
+            if (raw_glitch_speed > 18000) {
+                glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
+            } else if (raw_glitch_speed < 14000) {
+                glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+            }
         }
         p.glitch_speed_mapped = glitch_speed_mapped;
 
@@ -896,11 +1176,11 @@ static void push_params_to_core1() {
                     loop_size = active_clk * 2;
                 }
             }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, 16380);
+            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
 
-            int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
+            int32_t scrub_offset = is_frozen ? p.glitch_mix : 0;
             int32_t cv1_offset = 0;
-            int32_t range = 16380 - p.glitch_loop_size;
+            int32_t range = 32760 - p.glitch_loop_size;
             if (range < 0) range = 0;
             int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
             int32_t target_offset = raw_offset + cv1_offset;
@@ -910,7 +1190,7 @@ static void push_params_to_core1() {
                 int32_t step = (target_offset + (step_size / 2)) / step_size;
                 target_offset = step * step_size;
             }
-            p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
+            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
 
             p.glitch_speed_q16 = p.glitch_speed_mapped;
         }
@@ -927,12 +1207,13 @@ static void push_params_to_core1() {
 
         p.no_audio1 = true;
         p.no_audio2 = true;
+        p.mono_mode  = false;
 
-        p.is_freeze_page = is_freeze_page;
+        p.is_freeze_page = is_frozen;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
         p.input_width = global_input_width;
-        p.input_balance = global_input_balance;
+        p.routing_mode = global_routing_mode;
 
 
         // Reverb params — Reverb mix is clean (not scaled by macro).
@@ -951,11 +1232,14 @@ static void push_params_to_core1() {
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
             p.reverb_size = size_scale;
-            int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
+            // max_decay scales from ~28000 (small room) to 32400 (largest room).
+            // 32400/32767 ≈ 98.9% feedback — near-infinite ambience at max X + max size.
+            int32_t max_decay = 28000 + (((size_scale - 4915) * 60817) >> 20);
 
             int32_t decay = 0;
-            if (fb_glitch < 20000) {
-                int32_t val = (fb_glitch * 107374) >> 16;
+            if (fb_glitch < 24000) {
+                // Clean decay zone: linear ramp from 0 to max_decay
+                int32_t val = (fb_glitch * 87381) >> 16; // fb/24000 in Q15
                 decay = (val * max_decay) >> 15;
             } else {
                 decay = max_decay;
@@ -1050,6 +1334,22 @@ void BendsCard::tick_ui_once() {
     int32_t dzX    = apply_deadzone(smX);
     int32_t dzY    = apply_deadzone(smY);
 
+    static bool first_tick = true;
+    static int32_t last_dzMain = 0;
+    static int32_t last_dzX = 0;
+    if (first_tick) {
+        last_dzMain = dzMain;
+        last_dzX = dzX;
+        first_tick = false;
+    }
+    if (chainVisTimer > 0) {
+        if (abs(dzMain - last_dzMain) > 100 || abs(dzX - last_dzX) > 100) {
+            chainVisTimer = 0;
+        }
+    }
+    last_dzMain = dzMain;
+    last_dzX = dzX;
+
     // ── 2. Jacks → debouncing & state determination ───────────────────────
     static int pulse1_connected_ctr = 0;
     static int pulse2_connected_ctr = 0;
@@ -1132,6 +1432,31 @@ void BendsCard::tick_ui_once() {
         }
     }
 
+    // ── Boot Reset Check (Hold DOWN for 3s after boot to erase flash & restore factory defaults) ──
+    static uint32_t boot_ms = 0;
+    static uint32_t boot_down_ms = 0;
+    static bool boot_reset_done = false;
+
+    if (boot_ms < 3000) {
+        boot_ms++;
+        if (debounced_sw == ComputerCard::Switch::Down) {
+            boot_down_ms++;
+            if (boot_down_ms >= 2500 && !boot_reset_done) {
+                boot_reset_done = true;
+                bends_reset_factory_defaults();
+                bends_erase_settings();
+                push_params_to_core1();
+                lockMain.engage(dzMain, vp[0][0]);
+                lockX.engage(dzX, vp[0][1]);
+                lockY.engage(dzY, vp[0][2]);
+                lockMacro.engage(dzMain, grittiness_macro, false);
+                factoryResetFlashTimer = 1000; // 1s fast LED blink feedback
+            }
+        } else {
+            boot_down_ms = 0;
+        }
+    }
+
     // ── 3b. Switch hold & flick state machine ────────────────────────────
     bool param_changed = false;
     (void)param_changed;
@@ -1139,9 +1464,12 @@ void BendsCard::tick_ui_once() {
     bool sw_down_entered = (last_debounced_sw != ComputerCard::Switch::Down && debounced_sw == ComputerCard::Switch::Down);
     bool sw_down_exited  = (last_debounced_sw == ComputerCard::Switch::Down && debounced_sw != ComputerCard::Switch::Down);
 
+    static bool routing_changed_this_hold = false;
+
     if (sw_down_entered) {
         lockMacro.engage(dzMain, grittiness_macro, false); // No catchup logic on switch down
         settings_adjusted_this_hold = false;
+        routing_changed_this_hold = false;
     }
     if (sw_down_exited) {
         if (active_sw_held_ms >= 350) {
@@ -1245,25 +1573,39 @@ void BendsCard::tick_ui_once() {
             }
 
             if (!settings_adjusted_this_hold) {
-                if (currentPage == 0) {
-                    currentPage = 7; // Go to Freeze Scrub page when going back from Chorus
-                } else if (currentPage == 7) {
-                    currentPage = 5; // Go to Reverb page when going back from Freeze
+                currentPage = (currentPage == 0) ? 5 : (currentPage - 1);
+                if (currentPage == 3 && is_frozen) {
+                    lockMain.engage(dzMain, freeze_vp[0]);
+                    lockX.engage(dzX, freeze_vp[1]);
+                    lockY.engage(dzY, freeze_vp[2]);
                 } else {
-                    currentPage = (currentPage + 5) % 6;
+                    lockMain.engage(dzMain, vp[currentPage][0]);
+                    lockX.engage(dzX, vp[currentPage][1]);
+                    lockY.engage(dzY, vp[currentPage][2]);
                 }
-                lockMain.engage(dzMain, vp[currentPage][0]);
-                lockX.engage(dzX, vp[currentPage][1]);
-                lockY.engage(dzY, vp[currentPage][2]);
                 pageFlashTimer = 400;
+            }
+
+            // Save settings (routing mode, input width, mono mode) to flash if adjusted
+            if (settings_adjusted_this_hold) {
+                bends_save_settings();
+                if (routing_changed_this_hold) {
+                    bends_trigger_chain_vis(global_routing_mode, global_mono_mode && debounced_no_audio2);
+                }
             }
 
             grittiness_macro = 16384; // Reset to transparent center after bake
             g_macro_active = false;
             last_modified_macro_knob = 0;
-            lockMain.engage(dzMain, vp[currentPage][0]);
-            lockX.engage(dzX, vp[currentPage][1]);
-            lockY.engage(dzY, vp[currentPage][2]);
+            if (currentPage == 3 && is_frozen) {
+                lockMain.engage(dzMain, freeze_vp[0]);
+                lockX.engage(dzX, freeze_vp[1]);
+                lockY.engage(dzY, freeze_vp[2]);
+            } else {
+                lockMain.engage(dzMain, vp[currentPage][0]);
+                lockX.engage(dzX, vp[currentPage][1]);
+                lockY.engage(dzY, vp[currentPage][2]);
+            }
             lockMacro.engage(dzMain, grittiness_macro, false);
             param_changed = true;
         } else {
@@ -1271,6 +1613,7 @@ void BendsCard::tick_ui_once() {
         }
     }
 
+    static bool manual_save_triggered = false;
     if (debounced_sw == last_debounced_sw) {
         if (debounced_sw != ComputerCard::Switch::Middle) {
             active_sw_held_ms++;
@@ -1282,103 +1625,66 @@ void BendsCard::tick_ui_once() {
                     if (debounced_sw == ComputerCard::Switch::Down) {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
                         lockX.engage(dzX, global_input_width, false); // No catchup logic on switch down
-                        lockY.engage(dzY, global_input_balance, false); // No catchup logic on switch down
+                        lockY.engage(dzY, global_routing_mode * 8192 + 4096, false); // No catchup logic on switch down
                         last_modified_macro_knob = 0; // default view is Macro
-                    } else if (debounced_sw == ComputerCard::Switch::Up) {
-                        // Hold UP: momentary freeze (Page 7 entry with knob locking)
-                        if (currentPage != 7) {
-                            if (currentPage < 6) {
-                                pageBeforeUp = currentPage;
-                            }
-                            if (!is_frozen) {
-                                vp[7][0] = 0; // default to most recent audio (0 offset)
-                                vp[7][1] = vp[3][1];
-                                vp[7][2] = 16384; // default to normal pitch (1x speed)
-                            }
-                            currentPage = 7;
-                            lockMain.engage(dzMain, vp[currentPage][0]);
-                            lockX.engage(dzX, vp[currentPage][1]);
-                            lockY.engage(dzY, vp[currentPage][2]);
-                            param_changed = true;
-                        }
-                        freeze_latched = true;
-                        is_frozen = true;
                     }
+                }
+            }
+            if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000) {
+                if (!settings_adjusted_this_hold && !manual_save_triggered) {
+                    manual_save_triggered = true;
+                    bends_save_settings();
+                    saveFlashTimer = 600; // 600ms LED confirmation flash
                 }
             }
         }
     } else {
+        manual_save_triggered = false;
         // Transition detected
-        static bool was_frozen_on_press = false;
         if (last_debounced_sw == ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Up) {
-            // Instant freeze transition on switch press (go to Page 7 with knob locks)
-            was_frozen_on_press = is_frozen;
-            if (currentPage != 7) {
-                if (currentPage < 6) {
-                    pageBeforeUp = currentPage;
-                }
-                if (!is_frozen) {
-                    vp[7][0] = 0; // default to most recent audio (0 offset)
-                    vp[7][1] = vp[3][1];
-                    vp[7][2] = 16384; // default to normal pitch (1x speed)
-                }
-                currentPage = 7;
+            // Instant freeze toggle on switch press UP
+            if (!freeze_latched) {
+                // Freeze and jump to Page 3 (Glitcher/Freeze)
+                pageBeforeUp = currentPage;
+                freeze_latched = true;
+                is_frozen = true;
+                currentPage = 3;
+                lockMain.engage(dzMain, freeze_vp[0]);
+                lockX.engage(dzX, freeze_vp[1]);
+                lockY.engage(dzY, freeze_vp[2]);
+                param_changed = true;
+            } else {
+                // Unfreeze and return to the previous page
+                freeze_latched = false;
+                is_frozen = false;
+                currentPage = pageBeforeUp;
                 lockMain.engage(dzMain, vp[currentPage][0]);
                 lockX.engage(dzX, vp[currentPage][1]);
                 lockY.engage(dzY, vp[currentPage][2]);
                 param_changed = true;
             }
-            freeze_latched = true;
-            is_frozen = true;
         }
         if (last_debounced_sw != ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Middle) {
             // Switch was released
-            if (active_sw_held_ms < 350) {
-                // Trigger flick action
-                if (last_debounced_sw == ComputerCard::Switch::Down) {
+            if (last_debounced_sw == ComputerCard::Switch::Down) {
+                if (active_sw_held_ms < 350) {
                     // Flick DOWN — cycle pages 0→1→2→3→4→5→0
-                    // Page 7 (Freeze Scrub) is only accessible via Switch UP (freeze)
                     if (!settings_adjusted_this_hold) {
                         currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
-                        lockMain.engage(dzMain, vp[currentPage][0]);
-                        lockX.engage(dzX, vp[currentPage][1]);
-                        lockY.engage(dzY, vp[currentPage][2]);
-                        pageFlashTimer = 400;
-                        param_changed = true;
-                    }
-                } else if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Flick UP: toggle latch state
-                    if (was_frozen_on_press) {
-                        // We were already frozen, so this flick unlatches it
-                        freeze_latched = false;
-                        is_frozen = false;
-                        if (currentPage == 7) {
-                            currentPage = pageBeforeUp;
+                        // If landing on Page 3 while frozen, locks must target freeze_vp
+                        // to avoid overwriting scrub params with Glitcher page defaults
+                        if (currentPage == 3 && is_frozen) {
+                            lockMain.engage(dzMain, freeze_vp[0]);
+                            lockX.engage(dzX, freeze_vp[1]);
+                            lockY.engage(dzY, freeze_vp[2]);
+                        } else {
                             lockMain.engage(dzMain, vp[currentPage][0]);
                             lockX.engage(dzX, vp[currentPage][1]);
                             lockY.engage(dzY, vp[currentPage][2]);
                         }
-                        param_changed = true;
-                    } else {
-                        // Lock on Page 7 so knobs (Main=Pos, X=Size, Y=Speed) can control freeze
-                        freeze_latched = true;
-                        is_frozen = true;
+                        pageFlashTimer = 400;
                         param_changed = true;
                     }
-                }
-            } else {
-                // Hold release action
-                if (last_debounced_sw == ComputerCard::Switch::Up) {
-                    // Releasing Switch UP hold: momentarily unfreeze and return to original page
-                    freeze_latched = false;
-                    is_frozen = false;
-                    if (currentPage == 7) {
-                        currentPage = pageBeforeUp;
-                        lockMain.engage(dzMain, vp[currentPage][0]);
-                        lockX.engage(dzX, vp[currentPage][1]);
-                        lockY.engage(dzY, vp[currentPage][2]);
-                    }
-                    param_changed = true;
                 }
             }
         }
@@ -1414,12 +1720,44 @@ void BendsCard::tick_ui_once() {
             param_changed = true;
             last_modified_macro_knob = 1;
         }
-        int32_t nextBalance = lockY.update(dzY);
-        if (global_input_balance != nextBalance) {
-            global_input_balance = nextBalance;
+        // Mono Mode toggle: X knob fully left (<500) while Input 2 is unplugged
+        if (debounced_no_audio2) {
+            bool want_mono = (nextWidth < 500);
+            if (global_mono_mode != want_mono) {
+                global_mono_mode = want_mono;
+                settings_adjusted_this_hold = true;
+                param_changed = true;
+                routing_changed_this_hold = true;
+            }
+        }
+        int32_t nextPresetKnob = lockY.update(dzY);
+        int32_t nextMode = nextPresetKnob >> 13; // divides by 8192
+        if (nextMode > 3) nextMode = 3;
+        if (global_routing_mode != nextMode) {
+            global_routing_mode = nextMode;
             settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 2;
+            routing_changed_this_hold = true;
+        }
+    } else if (is_frozen && currentPage == 3) {
+        // Frozen and on the freeze page — write to freeze_vp, never touch vp[3]
+        if (debounced_sw != ComputerCard::Switch::Down) {
+            int32_t nextMain = lockMain.update(dzMain);
+            if (freeze_vp[0] != nextMain) {
+                freeze_vp[0] = nextMain;
+                param_changed = true;
+            }
+        }
+        int32_t nextX = lockX.update(dzX);
+        if (freeze_vp[1] != nextX) {
+            freeze_vp[1] = nextX;
+            param_changed = true;
+        }
+        int32_t nextY = lockY.update(dzY);
+        if (freeze_vp[2] != nextY) {
+            freeze_vp[2] = nextY;
+            param_changed = true;
         }
     } else {
         if (debounced_sw != ComputerCard::Switch::Down) {
@@ -1441,14 +1779,7 @@ void BendsCard::tick_ui_once() {
         }
     }
 
-    static bool last_is_frozen = false;
-    if (is_frozen && !last_is_frozen) {
-        // Re-engage knob locks to prevent sudden physical knob jumps
-        lockMain.engage(dzMain, vp[7][0]);
-        lockX.engage(dzX, vp[7][1]);
-        lockY.engage(dzY, vp[7][2]);
-    }
-    last_is_frozen = is_frozen;
+
 
     // ── 5. Push virtual params to Core 1 double buffer ───────────────────
     {
@@ -1552,51 +1883,87 @@ void BendsCard::tick_ui_once() {
         int32_t fuzz_level = 0;
         int32_t decimate_level = 0;
 
-        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
-        if (X < 16384) {
-            mp3_ring_level = 32767 - (X * 2);
+        // Knob X Transitions (Islands & Bridges)
+        if (X < 5000) {
+            mp3_ring_level = 32767;
+            fuzz_level = 0;
+            decimate_level = 0;
+        } else if (X < 12000) {
+            int32_t ratio = (X - 5000) * 32768 / 7000;
+            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
+            fuzz_level = (32767 * ratio) >> 15;
+            decimate_level = 0;
+        } else if (X < 20000) {
+            mp3_ring_level = 0;
+            fuzz_level = 32767;
+            decimate_level = 0;
+        } else if (X < 27000) {
+            int32_t ratio = (X - 20000) * 32768 / 7000;
+            mp3_ring_level = 0;
+            fuzz_level = 32767 - ((32767 * ratio) >> 15);
+            decimate_level = (32767 * ratio) >> 15;
         } else {
             mp3_ring_level = 0;
+            fuzz_level = 0;
+            decimate_level = 32767;
         }
 
-        if (X < 16384) {
-            fuzz_level = X * 2;
-        } else {
-            fuzz_level = 32767 - ((X - 16384) * 2);
-        }
-
-        if (X < 16384) {
-            decimate_level = 0;
-        } else {
-            decimate_level = (X - 16384) * 2;
-            if (decimate_level > 32767) decimate_level = 32767;
-        }
-
-        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
+        // Knob Y Transitions (Islands & Bridges)
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
+        int32_t tape_hicut = 0;
         int32_t pop_prob = 0;
+        int32_t click_ratio = 0;
         int32_t bad_conn_level = 0;
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 16384) {
-            tape_sat = 30000 - (Y * 30000) / 16384;
-            tape_hiss = 30 - (Y * 30) / 16384;
-            pop_prob = 12 - (Y * 12) / 16384;
-        }
-
-        if (Y < 16384) {
-            bad_conn_level = (Y * 32767) / 16384;
-            sputter_prob = (Y * 50) / 16384;
+        if (Y < 5000) {
+            tape_sat = 30000;
+            tape_hiss = 30;
+            pop_prob = 12;
+            bad_conn_level = 0;
+            sputter_prob = 0;
+            scramble_level = 0;
+            click_ratio = 12000;
+        } else if (Y < 12000) {
+            int32_t ratio = (Y - 5000) * 32768 / 7000;
+            tape_sat = 30000 - ((30000 * ratio) >> 15);
+            tape_hiss = 30 - ((30 * ratio) >> 15);
+            pop_prob = 12 - ((12 * ratio) >> 15);
+            bad_conn_level = (32767 * ratio) >> 15;
+            sputter_prob = (50 * ratio) >> 15;
+            scramble_level = 0;
+            click_ratio = 12000 - ((12000 * ratio) >> 15);
+        } else if (Y < 20000) {
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 32767;
+            sputter_prob = 50;
+            scramble_level = 0;
+            click_ratio = 0;
+        } else if (Y < 27000) {
+            int32_t ratio = (Y - 20000) * 32768 / 7000;
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 32767 - ((20000 * ratio) >> 15);
+            sputter_prob = 50 - ((30 * ratio) >> 15);
+            scramble_level = (32767 * ratio) >> 15;
+            click_ratio = 0;
         } else {
-            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
-            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
+            tape_sat = 0;
+            tape_hiss = 0;
+            pop_prob = 0;
+            bad_conn_level = 12767;
+            sputter_prob = 20;
+            scramble_level = 32767;
+            click_ratio = 0;
         }
 
-        if (Y >= 16384) {
-            scramble_level = ((Y - 16384) * 32767) / 16383;
-        }
+        // Link MP3 low-bitrate filter roll-off directly to Knob X's MP3 Ringing level
+        tape_hicut = (mp3_ring_level * 22000) >> 15;
 
         // Scale pop_prob by X quality
         int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
@@ -1612,6 +1979,7 @@ void BendsCard::tick_ui_once() {
         mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
         bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
         scramble_level = (scramble_level * glitch_strength) >> 15;
+        tape_hicut = (tape_hicut * raw_strength) >> 15;
 
         int32_t pop_strength = 16384 + (raw_strength >> 1);
         pop_prob = (pop_prob * pop_strength) >> 15;
@@ -1623,20 +1991,18 @@ void BendsCard::tick_ui_once() {
         bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
         scramble_level = (scramble_level * globalNoiseScale) >> 14;
         pop_prob = (pop_prob * globalNoiseScale) >> 14;
+        tape_hiss = (tape_hiss * globalNoiseScale) >> 14;
 
         if (fuzz_level > 32767) fuzz_level = 32767;
         if (decimate_level > 32767) decimate_level = 32767;
         if (mp3_ring_level > 32767) mp3_ring_level = 32767;
         if (bad_conn_level > 32767) bad_conn_level = 32767;
         if (scramble_level > 32767) scramble_level = 32767;
+        if (tape_hicut > 32767) tape_hicut = 32767;
 
-        int32_t click_ratio = 0;
-        if (Y < 16384) {
-            click_ratio = 16384 - Y;
-        }
         int32_t click_depth = (click_ratio * raw_strength) >> 15;
         click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 16000) >> 15;
+        click_depth = (click_depth * 8000) >> 15;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
@@ -1652,22 +2018,19 @@ void BendsCard::tick_ui_once() {
             int32_t cv1_x_mod = (cv1_abs * 16);
             X = clamp_i32(X + cv1_x_mod, 0, 32767);
 
-            // Recompute MP3, fuzz, and decimation levels based on modulated X
+            // Recompute fuzz and decimation levels based on modulated X
             if (X < 16384) {
-                mp3_ring_level = 32767 - (X * 2);
                 fuzz_level = X * 2;
                 decimate_level = 0;
             } else {
-                mp3_ring_level = 0;
-                fuzz_level = 32767 - ((X - 16384) * 2);
                 decimate_level = (X - 16384) * 2;
                 if (decimate_level > 32767) decimate_level = 32767;
+                fuzz_level = 32767 - decimate_level;
             }
 
             // Apply strength/noise scaling to the newly computed levels
             fuzz_level = (fuzz_level * raw_strength) >> 15;
             decimate_level = (decimate_level * raw_strength) >> 15;
-            mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
             
             fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
             decimate_level = (decimate_level * globalNoiseScale) >> 14;
@@ -1747,20 +2110,19 @@ void BendsCard::tick_ui_once() {
 
         if (raw_fb > 22937) {
             p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
-            if (p.delay_feedback > 30000) p.delay_feedback = 30000;
+            if (p.delay_feedback > 32767) p.delay_feedback = 32767;
             p.glitch_feedback = glitch_fb;
         } else {
             p.delay_feedback = clean_fb;
             p.glitch_feedback = 0;
         }
 
-        bool is_freeze_page = (currentPage == 7);
-        bool use_freeze_params = (is_freeze_page || (is_frozen && currentPage != 3));
+        bool use_freeze_params = is_frozen;
         int32_t raw_glitch_speed = 16384;
         if (use_freeze_params) {
-            p.glitch_mix     = vp[7][0]; // scrub offset (MAIN knob on Page 7)
-            raw_glitch_speed = vp[7][2]; // speed        (Y knob on Page 7)
-            p.glitch_size    = vp[7][1]; // loop size    (X knob on Page 7)
+            p.glitch_mix     = freeze_vp[0]; // scrub offset (MAIN knob on freeze page)
+            raw_glitch_speed = freeze_vp[2]; // speed        (Y knob on freeze page)
+            p.glitch_size    = freeze_vp[1]; // loop size    (X knob on freeze page)
         } else {
             int32_t raw_mix = apply_deadzone(vp[3][0]);
             p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
@@ -1797,11 +2159,21 @@ void BendsCard::tick_ui_once() {
             //   Centre (16384) = normal speed (1×)
             //   Right (32767) = double speed (2×)
             // Simple linear map: speed_q16 = knob * 2 * 65536 / 32767
-            int32_t knob = vp[7][2]; // 0..32767
-            if (knob > 15300 && knob < 17400) {
-                knob = 16384; // snap to exactly 100% speed / unison
+            int32_t knob = freeze_vp[2]; // 0..32767
+            // Quantized semitone snapping for playable musical pitch shifts (Octave Down, 5th Down, Unison, 5th Up, Octave Up)
+            if (knob > 7600 && knob < 8700) {
+                glitch_speed_mapped = 32768; // Octave Down (-12 semitones)
+            } else if (knob > 10300 && knob < 11500) {
+                glitch_speed_mapped = 43700; // Fifth Down (-7 semitones)
+            } else if (knob > 15300 && knob < 17400) {
+                glitch_speed_mapped = 65536; // Unison (0 semitones)
+            } else if (knob > 23800 && knob < 25200) {
+                glitch_speed_mapped = 98304; // Fifth Up (+7 semitones)
+            } else if (knob > 31500) {
+                glitch_speed_mapped = 131072; // Octave Up (+12 semitones)
+            } else {
+                glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767); // 0..131072 (0×..2× in Q16)
             }
-            glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767); // 0..131072 (0×..2× in Q16)
         } else {
             // Normal glitch-mode speed mapping (forward + reverse)
             if (raw_glitch_speed > 18000) {
@@ -1814,33 +2186,40 @@ void BendsCard::tick_ui_once() {
 
         // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
         {
+            bool eff_mono = debounced_no_audio2 && global_mono_mode;
+            int32_t max_buf_samples = eff_mono ? 65520 : 32760;
             int32_t active_clk = g_clk_period_samples;
             int32_t size = p.glitch_size;
             // Sensible default minimum size during button/CV exploration to prevent buzzy ranges
             if (cv2_live && cv2_abs > 800 && size < 4000) {
                 size = 4000;
             }
-            int32_t loop_size = 128 + size;
+            int32_t loop_size = 128;
             if (active_clk > 240) {
-                if (size < 5000) {
-                    loop_size = active_clk / 16;
-                } else if (size < 10000) {
-                    loop_size = active_clk / 8;
-                } else if (size < 15000) {
-                    loop_size = active_clk / 4;
-                } else if (size < 20000) {
-                    loop_size = active_clk / 2;
-                } else if (size < 26000) {
-                    loop_size = active_clk;
+                static const int32_t clk_div_num[13] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128};
+                int32_t num_steps = 13;
+                int32_t size_sq = (size * size) >> 15;
+                int32_t step = (size_sq * num_steps) >> 15;
+                if (step < 0) step = 0;
+                if (step > num_steps - 1) step = num_steps - 1;
+                if (step == num_steps - 1) {
+                    loop_size = max_buf_samples; // Max knob position ALWAYS freezes full buffer capacity!
                 } else {
-                    loop_size = active_clk * 2;
+                    loop_size = (active_clk * clk_div_num[step]) / 16;
                 }
+            } else {
+                static const int32_t size_lut[9] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
+                int32_t num_steps = eff_mono ? 9 : 8;
+                int32_t step = (size * num_steps) >> 15;
+                if (step < 0) step = 0;
+                if (step > num_steps - 1) step = num_steps - 1;
+                loop_size = size_lut[step];
             }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, 16380);
+            p.glitch_loop_size = clamp_i32(loop_size, 128, max_buf_samples);
 
-            int32_t scrub_offset = is_freeze_page ? p.glitch_mix : 0;
+            int32_t scrub_offset = is_frozen ? p.glitch_mix : 0;
             int32_t cv1_offset = p.cv1 * 6;
-            int32_t range = 16380 - p.glitch_loop_size;
+            int32_t range = max_buf_samples - p.glitch_loop_size;
             if (range < 0) range = 0;
             int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
             int32_t target_offset = raw_offset + cv1_offset;
@@ -1850,7 +2229,7 @@ void BendsCard::tick_ui_once() {
                 int32_t step = (target_offset + (step_size / 2)) / step_size;
                 target_offset = step * step_size;
             }
-            p.glitch_target_offset = clamp_i32(target_offset, 0, 16380);
+            p.glitch_target_offset = clamp_i32(target_offset, 0, max_buf_samples);
 
             p.glitch_speed_q16 = p.glitch_speed_mapped;
         }
@@ -1865,6 +2244,7 @@ void BendsCard::tick_ui_once() {
         bool cv2_stutter = cv2_live && (cv2_abs > 1900);
         p.stutter = (pulse1_live && PulseIn1()) || cv2_stutter;
         p.cv1 = cv1_live ? cv1_abs : 0;
+        p.cv1_bipolar = cv1_live ? cv1_val : 0;
         p.cv2 = cv2_val;
         p.pulse1_live = pulse1_live;
         p.pulse2_live = pulse2_live;
@@ -1873,12 +2253,14 @@ void BendsCard::tick_ui_once() {
 
         p.no_audio1 = debounced_no_audio1;
         p.no_audio2 = debounced_no_audio2;
+        // Extended Mono Mode: only active when Input 2 is unplugged AND user enabled it
+        p.mono_mode = debounced_no_audio2 && global_mono_mode;
 
-        p.is_freeze_page = is_freeze_page;
+        p.is_freeze_page = is_frozen;
         p.flash_writing  = false;
         p.grittiness_macro = active_macro;
         p.input_width = global_input_width;
-        p.input_balance = global_input_balance;
+        p.routing_mode = global_routing_mode;
 
 
 
@@ -1898,11 +2280,14 @@ void BendsCard::tick_ui_once() {
             
             int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
             p.reverb_size = size_scale;
-            int32_t max_decay = 18000 + (((size_scale - 4915) * 38429) >> 20);
+            // max_decay scales from ~28000 (small room) to 32400 (largest room).
+            // 32400/32767 ≈ 98.9% feedback — near-infinite ambience at max X + max size.
+            int32_t max_decay = 28000 + (((size_scale - 4915) * 60817) >> 20);
 
             int32_t decay = 0;
-            if (fb_glitch < 20000) {
-                int32_t val = (fb_glitch * 107374) >> 16;
+            if (fb_glitch < 24000) {
+                // Clean decay zone: linear ramp from 0 to max_decay
+                int32_t val = (fb_glitch * 87381) >> 16; // fb/24000 in Q15
                 decay = (val * max_decay) >> 15;
             } else {
                 decay = max_decay;
@@ -1995,7 +2380,64 @@ void BendsCard::tick_ui_once() {
         g_params_idx.store(next_idx, std::memory_order_release);
     }
     // ── 6. LED visualisation ──────────────────────────────────────────────
-    bool is_freeze_page = (currentPage == 7);
+    if (factoryResetFlashTimer > 0) {
+        factoryResetFlashTimer--;
+        bool on = (factoryResetFlashTimer % 80) < 40;
+        int16_t bright = on ? 4095 : 0;
+        for (int i = 0; i < 6; i++) {
+            LedBrightness(i, bright);
+        }
+        return;
+    }
+    if (saveFlashTimer > 0) {
+        saveFlashTimer--;
+        bool on = (saveFlashTimer % 100) < 50;
+        int16_t bright = on ? 4095 : 100;
+        for (int i = 0; i < 6; i++) {
+            LedBrightness(i, bright);
+        }
+        if (saveFlashTimer == 0) {
+            bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
+        }
+        return;
+    }
+    if (chainVisTimer > 0) {
+        chainVisTimer--;
+        uint32_t elapsed = 2100 - chainVisTimer;
+        int16_t bright_leds[6] = {0, 0, 0, 0, 0, 0};
+        
+        if (elapsed < 200) {
+            // Start Flash ON
+            for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
+        } else if (elapsed < 300) {
+            // Gap OFF
+            for (int i = 0; i < 6; i++) bright_leds[i] = 0;
+        } else if (elapsed < 1800) {
+            // Steps 0..5
+            int step_idx = (elapsed - 300) / 250;
+            if (step_idx >= 0 && step_idx < 6) {
+                int chain[6];
+                get_routing_chain(chainVisMode, chainVisMono, chain);
+                int active_led = chain[step_idx];
+                if (active_led >= 0 && active_led < 6) {
+                    bright_leds[active_led] = 4095;
+                }
+            }
+        } else if (elapsed < 1900) {
+            // Gap OFF
+            for (int i = 0; i < 6; i++) bright_leds[i] = 0;
+        } else {
+            // End Flash ON
+            for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
+        }
+
+        for (int i = 0; i < 6; i++) {
+            LedBrightness(i, bright_leds[i]);
+        }
+        return;
+    }
+
+    bool is_freeze_page = (currentPage == 3 && is_frozen);
 
     if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int16_t bar_leds[6];
@@ -2008,12 +2450,26 @@ void BendsCard::tick_ui_once() {
             is_locked = lockX.locked;
             phys_val = dzX;
         } else if (last_modified_macro_knob == 2) {
-            val_to_show = global_input_balance;
             is_locked = lockY.locked;
             phys_val = dzY;
         }
         
-        if (is_locked) {
+        if (last_modified_macro_knob == 2) {
+            for (int i = 0; i < 6; i++) {
+                bar_leds[i] = (i == global_routing_mode) ? 4095 : 100;
+            }
+            if (is_locked) {
+                static uint32_t blink_counter = 0;
+                blink_counter++;
+                bool blink_on = (blink_counter % 200 < 100);
+                if (blink_on) {
+                    int phys_idx = phys_val / 5461;
+                    if (phys_idx < 0) phys_idx = 0;
+                    if (phys_idx > 5) phys_idx = 5;
+                    bar_leds[phys_idx] = 4095;
+                }
+            }
+        } else if (is_locked) {
             // Knob is locked, show catchup helper
             get_bar_graph_leds(val_to_show, bar_leds);
             // Make the virtual value target dim
@@ -2038,13 +2494,17 @@ void BendsCard::tick_ui_once() {
             LedBrightness(i, bar_leds[i]);
         }
     } else if (is_freeze_page) {
-        // Freeze Scrub page: show the active loop window (glow) and the moving playhead (bright)
-        int32_t start_idx = ((int32_t)glitcher.freeze_wr - glitcher.active_offset) & 0x7FFF;
-        int32_t end_idx = (start_idx + glitcher.current_loop_len) & 0x7FFF;
-        int32_t play_pos = (start_idx + (int32_t)(glitcher.rd_q16 >> 16)) & 0x7FFF;
+        // Freeze Scrub page: show the active loop window (glow) and moving playhead (bright)
+        // In Extended Mono Mode the glitcher buffer is 65536 samples; scale sectors accordingly.
+        const bool in_mono = global_mono_mode && is_frozen;
+        const int32_t buf_mask  = in_mono ? 0xFFFF : 0x7FFF;
+        const int32_t sector_sz = in_mono ? 10923  : 5461;
+        int32_t start_idx = ((int32_t)glitcher.freeze_wr - glitcher.active_offset) & buf_mask;
+        int32_t end_idx   = (start_idx + glitcher.current_loop_len) & buf_mask;
+        int32_t play_pos  = (start_idx + (int32_t)(glitcher.rd_q16 >> 16)) & buf_mask;
         
         for (int i = 0; i < 6; i++) {
-            int32_t led_sample = i * 5461 + 2730; // center of LED's sector
+            int32_t led_sample = i * sector_sz + (sector_sz >> 1); // center of LED's sector
             bool in_loop = false;
             if (start_idx <= end_idx) {
                 in_loop = (led_sample >= start_idx && led_sample < end_idx);
@@ -2056,7 +2516,7 @@ void BendsCard::tick_ui_once() {
             int32_t brightness = in_loop ? 800 : 80;
             
             // Highlight the playhead position
-            int32_t play_led = play_pos / 5461;
+            int32_t play_led = play_pos / sector_sz;
             if (play_led < 0) play_led = 0;
             if (play_led > 5) play_led = 5;
             if (play_led == i) {
@@ -2073,20 +2533,20 @@ void BendsCard::tick_ui_once() {
                 brightness = 4095;
             }
             if (i == 5 && is_frozen) {
-                brightness = 4095;
+                brightness = 2048;
             }
             LedBrightness(i, brightness);
         }
     } else {
         // Normal mode: active page LED comfortable steady glow; others dark
-        // Bottom right LED (LED 5) turns on full when frozen
+        // Bottom right LED (LED 5) turns on at half-intensity when frozen
         for (int i = 0; i < 6; i++) {
             int brightness = 0;
             if (i == currentPage) {
                 brightness = 1500;
             }
             if (i == 5 && is_frozen) {
-                brightness = 4095;
+                brightness = 2048;
             }
             LedBrightness(i, brightness);
         }
@@ -2127,11 +2587,12 @@ int main() {
         int32_t mantissa = i & 0x0F;
         int32_t reconstructed = 0;
         if (exponent == 0) {
-            reconstructed = (mantissa << 3) + 4;
+            reconstructed = (mantissa << 3);
         } else {
-            reconstructed = ((mantissa << 3) + 132) << exponent;
+            reconstructed = (((mantissa << 3) + 132) << exponent) - 132;
         }
         if (reconstructed > 32767) reconstructed = 32767;
+        if (reconstructed < 0) reconstructed = 0;
         mulaw_decode_table[i] = (int16_t)(sign * reconstructed);
     }
 
@@ -2160,8 +2621,16 @@ int main() {
     g_params[1].no_audio1 = true;
     g_params[0].no_audio2 = true;
     g_params[1].no_audio2 = true;
+    g_params[0].mono_mode = false;
+    g_params[1].mono_mode = false;
     g_params[0].grittiness_macro = 16384;
     g_params[1].grittiness_macro = 16384;
+
+    // Load persisted settings (routing mode, input width, mono mode) from flash
+    bends_load_settings();
+
+    // Trigger chain visualization on boot
+    bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
 
     // 6. Push default settings to Core 1 double-buffer before Core 1 starts.
     push_params_to_core1();
