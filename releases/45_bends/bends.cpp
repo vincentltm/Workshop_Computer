@@ -1158,44 +1158,7 @@ static void push_params_to_core1() {
         }
         p.glitch_speed_mapped = glitch_speed_mapped;
 
-        // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
-        {
-            int32_t active_clk = g_clk_period_samples;
-            int32_t size = p.glitch_size;
-            int32_t loop_size = 128 + size;
-            if (active_clk > 240) {
-                if (size < 5000) {
-                    loop_size = active_clk / 16;
-                } else if (size < 10000) {
-                    loop_size = active_clk / 8;
-                } else if (size < 15000) {
-                    loop_size = active_clk / 4;
-                } else if (size < 20000) {
-                    loop_size = active_clk / 2;
-                } else if (size < 26000) {
-                    loop_size = active_clk;
-                } else {
-                    loop_size = active_clk * 2;
-                }
-            }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, 32760);
 
-            int32_t scrub_offset = is_frozen ? p.glitch_mix : 0;
-            int32_t cv1_offset = 0;
-            int32_t range = 32760 - p.glitch_loop_size;
-            if (range < 0) range = 0;
-            int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
-            int32_t target_offset = raw_offset + cv1_offset;
-            if (active_clk > 240) {
-                int32_t step_size = active_clk / 4;
-                if (step_size < 1) step_size = 1;
-                int32_t step = (target_offset + (step_size / 2)) / step_size;
-                target_offset = step * step_size;
-            }
-            p.glitch_target_offset = clamp_i32(target_offset, 0, 32760);
-
-            p.glitch_speed_q16 = p.glitch_speed_mapped;
-        }
 
         // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
         p.filter_cutoff = vp[4][0];
@@ -2187,17 +2150,13 @@ void BendsCard::tick_ui_once() {
             }
             int32_t loop_size = 128;
             if (active_clk > 240) {
-                static const int32_t clk_div_num[13] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128};
-                int32_t num_steps = 13;
+                static const int32_t clk_div_num[7] = {1, 2, 4, 8, 16, 32, 64};
+                int32_t num_steps = 7;
                 int32_t size_sq = (size * size) >> 15;
                 int32_t step = (size_sq * num_steps) >> 15;
                 if (step < 0) step = 0;
                 if (step > num_steps - 1) step = num_steps - 1;
-                if (step == num_steps - 1) {
-                    loop_size = max_buf_samples; // Max knob position ALWAYS freezes full buffer capacity!
-                } else {
-                    loop_size = (active_clk * clk_div_num[step]) / 16;
-                }
+                loop_size = (active_clk * clk_div_num[step]) / 16;
             } else {
                 static const int32_t size_lut[9] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
                 int32_t num_steps = eff_mono ? 9 : 8;
@@ -2214,12 +2173,6 @@ void BendsCard::tick_ui_once() {
             if (range < 0) range = 0;
             int32_t raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
             int32_t target_offset = raw_offset + cv1_offset;
-            if (active_clk > 240) {
-                int32_t step_size = active_clk / 4;
-                if (step_size < 1) step_size = 1;
-                int32_t step = (target_offset + (step_size / 2)) / step_size;
-                target_offset = step * step_size;
-            }
             p.glitch_target_offset = clamp_i32(target_offset, 0, max_buf_samples);
 
             p.glitch_speed_q16 = p.glitch_speed_mapped;
