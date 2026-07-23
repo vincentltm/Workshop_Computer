@@ -703,13 +703,13 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
             run_filter(L, R, p);
             if (!mono_mode) run_chorus(L, R, p);
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
-            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             if (mono_mode) run_chorus(L, R, p);
             run_codec(L, R, p);
             break;
 
         case 2: // Scatter Cloud (Chorus already post-delay in this preset)
-            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             run_codec(L, R, p);
             // Delay follows glitcher: don't freeze delay write pointer so it keeps recording
             // the frozen glitch output -- passing freeze=true would stale the delay buffer.
@@ -724,7 +724,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
             run_codec(L, R, p);
             if (!mono_mode) run_chorus(L, R, p);
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
-            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             if (mono_mode) run_chorus(L, R, p);
             run_reverb(L, R, p);
             break;
@@ -734,7 +734,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
             if (!mono_mode) run_chorus(L, R, p);
             run_codec(L, R, p);
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
-            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, clk_period_samples, clk_timer);
+            run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             if (mono_mode) run_chorus(L, R, p);
             run_filter(L, R, p);
             run_reverb(L, R, p);
