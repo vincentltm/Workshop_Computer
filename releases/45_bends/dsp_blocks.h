@@ -1855,14 +1855,8 @@ struct GlitcherBlock {
 
                 bool boundary = false;
                 if (pulse1_live && (clk_period_samples > 240)) {
-                    // Count samples (same as free-running) and only open a trigger window
-                    // on a clock rising edge once the counter expires. This limits evaluation
-                    // to once per loop-length of time regardless of how dense the clock is.
-                    trigger_ctr--;
-                    if (trigger_ctr <= 0 && p1_rising) {
-                        trigger_ctr = norm_loop_size < 3072 ? 3072 : norm_loop_size;
-                        boundary = true;
-                    }
+                    // Evaluate probability on every beat — beat-synced triggers with cubic warp.
+                    boundary = p1_rising;
                 } else {
                     trigger_ctr--;
                     if (trigger_ctr <= 0) {
