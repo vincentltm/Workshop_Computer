@@ -1529,7 +1529,8 @@ struct GlitcherBlock {
 
         bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
         bool eff_glitchInjector = glitchInjector;
-        bool want_active = eff_glitchInjector || freezeGate || p1_gate;
+        // p1_gate intentionally excluded: raw clock gate should not force glitcher active
+        bool want_active = eff_glitchInjector || freezeGate;
         bool is_loop_frozen = freezeGate || (mainProb >= 32760);
         int32_t speed_q16 = 65536;
 
@@ -2006,8 +2007,10 @@ struct GlitcherBlock {
                     }
                 }
 
-                // Force re-trigger on Pulse 1 clock sync trigger
-                if (pulse1_live && p1_rising) {
+                // In clock-sync mode, beat_rising (p1_rising) marks the beat boundary.
+                // Only force a loop-point jump if the loop has already been running long
+                // enough — don't jump on every beat unconditionally (that leaks the clock).
+                if (is_clock_sync && p1_rising && active_duration_ctr >= (uint32_t)current_loop_len) {
                     crossed = true;
                 }
 
