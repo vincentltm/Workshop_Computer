@@ -40,7 +40,10 @@ Bends uses an 8-page virtual parameter table. Physical knobs (`Main`, `X`, `Y`) 
 *   **Flick DOWN (Quick Release < 350ms)**: Cycles forward through pages `0` to `5`.
 *   **Hold DOWN (>= 350ms)**: Enters **Macro Mode**. Knobs are temporarily mapped to:
     *   **Main**: Grittiness Macro sweep (0 to 100%)
-    *   **X**: Global Stereo Width. Turn fully left (< 500) while Input 2 is unplugged to enable **Extended Mono Mode** (doubles delay/freeze buffer capacity and shifts Chorus post-glitcher).
+    *   **X**: Global Stereo Width & Channel Mode:
+        *   *CCW (< 500)*: **Extended Mono Mode** (when Input 2 unplugged; doubles delay/freeze buffer capacity to ~2.73s, LED 5 lights up).
+        *   *Mid (500..31500)*: Standard **Stereo Input Width** (0% to 100%).
+        *   *CW (> 31500)*: **Dual Mono Mode** (treats Input 1 & 2 as two completely independent mono processors with decorrelated random seeds, independent glitch triggers, independent packet dropouts, and zero crosstalk! LED 4 & 5 light up).
     *   **Y**: Global DSP Routing Preset (`[0..3]`):
         *   **Preset 0 (CCW)**: **Series Standard** (`Chorus -> Codec -> Delay -> Glitcher -> Filter -> Reverb`)
         *   **Preset 1**: **Space Wash** (`Reverb -> Filter -> Chorus -> Delay -> Glitcher -> Codec`)
