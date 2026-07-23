@@ -1999,10 +1999,7 @@ struct GlitcherBlock {
                     }
                 }
 
-                // Force re-trigger on Pulse 1 clock sync trigger
-                if (pulse1_live && p1_rising) {
-                    crossed = true;
-                }
+                // Natural boundary check determines loop completion (norm_loop_size is already clock-synced)
 
                 if (crossed) {
                     trig_out1 = true; // Output loop sync trigger
