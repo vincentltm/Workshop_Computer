@@ -1529,7 +1529,10 @@ struct GlitcherBlock {
 
         bool is_clock_sync = pulse1_live && (clk_period_samples > 240);
         bool eff_glitchInjector = glitchInjector;
-        // p1_gate intentionally excluded: raw clock gate should not force glitcher active
+        if (is_clock_sync) {
+            eff_glitchInjector = false;
+        }
+        // p1_gate excluded: raw clock gate must not force glitcher active (causes clock bleed)
         bool want_active = eff_glitchInjector || freezeGate;
         bool is_loop_frozen = freezeGate || (mainProb >= 32760);
         int32_t speed_q16 = 65536;
@@ -1559,8 +1562,7 @@ struct GlitcherBlock {
             cluster_state += (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - cluster_state) >> 5;
         }
 
-        // Warp input probability curve cubicly for sparser, more musical triggering at medium knob settings.
-        // Same cubic curve for both clocked and free-running — clocked feels identical to free but beat-snapped.
+        // Cubic warp for both clocked and free-running — same sparse feel, glitches snap to clock pulses.
         int32_t mainProbSq = (mainProb * mainProb) >> 15;
         int32_t warpedProb = (mainProbSq * mainProb) >> 15;
 
@@ -2007,10 +2009,8 @@ struct GlitcherBlock {
                     }
                 }
 
-                // In clock-sync mode, beat_rising (p1_rising) marks the beat boundary.
-                // Only force a loop-point jump if the loop has already been running long
-                // enough — don't jump on every beat unconditionally (that leaks the clock).
-                if (is_clock_sync && p1_rising && active_duration_ctr >= (uint32_t)current_loop_len) {
+                // Force re-trigger on Pulse 1 clock sync trigger
+                if (pulse1_live && p1_rising) {
                     crossed = true;
                 }
 
