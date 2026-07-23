@@ -241,14 +241,18 @@ static void bends_load_settings() {
         global_routing_mode = s->routing_mode;
         global_input_width  = s->input_width;
         global_mono_mode    = (s->mono_mode != 0);
-        // Do NOT restore currentPage from flash -- always start on Page 0 (Chorus)
+        if (s->current_page < 6) {
+            currentPage = s->current_page;
+        }
         memcpy(vp, s->vp, sizeof(vp));
         memcpy(freeze_vp, s->freeze_vp, sizeof(freeze_vp));
     } else if (s->magic == 0xBE4D0002u) {
         global_routing_mode = s->routing_mode;
         global_input_width  = s->input_width;
         global_mono_mode    = (s->mono_mode != 0);
-        // Do NOT restore currentPage from flash -- always start on Page 0 (Chorus)
+        if (s->current_page < 6) {
+            currentPage = s->current_page;
+        }
         memcpy(vp, s->vp, sizeof(vp));
     } else if (s->magic == 0xBE4D0001u) {
         global_routing_mode = s->routing_mode;
@@ -327,8 +331,10 @@ public:
     void tick_ui_once();
 
     // Public wrappers so main() can access protected ComputerCard members
-    bool    JackDisconnected(Input i)   { return Disconnected(i); }
-    int32_t ReadKnob(Knob k)            { return KnobVal(k); }
+    bool                 JackDisconnected(Input i)   { return Disconnected(i); }
+    int32_t              ReadKnob(Knob k)            { return KnobVal(k); }
+    ComputerCard::Switch ReadSw()                    { return SwitchVal(); }
+    void                 SetLed(uint32_t idx, uint16_t val) { LedBrightness(idx, val); }
 };
 
 BendsCard card;
@@ -1633,7 +1639,7 @@ void BendsCard::tick_ui_once() {
                 }
             }
             if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000) {
-                if (!settings_adjusted_this_hold && !manual_save_triggered) {
+                if (!manual_save_triggered) {
                     manual_save_triggered = true;
                     bends_save_settings();
                     saveFlashTimer = 600; // 600ms LED confirmation flash
@@ -2479,6 +2485,9 @@ void BendsCard::tick_ui_once() {
             for (int i = 0; i < 6; i++) {
                 bar_leds[i] = (i == global_routing_mode) ? 4095 : 100;
             }
+            if (global_mono_mode) {
+                bar_leds[5] = 4095; // Glowing LED 5 indicates Extended Mono Mode active
+            }
             if (is_locked) {
                 static uint32_t blink_counter = 0;
                 blink_counter++;
@@ -2654,8 +2663,27 @@ int main() {
     g_params[0].grittiness_macro = 16384;
     g_params[1].grittiness_macro = 16384;
 
-    // Load persisted settings (routing mode, input width, mono mode) from flash
-    bends_load_settings();
+    // Check if Switch DOWN is held on power-up for Factory Reset
+    int hold_down_count = 0;
+    for (int i = 0; i < 30; i++) {
+        if (card.ReadSw() == ComputerCard::Switch::Down) {
+            hold_down_count++;
+        }
+        sleep_ms(5);
+    }
+    if (hold_down_count >= 20) {
+        // Factory Reset triggered on power-up!
+        bends_erase_settings();
+        bends_reset_factory_defaults();
+        // Rapid pink/red LED flash confirmation for 1 second
+        for (int b = 0; b < 10; b++) {
+            for (int led = 0; led < 6; led++) card.SetLed(led, (b % 2 == 0) ? 4095 : 0);
+            sleep_ms(100);
+        }
+    } else {
+        // Load persisted settings (routing mode, input width, mono mode, current page, parameter tables) from flash
+        bends_load_settings();
+    }
 
     // Trigger chain visualization on boot
     bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
@@ -2670,13 +2698,13 @@ int main() {
     sleep_ms(10);
 
     // 9. Read initial knob positions (now populated with true physical readings!)
-    //    and engage KnobLocks so they start locked to the page's defaults.
+    //    and engage KnobLocks so they start locked to the active page's defaults.
     smMain = card.ReadKnob(ComputerCard::Knob::Main) << 3;
     smX    = card.ReadKnob(ComputerCard::Knob::X)    << 3;
     smY    = card.ReadKnob(ComputerCard::Knob::Y)    << 3;
-    lockMain.engage(smMain, vp[0][0]);
-    lockX.engage(smX, vp[0][1]);
-    lockY.engage(smY, vp[0][2]);
+    lockMain.engage(smMain, vp[currentPage][0]);
+    lockX.engage(smX, vp[currentPage][1]);
+    lockY.engage(smY, vp[currentPage][2]);
     lockMacro.engage(smMain, grittiness_macro);
 
     // 10. Enter Core 0 UI loop — never returns.
