@@ -389,6 +389,8 @@ struct CodecDemolisherBlock {
     int32_t pop_decayL = 0;
     int32_t pop_decayR = 0;
     int32_t pop_decay_rate = 28000;
+    int32_t vinyl_lpL = 0;
+    int32_t vinyl_lpR = 0;
 
     // Upgraded engines states
     int16_t tape_delayL[128];
@@ -426,6 +428,8 @@ struct CodecDemolisherBlock {
         sub_hpL = sub_hpR = 0;
         howl_fbL = howl_fbR = 0;
         dec_slew_phase = 0;
+        pop_decayL = pop_decayR = 0;
+        vinyl_lpL = vinyl_lpR = 0;
 
         trans_wr = 0;
         mp3_wr = 0;
@@ -601,36 +605,41 @@ struct CodecDemolisherBlock {
             sigR = saturate_q15(sigR + noiseR);
         }
 
-        // ── Stage 0.2: Digital Clock Slip Clicks & Vinyl Pops (Additive, works in silence!) ──
+        // ── Stage 0.2: Warm Vinyl Dust Crackle & Needle Thuds (Low-pass acoustic response) ──
         pop_decayL = (pop_decayL * pop_decay_rate) >> 15;
         pop_decayR = (pop_decayR * pop_decay_rate) >> 15;
 
-        if (pop_prob > 0 && input_amp > 100) {
+        if (pop_prob > 0 && input_amp > 80) {
             vinyl_timer++;
-            // 33.3 RPM is 1.8 seconds = 43200 samples. warps slightly
+            // 33.3 RPM revolution period (~1.8 sec) with subtle speed drift
             uint32_t vinyl_period = 43200 + (fast_rand(rand_seed) & 1023);
             if (vinyl_timer >= vinyl_period) {
                 vinyl_timer = 0;
-                pop_decay_rate = 24000 + (fast_rand(rand_seed) & 2047); // slower decay = deeper scratch thud
-                int32_t impulse = (((int32_t)(fast_rand(rand_seed) & 0xFFFF)) - 32768) * click_depth >> 14; // louder scratch pop
+                pop_decay_rate = 22000 + (fast_rand(rand_seed) & 2047); // warm, deep scratch decay
+                int32_t impulse = (((int32_t)(fast_rand(rand_seed) & 0xFFFF)) - 32768) * click_depth >> 15;
                 pop_decayL = clamp_i32(pop_decayL + impulse, -32768, 32767);
                 pop_decayR = clamp_i32(pop_decayR + impulse, -32768, 32767);
             }
 
             uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
             if ((int32_t)roll < pop_prob) {
-                pop_decay_rate = 26500 + (fast_rand(rand_seed) & 2047); // faster click decay
-                int32_t impulse = (((int32_t)(fast_rand(rand_seed) & 0xFFFF)) - 32768) * click_depth >> 15;
+                pop_decay_rate = 25000 + (fast_rand(rand_seed) & 2047); // soft dust crackle
+                int32_t impulse = (((int32_t)(fast_rand(rand_seed) & 0xFFFF)) - 32768) * click_depth >> 16;
                 pop_decayL = clamp_i32(pop_decayL + impulse, -32768, 32767);
                 
-                int32_t impulseR = impulse + (((((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * click_depth) >> 16);
+                int32_t impulseR = impulse + (((((int32_t)(fast_rand(rand_seed) & 0x1FF)) - 256) * click_depth) >> 17);
                 pop_decayR = clamp_i32(pop_decayR + impulseR, -32768, 32767);
             }
         } else {
             vinyl_timer = 0;
         }
-        sigL = saturate_q15(sigL + pop_decayL);
-        sigR = saturate_q15(sigR + pop_decayR);
+
+        // Low-pass filter the pop impulse through a 1.8kHz acoustic vinyl LPF to eliminate sharp digital PCM spitting
+        vinyl_lpL += (((int32_t)pop_decayL - vinyl_lpL) * 3500) >> 15;
+        vinyl_lpR += (((int32_t)pop_decayR - vinyl_lpR) * 3500) >> 15;
+
+        sigL = saturate_q15(sigL + (int16_t)vinyl_lpL);
+        sigR = saturate_q15(sigR + (int16_t)vinyl_lpR);
 
         // ── Stage 0.5: Digital Hash Noise (Zone 3 of Y) ──
         if (scramble_level > 0) {

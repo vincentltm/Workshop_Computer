@@ -1899,23 +1899,23 @@ void BendsCard::tick_ui_once() {
         int32_t scramble_level = 0;
 
         if (Y < 10922) {
-            // Zone 1: Clean (0) -> Tape Warmth & Vinyl Crackle (33%)
+            // Zone 1: Clean (0) -> Authentic Warm Vinyl Record (33%)
             int32_t ratio = (Y * 32768) / 10922;
-            tape_sat = (24000 * ratio) >> 15;
-            tape_hiss = (25 * ratio) >> 15;
-            pop_prob = (12 * ratio) >> 15;
-            click_ratio = (8000 * ratio) >> 15;
+            tape_sat = (28000 * ratio) >> 15;      // Smooth polynomial tape saturation
+            tape_hiss = (15 * ratio) >> 15;        // Subtle vinyl surface noise / hiss
+            pop_prob = (3 * ratio) >> 15;           // Realistic 1-3 soft dust pops per second
+            click_ratio = (4000 * ratio) >> 15;     // Deep, soft dust thud depth
             mp3_ring_level = 0;
             bad_conn_level = 0;
             sputter_prob = 0;
             scramble_level = 0;
         } else if (Y < 21845) {
-            // Zone 2: Vinyl Crackle -> Lossy MP3 Ringing & Telecom Compression (66%)
+            // Zone 2: Warm Vinyl -> Lossy MP3 Ringing & Telecom Compression (66%)
             int32_t ratio = ((Y - 10922) * 32768) / 10923;
-            tape_sat = 24000 - ((24000 * ratio) >> 15);
-            tape_hiss = 25 - ((25 * ratio) >> 15);
-            pop_prob = 12 - ((12 * ratio) >> 15);
-            click_ratio = 8000 - ((8000 * ratio) >> 15);
+            tape_sat = 28000 - ((28000 * ratio) >> 15);
+            tape_hiss = 15 - ((15 * ratio) >> 15);
+            pop_prob = 3 - ((3 * ratio) >> 15);
+            click_ratio = 4000 - ((4000 * ratio) >> 15);
             mp3_ring_level = (32767 * ratio) >> 15;
             bad_conn_level = (16384 * ratio) >> 15;
             sputter_prob = (30 * ratio) >> 15;
