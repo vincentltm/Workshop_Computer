@@ -117,6 +117,7 @@ struct Core1Params {
     bool no_audio1;
     bool no_audio2;
     bool mono_mode;       // Extended Mono Mode active (Input 2 unplugged + user setting)
+    bool dual_mono_mode;  // Dual Mono Mode active (Switch DOWN + Knob X > 31500)
     bool is_freeze_page;
     bool flash_writing;
     bool pulse1_live;
@@ -134,6 +135,7 @@ static bool g_macro_active = false;
 static int32_t global_input_width = 9830;
 static int32_t global_routing_mode = 0;
 static bool    global_mono_mode    = false; // Extended Mono Mode: doubles delay+glitch time (requires Input 2 unplugged)
+static bool    global_dual_mono_mode = false; // Dual Mono Mode: decorrelated 2-channel independent processing
 static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Routing
 
 // ============================================================================
@@ -218,7 +220,8 @@ struct BendsSettings {
     int32_t  input_width;     // global_input_width
     uint8_t  mono_mode;       // Extended Mono Mode on/off (1/0)
     uint8_t  current_page;    // active page index (0..5)
-    uint8_t  _reserved[10];   // reserved space
+    uint8_t  dual_mono_mode;  // Dual Mono Mode on/off (1/0)
+    uint8_t  _reserved[9];    // reserved space
     int32_t  vp[6][3];        // 18 x 4 = 72 bytes: 6 main page knob states
     int32_t  freeze_vp[3];   // 3 x 4 = 12 bytes: Freeze scrub page knob state
     uint8_t  _pad[18];        // padding so crc lands at offset 126
@@ -238,9 +241,10 @@ static void bends_load_settings() {
         XIP_BASE + BENDS_SETTINGS_FLASH_OFFSET);
     if (s->crc != bends_settings_checksum(*s)) return; // corrupt or blank
     if (s->magic == 0xBE4D0003u) {
-        global_routing_mode = s->routing_mode;
-        global_input_width  = s->input_width;
-        global_mono_mode    = (s->mono_mode != 0);
+        global_routing_mode   = s->routing_mode;
+        global_input_width    = s->input_width;
+        global_mono_mode      = (s->mono_mode != 0);
+        global_dual_mono_mode = (s->dual_mono_mode != 0);
         if (s->current_page < 6) {
             currentPage = s->current_page;
         }
@@ -267,14 +271,15 @@ static void bends_save_settings() {
     static uint8_t page_buf[FLASH_PAGE_SIZE]; // 256 bytes
     memset(page_buf, 0xFF, sizeof(page_buf));
     BendsSettings *s = reinterpret_cast<BendsSettings *>(page_buf);
-    s->magic        = 0xBE4D0003u;
-    s->routing_mode = global_routing_mode;
-    s->input_width  = global_input_width;
-    s->mono_mode    = global_mono_mode ? 1 : 0;
-    s->current_page = (uint8_t)currentPage;
+    s->magic          = 0xBE4D0003u;
+    s->routing_mode   = global_routing_mode;
+    s->input_width    = global_input_width;
+    s->mono_mode      = global_mono_mode ? 1 : 0;
+    s->dual_mono_mode = global_dual_mono_mode ? 1 : 0;
+    s->current_page   = (uint8_t)currentPage;
     memcpy(s->vp, vp, sizeof(vp));
     memcpy(s->freeze_vp, freeze_vp, sizeof(freeze_vp));
-    s->crc          = bends_settings_checksum(*s);
+    s->crc            = bends_settings_checksum(*s);
 
     // Pause Core 1 so it cannot fetch flash instructions during erase/program.
     multicore_lockout_start_blocking();
@@ -286,10 +291,11 @@ static void bends_save_settings() {
 }
 
 static void bends_reset_factory_defaults() {
-    global_routing_mode = 0; // Preset 0: Standard
-    global_input_width  = 32767;
-    global_mono_mode    = false;
-    currentPage         = 0;
+    global_routing_mode   = 0; // Preset 0: Standard
+    global_input_width    = 32767;
+    global_mono_mode      = false;
+    global_dual_mono_mode = false;
+    currentPage           = 0;
     static const int32_t default_vp[6][3] = {
         {     0, 12000, 16384 },
         {     0, 10000, 12000 },
@@ -406,7 +412,7 @@ __attribute__((noinline)) void __not_in_flash_func(run_glitcher)(int16_t &L, int
                      pulse2_live, p2_rising, p2_val,
                      clk_period_samples, clk_timer,
                      p.glitch_loop_size, p.glitch_target_offset, p.glitch_speed_q16,
-                     p.mono_mode);
+                     p.mono_mode, p.dual_mono_mode);
 }
 
 __attribute__((noinline)) void __not_in_flash_func(run_filter)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
@@ -1728,15 +1734,17 @@ void BendsCard::tick_ui_once() {
             param_changed = true;
             last_modified_macro_knob = 1;
         }
-        // Mono Mode toggle: X knob fully left (<500) while Input 2 is unplugged
-        if (debounced_no_audio2) {
-            bool want_mono = (nextWidth < 500);
-            if (global_mono_mode != want_mono) {
-                global_mono_mode = want_mono;
-                settings_adjusted_this_hold = true;
-                param_changed = true;
-                routing_changed_this_hold = true;
-            }
+        // Mono Mode & Dual Mono Mode toggle via Knob X in Macro mode:
+        // Knob X < 500 (CCW): Extended Mono Mode (when Input 2 unplugged)
+        // Knob X > 31500 (CW): Dual Mono Mode (decorrelated 2-channel independent processing)
+        bool want_mono = (nextWidth < 500) && debounced_no_audio2;
+        bool want_dual_mono = (nextWidth > 31500);
+        if (global_mono_mode != want_mono || global_dual_mono_mode != want_dual_mono) {
+            global_mono_mode = want_mono;
+            global_dual_mono_mode = want_dual_mono;
+            settings_adjusted_this_hold = true;
+            param_changed = true;
+            routing_changed_this_hold = true;
         }
         int32_t nextPresetKnob = lockY.update(dzY);
         int32_t nextMode = nextPresetKnob >> 13; // divides by 8192

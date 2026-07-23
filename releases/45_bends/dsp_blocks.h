@@ -1509,7 +1509,7 @@ struct GlitcherBlock {
                  bool pulse2_live, bool p2_rising, bool p2_gate,
                  uint32_t clk_period_samples, uint32_t clk_timer,
                  int32_t target_loop_size, int32_t target_offset, int32_t target_speed_q16,
-                 bool mono_mode = false)
+                 bool mono_mode = false, bool dual_mono_mode = false)
     {
         const int32_t buf_mask = mono_mode ? (BUF_FULL - 1) : (BUF_HALF - 1);
         const int32_t buf_size = mono_mode ? BUF_FULL : BUF_HALF;
@@ -1549,6 +1549,9 @@ struct GlitcherBlock {
         cluster_timer++;
         if (cluster_timer >= 256) {
             cluster_timer = 0;
+            if (dual_mono_mode) {
+                rand_seed ^= 0x55555555u; // Decorrelate 2-channel random seed sequence in Dual Mono mode
+            }
             cluster_state += (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - cluster_state) >> 5;
         }
 
