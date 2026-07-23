@@ -2046,11 +2046,9 @@ struct GlitcherBlock {
                     }
 
                     if (is_clock_sync) {
-                        if (current_loop_len < (int32_t)(clk_period_samples >> 1)) {
-                            loop_prob = (finalProb * size_factor) >> 15;
-                        } else {
-                            loop_prob = finalProb;
-                        }
+                        // Use finalProb directly for loop continuation so density feels
+                        // consistent with trigger probability — not inflated by size_factor.
+                        loop_prob = finalProb;
                     }
 
                     if (finalProb >= 32760) {
@@ -2061,16 +2059,9 @@ struct GlitcherBlock {
                     bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
                         if (is_clock_sync) {
-                            if (p1_rising) {
-                                keep_looping = (roll < (uint32_t)loop_prob);
-                            } else {
-                                // For smaller loop subdivisions (< 1/2 beat), allow early exit to avoid buzzy chaos
-                                if (current_loop_len < (int32_t)(clk_period_samples >> 1)) {
-                                    keep_looping = (roll < (uint32_t)loop_prob);
-                                } else {
-                                    keep_looping = true;
-                                }
-                            }
+                            // On every clock boundary (rising or internal sub-div), re-roll with finalProb.
+                            // No more forced keep_looping=true — glitch density should match the knob.
+                            keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                         } else {
                             keep_looping = keep_looping || p1_gate;
                         }
