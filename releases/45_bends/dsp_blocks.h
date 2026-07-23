@@ -947,32 +947,26 @@ struct CodecDemolisherBlock {
         int16_t out_wetL = wetL;
         int16_t out_wetR = wetR;
 
-        // Sputter / Crackle probability scales with Y (ringingXor) and strength (Main)
+        // ── 5. CD-Skipping Micro-Stutter Repeats (sputter_prob) ─────────
         if (sputter_prob > 0) {
             uint32_t roll = fast_rand(rand_seed) & 0x7FFF;
 
             if (sputter_timer > 0) {
                 sputter_timer--;
                 if (sputter_active) {
-                    int16_t noise = (int16_t)(fast_rand(rand_seed) & 0xFFFF);
-                    int32_t wet_amp = (wetL < 0 ? -wetL : wetL) + (wetR < 0 ? -wetR : wetR);
-                    int32_t sputter_scale = wet_amp >> 4;
-                    if (sputter_scale > 600) sputter_scale = 600;
-                    out_wetL = (noise * (int16_t)sputter_scale) >> 15;
-                    out_wetR = (noise * (int16_t)sputter_scale) >> 15;
+                    // CD-skipping repeat: loop audio fragment from trans_history
+                    uint8_t read_idx = (trans_wr - 16 - (sputter_timer & 63)) & 0xFF;
+                    out_wetL = trans_historyL[read_idx];
+                    out_wetR = trans_historyR[read_idx];
                 } else {
-                    out_wetL = 0;
-                    out_wetR = 0;
+                    out_wetL = (out_wetL * 3) >> 3; // soft drop burst
+                    out_wetR = (out_wetR * 3) >> 3;
                 }
             } else {
                 sputter_active = false;
                 if ((int32_t)roll < sputter_prob) {
-                    sputter_timer = 5 + (((fast_rand(rand_seed) & 0xFFFF) * 115) >> 16);
-                    sputter_active = ((fast_rand(rand_seed) & 0x7FFF) < 9830);
-                    if (!sputter_active) {
-                        out_wetL = 0;
-                        out_wetR = 0;
-                    }
+                    sputter_timer = 20 + (((fast_rand(rand_seed) & 0xFFFF) * 350) >> 16); // 10ms - 20ms stutter pulse
+                    sputter_active = ((fast_rand(rand_seed) & 0x7FFF) < 22000);
                 }
             }
         } else {

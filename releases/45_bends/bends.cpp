@@ -1888,7 +1888,8 @@ void BendsCard::tick_ui_once() {
         int32_t fuzz_level = (X * X) >> 15; // Smooth quadratic fuzz / bit-reduction curve
         int32_t mp3_ring_level = 0;
 
-        // Knob Y: Corruption, Vinyl Crackle, Lossy MP3 Ringing & Packet Dropouts
+        // Knob Y: 4 Distinct Temporal & Rhythmic Corruption Zones across the knob sweep
+        // 0% = Clean, 25% = Vinyl Dust Pops, 50% = CD-Skip Stutters, 75% = Packet Drops, 100% = Data Shred
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
         int32_t tape_hicut = 0;
@@ -1898,37 +1899,36 @@ void BendsCard::tick_ui_once() {
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 10922) {
-            // Zone 1: Clean (0) -> Authentic Warm Vinyl Record (33%)
-            int32_t ratio = (Y * 32768) / 10922;
-            tape_sat = (28000 * ratio) >> 15;      // Smooth polynomial tape saturation
-            tape_hiss = (15 * ratio) >> 15;        // Subtle vinyl surface noise / hiss
-            pop_prob = (3 * ratio) >> 15;           // Realistic 1-3 soft dust pops per second
-            click_ratio = (4000 * ratio) >> 15;     // Deep, soft dust thud depth
-            mp3_ring_level = 0;
-            bad_conn_level = 0;
+        if (Y < 8192) {
+            // Zone 1 (0% -> 25%): Organic Vinyl Dust Pops & Surface Crackle
+            int32_t ratio = (Y * 32768) / 8192;
+            pop_prob = (14 * ratio) >> 15;        // Organic needle pops and dust crackle
+            click_ratio = (6000 * ratio) >> 15;   // Low-pass filtered dust thud depth
             sputter_prob = 0;
+            bad_conn_level = 0;
             scramble_level = 0;
-        } else if (Y < 21845) {
-            // Zone 2: Warm Vinyl -> Lossy MP3 Ringing & Telecom Compression (66%)
-            int32_t ratio = ((Y - 10922) * 32768) / 10923;
-            tape_sat = 28000 - ((28000 * ratio) >> 15);
-            tape_hiss = 15 - ((15 * ratio) >> 15);
-            pop_prob = 3 - ((3 * ratio) >> 15);
-            click_ratio = 4000 - ((4000 * ratio) >> 15);
-            mp3_ring_level = (32767 * ratio) >> 15;
-            bad_conn_level = (16384 * ratio) >> 15;
-            sputter_prob = (30 * ratio) >> 15;
+        } else if (Y < 16384) {
+            // Zone 2 (25% -> 50%): CD-Skip Buffer Stutters & Temporal Micro-Frame Repeats
+            int32_t ratio = ((Y - 8192) * 32768) / 8192;
+            pop_prob = 14 - ((14 * ratio) >> 15);
+            click_ratio = 6000 - ((6000 * ratio) >> 15);
+            sputter_prob = (80 * ratio) >> 15;    // Skipping CD player buffer stutters (10-20ms frame loops)
+            bad_conn_level = 0;
             scramble_level = 0;
-        } else {
-            // Zone 3: Lossy MP3 Ringing -> Bad Connection Packet Drops & Data Shredding (100%)
-            int32_t ratio = ((Y - 21845) * 32768) / 10922;
-            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
-            bad_conn_level = 16384 + ((16383 * ratio) >> 15);
-            sputter_prob = 30 + ((30 * ratio) >> 15);
-            scramble_level = (32767 * ratio) >> 15;
+        } else if (Y < 24576) {
+            // Zone 3 (50% -> 75%): Lossy Telecom Packet Drops & Gilbert-Elliott Framing Skips
+            int32_t ratio = ((Y - 16384) * 32768) / 8192;
+            sputter_prob = 80 - ((80 * ratio) >> 15);
+            bad_conn_level = (32767 * ratio) >> 15; // Bursty network packet drops (100-300ms dropouts)
+            scramble_level = 0;
             pop_prob = 0;
-            click_ratio = 0;
+        } else {
+            // Zone 4 (75% -> 100%): Bit-Mask Data Shredding & Dynamic Byte Scrambling
+            int32_t ratio = ((Y - 24576) * 32768) / 8192;
+            bad_conn_level = 32767;
+            scramble_level = (32767 * ratio) >> 15; // Memory bit-flipping and XOR byte destruction
+            sputter_prob = 0;
+            pop_prob = 0;
         }
 
         // Link MP3 low-bitrate filter roll-off directly to Knob X's MP3 Ringing level
