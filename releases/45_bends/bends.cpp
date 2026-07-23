@@ -2009,9 +2009,8 @@ void BendsCard::tick_ui_once() {
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
 
         // CV1 global circuit bending injection:
-        // Inject vinyl clicks and CD stutters when CV1 is plugged in
-        // (CV1 is now dedicated solely to the digital loss engine, using absolute magnitude)
-        if (cv1_live && cv1_abs > 100) {
+        // Inject vinyl clicks and CD stutters when CV1 voltage or Button 1 is active
+        if (cv1_abs > 100) {
             // Overall mix injection
             p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 16), 0, 32767);
 
@@ -2136,7 +2135,7 @@ void BendsCard::tick_ui_once() {
             // Key 1 zone (800-1900): mix scales 0→24000 over the full 1100-unit span.
             // Key 2 zone (>1900):    mix scales 24000→32767 over the final 148 units.
             // glitch_size always comes from Page 3 X knob.
-            if (cv2_live && cv2_abs > 800) {
+            if (cv2_abs > 800) {
                 int32_t mix_inject;
                 if (cv2_abs > 1900) {
                     // Key 2 zone: ramp 24000→32767 over the remaining 148 units
@@ -2192,7 +2191,7 @@ void BendsCard::tick_ui_once() {
             int32_t active_clk = g_clk_period_samples;
             int32_t size = p.glitch_size;
             // Sensible default minimum size during button/CV exploration to prevent buzzy ranges
-            if (cv2_live && cv2_abs > 800 && size < 4000) {
+            if (cv2_abs > 800 && size < 4000) {
                 size = 4000;
             }
             int32_t loop_size = 128;
