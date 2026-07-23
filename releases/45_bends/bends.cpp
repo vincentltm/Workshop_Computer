@@ -1887,32 +1887,29 @@ void BendsCard::tick_ui_once() {
         int32_t fuzz_level = 0;
         int32_t decimate_level = 0;
 
-        // Knob X Transitions (Islands & Bridges)
-        if (X < 5000) {
-            mp3_ring_level = 32767;
+        // Knob X Transitions: Smooth progression across 3 degradation zones
+        // 0% = Clean, 1-33% = Lossy MP3 Ringing, 33-66% = Warm Fuzz, 66-100% = Bitcrush Decimation
+        if (X < 10922) {
+            // Zone 1: Clean (0) -> Lossy MP3 Ringing (100%)
+            int32_t ratio = (X * 32768) / 10922;
+            mp3_ring_level = (32767 * ratio) >> 15;
             fuzz_level = 0;
             decimate_level = 0;
-        } else if (X < 12000) {
-            int32_t ratio = (X - 5000) * 32768 / 7000;
+        } else if (X < 21845) {
+            // Zone 2: Lossy MP3 Ringing -> Warm Fuzz / Compander
+            int32_t ratio = ((X - 10922) * 32768) / 10923;
             mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
             fuzz_level = (32767 * ratio) >> 15;
             decimate_level = 0;
-        } else if (X < 20000) {
-            mp3_ring_level = 0;
-            fuzz_level = 32767;
-            decimate_level = 0;
-        } else if (X < 27000) {
-            int32_t ratio = (X - 20000) * 32768 / 7000;
+        } else {
+            // Zone 3: Warm Fuzz -> Extreme Bitcrush Decimation
+            int32_t ratio = ((X - 21845) * 32768) / 10922;
             mp3_ring_level = 0;
             fuzz_level = 32767 - ((32767 * ratio) >> 15);
             decimate_level = (32767 * ratio) >> 15;
-        } else {
-            mp3_ring_level = 0;
-            fuzz_level = 0;
-            decimate_level = 32767;
         }
 
-        // Knob Y Transitions (Islands & Bridges)
+        // Knob Y Transitions: 0% = Clean Tape Warmth, 25% = Vinyl Dust, 50% = Telecom Dropouts, 75%+ = Data Shred
         int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
         int32_t tape_hicut = 0;
@@ -1922,47 +1919,45 @@ void BendsCard::tick_ui_once() {
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 5000) {
-            tape_sat = 30000;
-            tape_hiss = 30;
-            pop_prob = 12;
+        if (Y < 8192) {
+            // Zone 0: Clean Tape Warmth (0) -> Gentle Vinyl Dust (25%)
+            int32_t ratio = (Y * 32768) / 8192;
+            tape_sat = 16384 + ((12000 * ratio) >> 15);
+            tape_hiss = (20 * ratio) >> 15;
+            pop_prob = (8 * ratio) >> 15;
             bad_conn_level = 0;
             sputter_prob = 0;
             scramble_level = 0;
-            click_ratio = 12000;
-        } else if (Y < 12000) {
-            int32_t ratio = (Y - 5000) * 32768 / 7000;
-            tape_sat = 30000 - ((30000 * ratio) >> 15);
-            tape_hiss = 30 - ((30 * ratio) >> 15);
-            pop_prob = 12 - ((12 * ratio) >> 15);
+            click_ratio = (6000 * ratio) >> 15;
+        } else if (Y < 16384) {
+            // Zone 1: Vinyl Dust -> Lossy Telecom & Bad Connection Dropouts
+            int32_t ratio = ((Y - 8192) * 32768) / 8192;
+            tape_sat = 28384 - ((28384 * ratio) >> 15);
+            tape_hiss = 20 - ((20 * ratio) >> 15);
+            pop_prob = 8 - ((8 * ratio) >> 15);
             bad_conn_level = (32767 * ratio) >> 15;
-            sputter_prob = (50 * ratio) >> 15;
+            sputter_prob = (40 * ratio) >> 15;
             scramble_level = 0;
-            click_ratio = 12000 - ((12000 * ratio) >> 15);
-        } else if (Y < 20000) {
+            click_ratio = 6000 - ((6000 * ratio) >> 15);
+        } else if (Y < 24576) {
+            // Zone 2: Bad Connection Dropouts -> Bursty Packet Stutters
+            int32_t ratio = ((Y - 16384) * 32768) / 8192;
             tape_sat = 0;
             tape_hiss = 0;
             pop_prob = 0;
             bad_conn_level = 32767;
-            sputter_prob = 50;
-            scramble_level = 0;
-            click_ratio = 0;
-        } else if (Y < 27000) {
-            int32_t ratio = (Y - 20000) * 32768 / 7000;
-            tape_sat = 0;
-            tape_hiss = 0;
-            pop_prob = 0;
-            bad_conn_level = 32767 - ((20000 * ratio) >> 15);
-            sputter_prob = 50 - ((30 * ratio) >> 15);
-            scramble_level = (32767 * ratio) >> 15;
+            sputter_prob = 40 + ((20 * ratio) >> 15);
+            scramble_level = (16384 * ratio) >> 15;
             click_ratio = 0;
         } else {
+            // Zone 3: Packet Stutters -> Extreme Data Shredding & Memory Scrambling
+            int32_t ratio = ((Y - 24576) * 32768) / 8192;
             tape_sat = 0;
             tape_hiss = 0;
             pop_prob = 0;
-            bad_conn_level = 12767;
-            sputter_prob = 20;
-            scramble_level = 32767;
+            bad_conn_level = 32767 - ((16384 * ratio) >> 15);
+            sputter_prob = 60 - ((40 * ratio) >> 15);
+            scramble_level = 16384 + ((16383 * ratio) >> 15);
             click_ratio = 0;
         }
 

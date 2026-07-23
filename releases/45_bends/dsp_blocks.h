@@ -605,7 +605,7 @@ struct CodecDemolisherBlock {
         pop_decayL = (pop_decayL * pop_decay_rate) >> 15;
         pop_decayR = (pop_decayR * pop_decay_rate) >> 15;
 
-        if (pop_prob > 0) {
+        if (pop_prob > 0 && input_amp > 100) {
             vinyl_timer++;
             // 33.3 RPM is 1.8 seconds = 43200 samples. warps slightly
             uint32_t vinyl_period = 43200 + (fast_rand(rand_seed) & 1023);
