@@ -1817,17 +1817,15 @@ struct GlitcherBlock {
             int32_t norm_loop_size = 512;
             if (pulse1_live && clk_period_samples > 240) {
                 // Clock-synced subdivisions (straight & dotted: 13 steps)
-                static const int32_t clk_div_num[13] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128};
+                // clk_div_num / 4 maps X knob to musical beat subdivisions:
+                //   step 0 = 1/4  beat (1/16 note),  step 7 = 2 beats,  step 12 = 4 beats max
+                static const int32_t clk_div_num[13] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 64};
                 int32_t num_steps = 13;
                 int32_t size_sq = (size * size) >> 15;
                 int32_t step = (size_sq * num_steps) >> 15;
                 if (step < 0) step = 0;
                 if (step > num_steps - 1) step = num_steps - 1;
-                if (step == num_steps - 1) {
-                    norm_loop_size = buf_size; // Max knob position ALWAYS freezes full buffer capacity!
-                } else {
-                    norm_loop_size = (clk_period_samples * clk_div_num[step]) / 16;
-                }
+                norm_loop_size = (clk_period_samples * clk_div_num[step]) / 4;
                 if (norm_loop_size < 128) norm_loop_size = 128;
                 if (norm_loop_size > buf_size) norm_loop_size = buf_size;
             } else {
