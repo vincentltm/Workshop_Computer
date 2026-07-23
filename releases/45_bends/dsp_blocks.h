@@ -1646,20 +1646,6 @@ struct GlitcherBlock {
                 clock_pulse_counter = 0;
                 trig_out1 = true; // Output loop sync pulse
 
-                // CD-skip buffer sliding under chaos:
-                int32_t chaos_depth = (globalNoiseScale - 16384);
-                if (chaos_depth < 0) chaos_depth = 0;
-                int32_t abs_cv2 = cv2Corruption < 0 ? -cv2Corruption : cv2Corruption;
-                chaos_depth += abs_cv2 * 8;
-                if (chaos_depth > 2000) {
-                    uint32_t slip_roll = fast_rand(rand_seed) & 0x7FFF;
-                    int32_t slip_prob = (chaos_depth * 10) >> 15;
-                    if ((int32_t)slip_roll < slip_prob) {
-                        int32_t slip_samples = (((int32_t)(fast_rand(rand_seed) & 0x7FFF)) - 16384) >> 4;
-                        freeze_wr = (freeze_wr + slip_samples) & buf_mask;
-                    }
-                }
-
                 // Spawn next grain repeat at updated position/length targets
                 xfade_rd = loop_start + rd_q16;
                 rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
@@ -1669,52 +1655,7 @@ struct GlitcherBlock {
                 xfade_phase = 0;
 
                 current_loop_len = loop_size;
-
-                // ── AUTO-CHAOS DRIFT MODE: scrubOffset CCW (< 1600 / 5% Main Knob) ───────
-                // Slowly wanders the read head across the circular buffer for continuous ambient textures.
-                if (is_loop_frozen && scrubOffset < 1600) {
-                    auto_chaos_phase += 16; // ~0.25Hz wander LFO @ 24kHz
-                    int32_t wander = lookup_sine(auto_chaos_phase); // [-32768, 32767]
-                    int32_t buf_cap = mono_mode ? BUF_FULL : BUF_HALF;
-                    active_offset = (((wander + 32768) * (buf_cap - 1)) >> 16) & buf_mask;
-                } else if (is_loop_frozen && scrubOffset > 30500) {
-                    // ── SLICER MODE: scrubOffset fully right (> 30500) ──────────────
-                    // On every loop boundary, jump to a new random position anywhere in
-                    // the full frozen buffer — builds rhythmic stutters and buffer chops.
-                    active_offset = (int32_t)(fast_rand(rand_seed) & buf_mask);
-                } else {
-                    // Normal freeze: track scrub position with 16-sample hysteresis and snap to zero crossing
-                    int32_t diff = target_offset - active_offset;
-                    if (diff < 0) diff = -diff;
-                    if (diff > 16) {
-                        // Search for the nearest zero crossing within a ±128 sample window around target_offset
-                        int32_t best_dist = 999999;
-                        int32_t best_offset = target_offset;
-                        for (int d = -128; d <= 128; d++) {
-                            int32_t test_offset = (target_offset + d) & buf_mask;
-                            // Calculate circular buffer index relative to freeze_wr
-                            int32_t idx = ((int32_t)freeze_wr - test_offset) & buf_mask;
-                            int32_t nxt = (idx + 1) & buf_mask;
-                            int16_t val0 = decode_mulaw(buf[idx]);
-                            int16_t val1 = decode_mulaw(buf[nxt]);
-                            
-                            // Check for zero crossing
-                            if ((val0 <= 0 && val1 > 0) || (val0 >= 0 && val1 < 0)) {
-                                int32_t dist = d < 0 ? -d : d;
-                                if (dist < best_dist) {
-                                    best_dist = dist;
-                                    best_offset = test_offset;
-                                }
-                            }
-                        }
-                        if (best_dist < 128) {
-                            active_offset = best_offset;
-                        } else {
-                            active_offset = target_offset;
-                        }
-                    }
-                }
-
+                active_offset = target_offset;
                 loop_start = (((int32_t)freeze_wr - active_offset) & buf_mask) << 16;
             }
 
