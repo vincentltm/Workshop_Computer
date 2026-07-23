@@ -66,7 +66,7 @@ The virtual page number corresponds to the glowing LED (0 through 5).
 | **2** | **Multi-Tap Delay** | Delay Wet/Dry Mix | Delay Time (Sync subdivisions if clocked) | Delay Feedback (Overdrives into XOR glitches) |
 | **3** | **Glitcher / Freeze** | *Unfrozen*: Glitch Mix/Prob<br>*Frozen*: Loop Scrub Position | *Unfrozen*: Granular Loop Size<br>*Frozen*: Loop Length | *Unfrozen*: Playback Speed (Quantized)<br>*Frozen*: Playback Speed & Pitch |
 | **4** | **Resonant Filter** | Cutoff (Lowpass CCW, Highpass CW) | Filter Resonance (Q) | Wavefolder Grit (Drive & Fuzz) |
-| **5** | **Schroeder Reverb** | Reverb Wet/Dry Mix | Room Decay Time | Reverb High-Frequency Damping |
+| **5** | **Reverb Engine** | Reverb Wet/Dry Mix | Bipolar Reverb Type & Size<br>(*CCW*: OP-1 Spring Tank, *CW*: Ambient Hall) | Reverb High-Frequency Damping & Circuit-Bent Jitter |
 
 ---
 
@@ -82,13 +82,15 @@ Simulates vintage telecom and digital compression failures. Combines a polynomia
 Features a PT2399-style slow-clock decimation engine. At high delay times, the sample rate drops, introducing clock whine and crunch. If a clock is patched into `Pulse In 1`, the time parameter maps Knob X to 10 rhythmic beat divisions (unclogged, dotted, triplet subdivisions).
 
 ### Stage 4: Granular Glitcher
-A phrase-sampler that records continuous stereo audio into a circular SRAM buffer. It supports real-time stuttering, random pitch-shifting, and phrase looping. In freeze mode (Page 3 when frozen), the playback head is scrubbed manually using the Main knob, with speed and window size controlled by X and Y.
+A phrase-sampler that records continuous stereo audio into a circular SRAM buffer. It supports real-time stuttering, random pitch-shifting, and phrase looping. In freeze mode (Page 3 when frozen), the playback head is scrubbed manually using the Main knob (or set fully CCW for Auto-Chaos Drift), with speed/pitch and window size controlled by Y and X.
 
 ### Stage 5: Resonant Filter & Wavefolder
 Uses a corrected Chamberlin SVF. The input can be overdriven up to 8x, routed through a sine-lookup wavefolder, and boosted with high-gain digital fuzz. An envelope-following feed-forward compressor compensates for volume spikes during wavefolding and self-oscillation.
 
-### Stage 6: Schroeder Reverb
-A retro plate network containing 4 comb filters and 2 all-pass filters per side. In circuit-bent mode (activated by high damping/macro levels), random address jitter/flutter is injected into the read pointers, and output decimation is engaged to yield lo-fi, degraded digital space.
+### Stage 6: Dual Reverb Engine (Spring & Ambient Hall)
+Features a dual-mode Schroeder-Dattorro reverb network controlled by Knob X:
+* **Counter-Clockwise (CCW < 50%)**: **OP-1 Style Spring Reverb Engine**. Applies all-pass phase dispersion to generate iconic metallic "spring drip" / "boing" chirps on percussive transients, high-pass sub-bass filtering, and 14Hz spring tank flutter.
+* **Clockwise (CW > 50%)**: **Lush Ambient Hall & Plate Engine**. Delivers smooth diffusion, wide stereo decorrelation, and near-infinite cathedral washes at high size settings.
 
 ---
 
