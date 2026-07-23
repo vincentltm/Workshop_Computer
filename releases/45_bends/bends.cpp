@@ -215,7 +215,7 @@ static uint32_t saveFlashTimer = 0;         // ms remaining for manual save LED 
 static uint32_t factoryResetFlashTimer = 0; // ms remaining for factory reset LED animation
 
 struct BendsSettings {
-    uint32_t magic;           // 0xBE4D0003 -- version tag v3 (full 7-page preset)
+    uint32_t magic;           // 0xBE4D0004 -- version tag v4 (full 7-page preset + dual mono)
     int32_t  routing_mode;    // global_routing_mode (0-3)
     int32_t  input_width;     // global_input_width
     uint8_t  mono_mode;       // Extended Mono Mode on/off (1/0)
@@ -240,28 +240,15 @@ static void bends_load_settings() {
     const BendsSettings *s = reinterpret_cast<const BendsSettings *>(
         XIP_BASE + BENDS_SETTINGS_FLASH_OFFSET);
     if (s->crc != bends_settings_checksum(*s)) return; // corrupt or blank
-    if (s->magic == 0xBE4D0003u) {
-        global_routing_mode   = s->routing_mode;
+    if (s->magic == 0xBE4D0004u) {
+        global_routing_mode   = (s->routing_mode >= 0 && s->routing_mode <= 3) ? s->routing_mode : 0;
         global_input_width    = s->input_width;
-        global_mono_mode      = (s->mono_mode != 0);
-        global_dual_mono_mode = (s->dual_mono_mode != 0);
-        if (s->current_page < 6) {
-            currentPage = s->current_page;
-        }
+        global_mono_mode      = (s->mono_mode == 1);
+        global_dual_mono_mode = (s->dual_mono_mode == 1);
+        // Always start on Page 0 (Chorus) on boot so navigation is predictable & intuitive
+        currentPage = 0;
         memcpy(vp, s->vp, sizeof(vp));
         memcpy(freeze_vp, s->freeze_vp, sizeof(freeze_vp));
-    } else if (s->magic == 0xBE4D0002u) {
-        global_routing_mode = s->routing_mode;
-        global_input_width  = s->input_width;
-        global_mono_mode    = (s->mono_mode != 0);
-        if (s->current_page < 6) {
-            currentPage = s->current_page;
-        }
-        memcpy(vp, s->vp, sizeof(vp));
-    } else if (s->magic == 0xBE4D0001u) {
-        global_routing_mode = s->routing_mode;
-        global_input_width  = s->input_width;
-        global_mono_mode    = (s->mono_mode != 0);
     }
 }
 
@@ -271,7 +258,7 @@ static void bends_save_settings() {
     static uint8_t page_buf[FLASH_PAGE_SIZE]; // 256 bytes
     memset(page_buf, 0xFF, sizeof(page_buf));
     BendsSettings *s = reinterpret_cast<BendsSettings *>(page_buf);
-    s->magic          = 0xBE4D0003u;
+    s->magic          = 0xBE4D0004u;
     s->routing_mode   = global_routing_mode;
     s->input_width    = global_input_width;
     s->mono_mode      = global_mono_mode ? 1 : 0;
@@ -2672,27 +2659,8 @@ int main() {
     g_params[0].grittiness_macro = 16384;
     g_params[1].grittiness_macro = 16384;
 
-    // Check if Switch DOWN is held on power-up for Factory Reset
-    int hold_down_count = 0;
-    for (int i = 0; i < 30; i++) {
-        if (card.ReadSw() == ComputerCard::Switch::Down) {
-            hold_down_count++;
-        }
-        sleep_ms(5);
-    }
-    if (hold_down_count >= 20) {
-        // Factory Reset triggered on power-up!
-        bends_erase_settings();
-        bends_reset_factory_defaults();
-        // Rapid pink/red LED flash confirmation for 1 second
-        for (int b = 0; b < 10; b++) {
-            for (int led = 0; led < 6; led++) card.SetLed(led, (b % 2 == 0) ? 4095 : 0);
-            sleep_ms(100);
-        }
-    } else {
-        // Load persisted settings (routing mode, input width, mono mode, current page, parameter tables) from flash
-        bends_load_settings();
-    }
+    // Load persisted settings (routing mode, input width, mono mode, current page, parameter tables) from flash
+    bends_load_settings();
 
     // Trigger chain visualization on boot
     bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
@@ -2703,11 +2671,27 @@ int main() {
     // 7. Launch Core 1 (starts the background ADC interrupts & DMA).
     multicore_launch_core1(core1_entry);
 
-    // 8. Sleep for 10 ms to let the background ADC/multiplexer interrupts populate the knobs array.
-    sleep_ms(10);
+    // 8. Sleep for 15 ms to let the background ADC/multiplexer interrupts populate true physical knob & switch values.
+    sleep_ms(15);
 
-    // 9. Read initial knob positions (now populated with true physical readings!)
-    //    and engage KnobLocks so they start locked to the active page's defaults.
+    // 9. Check if Switch DOWN is physically held on power-up for Factory Reset
+    int hold_down_count = 0;
+    for (int i = 0; i < 20; i++) {
+        if (card.ReadSw() == ComputerCard::Switch::Down) {
+            hold_down_count++;
+        }
+        sleep_ms(10);
+    }
+    if (hold_down_count >= 15) {
+        // Factory Reset triggered by physically holding Switch DOWN at boot!
+        bends_erase_settings();
+        bends_reset_factory_defaults();
+        bends_save_settings();
+        saveFlashTimer = 600;
+    }
+
+    // 10. Read initial knob positions (populated with true physical readings!)
+    //     and engage KnobLocks so they start locked to the active page's defaults.
     smMain = card.ReadKnob(ComputerCard::Knob::Main) << 3;
     smX    = card.ReadKnob(ComputerCard::Knob::X)    << 3;
     smY    = card.ReadKnob(ComputerCard::Knob::Y)    << 3;
@@ -2716,6 +2700,6 @@ int main() {
     lockY.engage(smY, vp[currentPage][2]);
     lockMacro.engage(smMain, grittiness_macro);
 
-    // 10. Enter Core 0 UI loop — never returns.
+    // 11. Enter Core 0 UI loop — never returns.
     card.run_core0_ui_loop();
 }
