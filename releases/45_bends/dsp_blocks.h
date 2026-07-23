@@ -1559,9 +1559,14 @@ struct GlitcherBlock {
         }
 
         // Warp input probability curve cubicly for sparser, more musical triggering at medium knob settings.
-        // Same cubic response whether clocked or free-running for a consistent feel.
-        int32_t mainProbSq = (mainProb * mainProb) >> 15;
-        int32_t warpedProb = (mainProbSq * mainProb) >> 15;
+        // If clocked, use a linear response so stutters trigger easily and feel responsive.
+        int32_t warpedProb = 0;
+        if (pulse1_live) {
+            warpedProb = mainProb;
+        } else {
+            int32_t mainProbSq = (mainProb * mainProb) >> 15;
+            warpedProb = (mainProbSq * mainProb) >> 15;
+        }
 
         // Modulate probability with cluster state, scaling down depth near 0% and 100% knob
         int32_t mod_depth = (mainProb * (32767 - mainProb)) >> 14;
@@ -1791,10 +1796,8 @@ struct GlitcherBlock {
                 if (!mono_mode) buf[BUF_HALF + idx] = encode_mulaw(newR);
             }
 
-            int32_t mix_coef = 32767;
-            if (mainProb < 8192) {
-                mix_coef = (mainProb * 32767) / 8192;
-            }
+            int32_t mix_coef = (mainProb * 5) >> 1;
+            if (mix_coef > 32767) mix_coef = 32767;
             outL = lerp_q15(inL, sL, (int16_t)mix_coef);
             outR = lerp_q15(inR, sR, (int16_t)mix_coef);
             return;
@@ -2047,9 +2050,11 @@ struct GlitcherBlock {
                     }
 
                     if (is_clock_sync) {
-                        // Use finalProb directly for loop continuation so density feels
-                        // consistent with trigger probability — not inflated by size_factor.
-                        loop_prob = finalProb;
+                        if (current_loop_len < (int32_t)(clk_period_samples >> 1)) {
+                            loop_prob = (finalProb * size_factor) >> 15;
+                        } else {
+                            loop_prob = finalProb;
+                        }
                     }
 
                     if (finalProb >= 32760) {
@@ -2060,9 +2065,16 @@ struct GlitcherBlock {
                     bool keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
                     if (pulse1_live) {
                         if (is_clock_sync) {
-                            // On every clock boundary (rising or internal sub-div), re-roll with finalProb.
-                            // No more forced keep_looping=true — glitch density should match the knob.
-                            keep_looping = (roll < (uint32_t)loop_prob) || eff_glitchInjector;
+                            if (p1_rising) {
+                                keep_looping = (roll < (uint32_t)loop_prob);
+                            } else {
+                                // For smaller loop subdivisions (< 1/2 beat), allow early exit to avoid buzzy chaos
+                                if (current_loop_len < (int32_t)(clk_period_samples >> 1)) {
+                                    keep_looping = (roll < (uint32_t)loop_prob);
+                                } else {
+                                    keep_looping = true;
+                                }
+                            }
                         } else {
                             keep_looping = keep_looping || p1_gate;
                         }
@@ -2200,10 +2212,8 @@ struct GlitcherBlock {
                         if (!mono_mode) buf[BUF_HALF + idx] = encode_mulaw(newR);
                     }
 
-                    int32_t mix_coef = 32767;
-                    if (mainProb < 8192) {
-                        mix_coef = (mainProb * 32767) / 8192;
-                    }
+                    int32_t mix_coef = (mainProb * 5) >> 1;
+                    if (mix_coef > 32767) mix_coef = 32767;
                     outL = lerp_q15(inL, sL, (int16_t)mix_coef);
                     outR = lerp_q15(inR, sR, (int16_t)mix_coef);
                     return;
