@@ -467,53 +467,10 @@ struct CodecDemolisherBlock {
     // Real-time variable-bitrate G.711 mu-law logarithmic compander simulation
     inline int16_t compress_expand_mulaw_variable(int16_t sample, int32_t insanity) {
         if (insanity <= 0) return sample;
-
-        int32_t x = sample;
-        int32_t sign = (x < 0) ? -1 : 1;
-        if (x < 0) x = -x;
-        
-        uint16_t abs_val = x;
-        uint8_t exponent = 0;
-        if (abs_val >= 256) {
-            exponent = (31 - __builtin_clz(abs_val)) - 7;
-        }
-        
-        uint8_t mantissa = 0;
-        if (exponent > 0) {
-            mantissa = (abs_val >> (exponent + 1)) & 0xF;
-        } else {
-            mantissa = (abs_val >> 2) & 0xF;
-        }
-
-        auto reconstruct = [&](uint8_t mant) -> int16_t {
-            int32_t rec = 0;
-            if (exponent > 0) {
-                rec = ((mant << 1) + 33) << (exponent + 1);
-            } else {
-                rec = (mant << 2) + 2;
-            }
-            if (rec > 32767) rec = 32767;
-            return (int16_t)(rec * sign);
-        };
-
-        // Compute reconstructed samples at each bit depth (4, 3, 2, 1 mantissa bits)
-        int16_t s4 = reconstruct(mantissa);
-        int16_t s3 = reconstruct(mantissa & 0xE);
-        int16_t s2 = reconstruct(mantissa & 0xC);
-        int16_t s1 = reconstruct(mantissa & 0x8);
-
-        // Scale insanity to 0..3 index
-        int32_t val = insanity * 3; // 0 to 98301
-        int32_t idx = val >> 15;
-        int16_t fade = val & 0x7FFF;
-
-        if (idx == 0) {
-            return lerp_q15(s4, s3, fade);
-        } else if (idx == 1) {
-            return lerp_q15(s3, s2, fade);
-        } else {
-            return lerp_q15(s2, s1, fade);
-        }
+        uint8_t code = encode_mulaw(sample);
+        int16_t decoded = decode_mulaw(code);
+        int32_t amt = insanity > 32767 ? 32767 : insanity;
+        return lerp_q15(sample, decoded, (int16_t)amt);
     }
 
     __attribute__((always_inline)) inline void process(int16_t inL, int16_t &outL, int16_t inR, int16_t &outR,
@@ -578,18 +535,21 @@ struct CodecDemolisherBlock {
             tape_delayL[tape_wr] = sigL;
             tape_delayR[tape_wr] = sigR;
             
-            // 3. Modulate Read Pointer
-            // Slow wow: vibe_sine has period ~1.4 Hz
-            int32_t wow = (lookup_sine(vibe_lfo) * tape_sat) >> 22; // ranges from -8 to +8 samples
+            // 3. Modulate Read Pointer with sub-sample linear interpolation (click-free)
+            int32_t wow_q16 = ((int32_t)vibe_sine * tape_sat) >> 14; // Q16 offset (-8.0 to +8.0)
             
-            // Fast flutter: faster random noise LFO
             flutter_phase += 380;
-            int32_t flutter = (lookup_sine(flutter_phase) * tape_sat) >> 24; // ranges from -2 to +2 samples
+            int32_t flutter_q16 = (lookup_sine(flutter_phase) * tape_sat) >> 16; // Q16 offset (-2.0 to +2.0)
             
-            int32_t delay_offset = 32 + wow + flutter; // offset buffer is 32 samples (safe middle)
-            uint8_t rd = (tape_wr - (uint8_t)delay_offset) & 127;
-            sigL = tape_delayL[rd];
-            sigR = tape_delayR[rd];
+            int32_t offset_q16 = (32 << 16) + wow_q16 + flutter_q16;
+            int32_t int_offset = offset_q16 >> 16;
+            uint16_t frac = (uint16_t)(offset_q16 & 0xFFFF);
+            
+            uint8_t rd0 = (tape_wr - (uint8_t)int_offset) & 127;
+            uint8_t rd1 = (rd0 - 1) & 127;
+            
+            sigL = lerp_delay_q15(tape_delayL[rd0], tape_delayL[rd1], frac);
+            sigR = lerp_delay_q15(tape_delayR[rd0], tape_delayR[rd1], frac);
             
             tape_wr = (tape_wr + 1) & 127;
         } else {
@@ -650,39 +610,21 @@ struct CodecDemolisherBlock {
             sigR = saturate_q15(sigR + hashR);
         }
 
-        // ── Stage 1: Warm Fuzz (Bitcrushing) ──
+        // ── Stage 1: Warm Fuzz / G.711 Compander & Fractional Bitcrush ──
         if (fuzz_level > 0) {
+            // 1. Logarithmic G.711 Compander Compression & Saturation
             int16_t compL = compress_expand_mulaw_variable(sigL, fuzz_level);
             int16_t compR = compress_expand_mulaw_variable(sigR, fuzz_level);
+            sigL = lerp_q15(sigL, compL, fuzz_level);
+            sigR = lerp_q15(sigR, compR, fuzz_level);
 
-            // Continuous fractional bitcrusher for fuzz
-            int32_t fuzz_sq = ((int32_t)fuzz_level * fuzz_level) >> 15;
-            int32_t shift_q15 = (fuzz_sq * 10);
-            int32_t int_shift = shift_q15 >> 15;
-            int32_t frac_shift = shift_q15 & 0x7FFF;
-            if (int_shift > 0 || frac_shift > 0) {
-                // Left channel symmetric bitcrushing
-                int32_t signL = compL < 0 ? -1 : 1;
-                int32_t absL = compL < 0 ? -compL : compL;
-                int32_t q1L = (absL >> int_shift) << int_shift;
-                int32_t q2L = (absL >> (int_shift + 1)) << (int_shift + 1);
-                compL = signL * lerp_q15(q1L, q2L, frac_shift);
-
-                // Right channel symmetric bitcrushing
-                int32_t signR = compR < 0 ? -1 : 1;
-                int32_t absR = compR < 0 ? -compR : compR;
-                int32_t q1R = (absR >> int_shift) << int_shift;
-                int32_t q2R = (absR >> (int_shift + 1)) << (int_shift + 1);
-                compR = signR * lerp_q15(q1R, q2R, frac_shift);
+            // 2. Fractional Bitcrush (16-bit down to 6-bit)
+            int32_t shift_bits = (fuzz_level * 5) >> 15;
+            if (shift_bits > 0) {
+                int32_t mask = ~((1 << shift_bits) - 1);
+                sigL = sigL & mask;
+                sigR = sigR & mask;
             }
-
-            // Warm fuzz saturation
-            int32_t satL = tape_saturate(((int32_t)compL * (32768 + fuzz_level)) >> 15);
-            int32_t satR = tape_saturate(((int32_t)compR * (32768 + fuzz_level)) >> 15);
-            
-            // Smoothly crossfade clean to fuzz based on fuzz_level
-            sigL = lerp_q15(sigL, satL, fuzz_level);
-            sigR = lerp_q15(sigR, satR, fuzz_level);
         }
 
         // ── Telecom Bandpass Filter (Always active for stability and Zone 3 AM Radio) ──
@@ -793,8 +735,12 @@ struct CodecDemolisherBlock {
             trans_frame_ctr++;
 
             if (trans_dropped) {
-                sigL = trans_historyL[trans_drop_rd];
-                sigR = trans_historyR[trans_drop_rd];
+                int16_t dropL = trans_historyL[trans_drop_rd];
+                int16_t dropR = trans_historyR[trans_drop_rd];
+
+                // Smoothly blend packet drop repetitions to avoid hard step spitting clicks
+                sigL = lerp_q15(sigL, dropL, 26000);
+                sigR = lerp_q15(sigR, dropR, 26000);
                 howl_fbL = sigL;
                 howl_fbR = sigR;
                 
@@ -817,28 +763,12 @@ struct CodecDemolisherBlock {
                 trans_rep_ctr = 0;
             }
 
-            int32_t scramble_prob = (active_loss * 4000) >> 15; 
-            if ((int32_t)(fast_rand(rand_seed) & 0x7FFF) < scramble_prob) {
-                uint32_t limit = 1 + (active_loss >> 11);
-                uint16_t mask = (uint16_t)((fast_rand(rand_seed) >> (32 - 4)) & (limit - 1));
-                if (input_amp > 100) {
-                    // Shred logic: dynamically toggle between XOR, bit-mask AND, and bit-shifts
-                    shred_state++;
-                    uint32_t shred_mode = (shred_state >> 3) & 3;
-                    if (shred_mode == 0) {
-                        sigL ^= mask;
-                        sigR ^= mask;
-                    } else if (shred_mode == 1) {
-                        sigL = sigL & ~mask;
-                        sigR = sigR & ~mask;
-                    } else if (shred_mode == 2) {
-                        sigL = sigL << 1;
-                        sigR = sigR << 1;
-                    } else {
-                        sigL = (sigL >> 2) << 2;
-                        sigR = (sigR >> 2) << 2;
-                    }
-                }
+            if (scramble_level > 0) {
+                // Musical Telecom Compander Crush for Zone 4 (no harsh single-sample bit-shredding spitting!)
+                int16_t cL = compress_expand_mulaw_variable(sigL, scramble_level);
+                int16_t cR = compress_expand_mulaw_variable(sigR, scramble_level);
+                sigL = lerp_q15(sigL, cL, scramble_level);
+                sigR = lerp_q15(sigR, cR, scramble_level);
             }
         }
 
@@ -849,40 +779,25 @@ struct CodecDemolisherBlock {
         int16_t wetL = sigL;
         int16_t wetR = sigR;
 
-        // ── 3. VCA Compression & Analog Saturation (scaled by Strength) ───────
+        // ── 3. Peak Limiter / AGC for Unity Loudness Leveling ───────
         int32_t absL = wetL < 0 ? -wetL : wetL;
         int32_t absR = wetR < 0 ? -wetR : wetR;
         int32_t peak = absL > absR ? absL : absR;
         if (peak > 32767) peak = 32767;
 
-        // Envelope follower (Vibe LFO creates breathing release fluctuations)
-        int32_t attack_shift = 4; // sped up for 24kHz
-        int32_t release_shift = 10 + (vibe_sine >> 13); // sped up for 24kHz
-        if (peak > env) env += (peak - env) >> attack_shift;
-        else env += (peak - env) >> release_shift;
-
-        // Threshold matched to 6dB input headroom scaling
-        int32_t thresh = 14000 - ((strength * 12500) >> 15);
-        int32_t slope = (strength * 27000) >> 15;
+        if (peak > env) env += (peak - env) >> 3;
+        else env += (peak - env) >> 9;
 
         int32_t gain_coef = 32768;
-        if (env > thresh) {
-            int32_t overshoot = env - thresh;
-            int32_t gain_reduction = ((int32_t)overshoot * slope) >> 15;
+        if (env > 16384) {
+            int32_t overshoot = env - 16384;
+            int32_t gain_reduction = (overshoot * 16384) / env;
             gain_coef = 32768 - gain_reduction;
-            if (gain_coef < 4096) gain_coef = 4096; // limit GR to -18dB
+            if (gain_coef < 16384) gain_coef = 16384;
         }
 
-        int32_t drive_gain = 32768 + ((strength * 11468) >> 15);
-        int32_t compLi = soft_limit_q15(((int32_t)wetL * drive_gain) >> 15);
-        int32_t compRi = soft_limit_q15(((int32_t)wetR * drive_gain) >> 15);
-        compLi = (compLi * gain_coef) >> 15;
-        compRi = (compRi * gain_coef) >> 15;
-
-        // Compensated makeup gain to keep overall wet path loudness constant
-        int32_t makeup_gain = 32768 - ((strength * 6000) >> 15);
-        compLi = (compLi * makeup_gain) >> 15;
-        compRi = (compRi * makeup_gain) >> 15;
+        int32_t compLi = (wetL * gain_coef) >> 15;
+        int32_t compRi = (wetR * gain_coef) >> 15;
 
         wetL = tape_saturate(saturate_q15(compLi));
         wetR = tape_saturate(saturate_q15(compRi));
@@ -986,12 +901,9 @@ struct CodecDemolisherBlock {
             lp_newR = out_wetR;
         }
 
-        // Final mix: reaches 100% wet at 25% strength (8192) to prevent dry masking
-        int32_t mix_coeff = strength * 4;
-        if (mix_coeff > 32767) mix_coeff = 32767;
-
-        outL = lerp_q15(inL, out_wetL, (int16_t)mix_coeff);
-        outR = lerp_q15(inR, out_wetR, (int16_t)mix_coeff);
+        // Final mix: linear dry/wet blend controlled by Main knob (strength)
+        outL = lerp_q15(inL, out_wetL, (int16_t)strength);
+        outR = lerp_q15(inR, out_wetR, (int16_t)strength);
     }
 
     bool isFrameDropped() const { return trans_dropped; }
