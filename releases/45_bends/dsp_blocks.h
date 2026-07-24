@@ -1647,8 +1647,11 @@ struct GlitcherBlock {
                 trig_out1 = true; // Output loop sync pulse
 
                 // Spawn next grain repeat at updated position/length targets
-                xfade_rd = loop_start + rd_q16;
-                rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)current_loop_len << 16);
+                // Ensure xfade_rd stays inside the valid loop boundary
+                int32_t xfade_offset = current_loop_len > cur_xfade ? (current_loop_len - cur_xfade) : 0;
+                xfade_rd = (speed_q16 >= 0) ? (loop_start + ((int64_t)xfade_offset << 16)) : loop_start;
+                rd_q16 = (speed_q16 >= 0) ? 0 : ((int64_t)loop_size << 16);
+
                 xfade_len = cur_xfade;
                 xfade_ctr = cur_xfade;
                 xfade_step = (32767 << 15) / xfade_len;
@@ -2071,6 +2074,8 @@ struct GlitcherBlock {
                         }
                         current_loop_len = clamp_i32(final_size, 128, buf_size);
 
+                        int32_t xfade_offset = current_loop_len > cur_xfade ? (current_loop_len - cur_xfade) : 0;
+                        xfade_rd = (speed_q16 >= 0) ? (loop_start + ((int64_t)xfade_offset << 16)) : loop_start;
                         if (speed_q16 >= 0) {
                             rd_q16 = 0;
                         } else {
