@@ -1,25 +1,116 @@
-Description: Stereo Multi-FX, Glitch, and Codec Demolisher Card
+draft: false
 Name: Bends
-Language: C++
+Description: Stereo Multi-FX, Glitch, and Codec Demolisher Card
+Language: C++ (Pico SDK)
 Creator: Vincent Maurer (vincentmaurer.de) with Advanced Agentic Coding
 Version: 1.1
 Status: Released
 License: MIT
+
+Editor: none
+
+tags:
+  - effect
+  - glitch
+  - stereo
+  - multi-fx
+  - delay
+  - reverb
+  - pico-sdk
+
 panel:
   inputs:
+    - id: AudioIn1
+      name: Stereo Audio In L
+      description: Left audio channel input (normalled to Right if AudioIn2 is unplugged)
+      type: audio
+    - id: AudioIn2
+      name: Stereo Audio In R
+      description: Right audio channel input
+      type: audio
     - id: PulseIn1
       name: Stutter Clock / Trigger
-      description: Global stutter clock sync and gate trigger for granular glitches.
+      description: Global stutter clock sync and gate trigger for granular glitches
       type: pulse
     - id: PulseIn2
       name: Freeze Gate
-      description: Global freeze gate input to loop current delay and stutter buffers.
+      description: Global freeze gate input to loop current delay and stutter buffers
       type: pulse
     - id: CVIn1
-      name: Macro / Clicks / Skips Injector
-      description: Global modulator for grittiness macro (positive voltage adds pops and CD skipping).
+      name: Macro / Clicks Injector
+      description: Global modulator for grittiness macro (positive voltage adds pops and CD skipping)
       type: cv
     - id: CVIn2
       name: Breakup / Stutter Injector
-      description: Global digital scramble and packet dropout injector (gate triggers stutter if > +1.2V).
+      description: Global digital scramble and packet dropout injector (gate triggers stutter if > +1.2V)
       type: cv
+  outputs:
+    - id: AudioOut1
+      name: Audio Out L
+      description: Main left channel audio output
+      type: audio
+    - id: AudioOut2
+      name: Audio Out R
+      description: Main right channel audio output
+      type: audio
+    - id: CVOut1
+      name: Pitch CV Out 1
+      description: Quantized semi-random harmonic pitch CV output 1
+      type: cv
+    - id: CVOut2
+      name: Pitch CV Out 2
+      description: Quantized semi-random harmonic pitch CV output 2
+      type: cv
+    - id: PulseOut1
+      name: Loop Boundary Trigger
+      description: 2ms +5V trigger pulse on granular loop wrap or reset
+      type: pulse
+    - id: PulseOut2
+      name: Texture / Pop Generator
+      description: Composite pulse stream of vinyl crackle, clicks, and loop sub-harmonics
+      type: pulse
+
+controls:
+  knobs:
+    - when: { z: middle }
+      main:
+        name: Active Page Main Control
+        description: Controls primary parameter of active page 0..5 (e.g. Chorus Mix, Decimation Mix, Delay Mix, Glitch Mix, Filter Cutoff, Reverb Mix)
+      x:
+        name: Active Page X Control
+        description: Controls secondary parameter of active page 0..5 (e.g. LFO Rate, Bitcrush, Delay Time, Granular Size, Resonance, Reverb Size/Type)
+      y:
+        name: Active Page Y Control
+        description: Controls tertiary parameter of active page 0..5 (e.g. Chorus Depth, MP3 Ring, Delay Feedback, Playback Speed, Drive, Damping)
+    - when: { z: down, gesture: hold }
+      main:
+        name: Grittiness Macro Sweep
+        description: Sweeps global noise, crackle, bit-crush, and dropout depth
+      x:
+        name: Stereo Width & Mode
+        description: CCW = Extended Mono Mode (~2.73s delay/freeze), Mid = Stereo Width, CW = Dual Mono Mode
+      y:
+        name: DSP Routing Preset
+        description: Selects routing chain (0: Series Standard, 1: Space Wash, 2: Scatter Cloud, 3: Filtered Dub)
+  leds:
+    - when: { z: middle }
+      display: list
+      items:
+        - id: LED0
+          name: Page 0 / Status
+          description: Active page 0 indicator / chain sequence step
+        - id: LED1
+          name: Page 1 / Status
+          description: Active page 1 indicator / chain sequence step
+        - id: LED2
+          name: Page 2 / Status
+          description: Active page 2 indicator / chain sequence step
+        - id: LED3
+          name: Page 3 / Status
+          description: Active page 3 indicator / chain sequence step
+        - id: LED4
+          name: Page 4 / Dual Mono L
+          description: Active page 4 indicator / Dual Mono mode left active
+        - id: LED5
+          name: Page 5 / Extended Mono
+          description: Active page 5 indicator / Extended Mono mode active

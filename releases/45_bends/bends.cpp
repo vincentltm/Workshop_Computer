@@ -202,7 +202,7 @@ static void get_routing_chain(int routing_mode, bool mono_mode, int chain[6]) {
 static void bends_trigger_chain_vis(int routing_mode, bool mono_mode) {
     chainVisMode = routing_mode;
     chainVisMono = mono_mode;
-    chainVisTimer = 2100;
+    chainVisTimer = 800;
 }
 
 // ============================================================================
@@ -379,7 +379,7 @@ __attribute__((noinline)) void __not_in_flash_func(run_codec)(int16_t &L, int16_
                   p.codec_mp3_ring, p.codec_fuzz, p.codec_decimate,
                   p.codec_pop_prob, p.codec_click_depth, p.codec_bad_conn, p.codec_scramble,
                   p.codec_sputter_prob, p.codec_tape_sat, p.codec_tape_hiss, p.codec_active_loss,
-                  p.codec_tape_hicut, rand_seed);
+                  rand_seed);
 }
 
 __attribute__((noinline)) void __not_in_flash_func(run_delay)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool freeze, bool pulse1_live, uint32_t clk_period_samples) {
@@ -1686,7 +1686,6 @@ void BendsCard::tick_ui_once() {
         int32_t nextMacro = lockMacro.update(dzMain);
         if (grittiness_macro != nextMacro) {
             grittiness_macro = nextMacro;
-            settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 0;
         }
@@ -1849,21 +1848,8 @@ void BendsCard::tick_ui_once() {
         int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
         int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
         int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
-
-        // Main knob (raw_strength): Dual-stage Macro Response
-        //   0%  -> 50%: Ramps Dry/Wet mix 0% -> 100% (at center, effect is 100% Wet!)
-        //  50% -> 100%: Stays at 100% Wet, and boosts internal effect intensity from 1.0× -> 2.0×!
-        int32_t eff_mix = 0;
-        int32_t intensity_mult = 32768; // 1.0x baseline
-        if (raw_strength <= 16384) {
-            eff_mix = (raw_strength * 32768) / 16384;
-            intensity_mult = 32768;
-        } else {
-            eff_mix = 32767;
-            intensity_mult = 32768 + (((raw_strength - 16384) * 32768) / 16383);
-        }
         
-        p.codec_mix = eff_mix;
+        p.codec_mix = raw_strength;
         p.codec_downsample = raw_downsample;
         p.codec_ringing_xor = raw_ringing_xor;
 
@@ -1871,92 +1857,98 @@ void BendsCard::tick_ui_once() {
         int32_t Y = raw_ringing_xor;
         Y = clamp_i32(Y, 0, 32767);
 
-        // Knob X: Continuous 3-Zone Degradation across 0% -> 100%
-        //   0%  -> 33%: Zone 1 — Warm Analog Tape Saturation
-        //  33%  -> 66%: Zone 2 — G.711 Compander & Fractional Bitcrush
-        //  66% -> 100%: Zone 3 — Sample-Rate Decimation & XOR Loss
-        int32_t decimate_level = 0;
-        int32_t fuzz_level = 0;
         int32_t mp3_ring_level = 0;
-        int32_t tape_sat = 0;
+        int32_t fuzz_level = 0;
+        int32_t decimate_level = 0;
 
-        if (X < 10922) {
-            // Zone 1 (0% -> 33%): Clean -> Analog Tape Saturation & Warmth
-            int32_t ratio = (X * 32768) / 10922;
-            tape_sat = (32767 * ratio) >> 15;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 21845) {
-            // Zone 2 (33% -> 66%): Tape Saturation -> Warm Telecom Compander & Bitcrush
-            int32_t ratio = ((X - 10922) * 32768) / 10923;
-            tape_sat = 32767 - ((32767 * ratio) >> 15);
-            fuzz_level = (32767 * ratio) >> 15;
-            decimate_level = 0;
+        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
+        if (X < 16384) {
+            mp3_ring_level = 32767 - (X * 2);
         } else {
-            // Zone 3 (66% -> 100%): Compander & Bitcrush -> Smooth Lo-Fi Decimation
-            int32_t ratio = ((X - 21845) * 32768) / 10922;
-            tape_sat = 0;
-            fuzz_level = 32767 - ((32767 * ratio) >> 15);
-            decimate_level = (32767 * ratio) >> 15;
+            mp3_ring_level = 0;
         }
 
-        // Knob Y: 4 Active Temporal Artifact Zones (Vinyl Crackle -> CD Skips -> Packet Drops -> Cell Call Crush)
+        if (X < 16384) {
+            fuzz_level = X * 2;
+        } else {
+            fuzz_level = 32767 - ((X - 16384) * 2);
+        }
+
+        if (X < 16384) {
+            decimate_level = 0;
+        } else {
+            decimate_level = (X - 16384) * 2;
+            if (decimate_level > 32767) decimate_level = 32767;
+        }
+
+        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
+        int32_t tape_sat = 0;
         int32_t tape_hiss = 0;
         int32_t pop_prob = 0;
-        int32_t click_ratio = 0;
         int32_t bad_conn_level = 0;
         int32_t sputter_prob = 0;
         int32_t scramble_level = 0;
 
-        if (Y < 8192) {
-            // Zone 1 (0% -> 25%): Organic Vinyl Dust Crackle & Needle Thuds
-            int32_t ratio = (Y * 32768) / 8192;
-            pop_prob = (12 * ratio) >> 15;
-            click_ratio = (24000 * ratio) >> 15;
-        } else if (Y < 16384) {
-            // Zone 2 (25% -> 50%): CD-Skip Buffer Stutters & Micro-Frame Repeats
-            int32_t ratio = ((Y - 8192) * 32768) / 8192;
-            pop_prob = 12 - ((12 * ratio) >> 15);
-            click_ratio = 24000 - ((24000 * ratio) >> 15);
-            sputter_prob = (28 * ratio) >> 15;
-        } else if (Y < 24576) {
-            // Zone 3 (50% -> 75%): Lossy Telecom Packet Drops & Framing Skips
-            int32_t ratio = ((Y - 16384) * 32768) / 8192;
-            sputter_prob = 28 - ((28 * ratio) >> 15);
-            bad_conn_level = (28000 * ratio) >> 15;
-        } else {
-            // Zone 4 (75% -> 100%): G.711 Telecom Compander Crush & Memory Loss
-            int32_t ratio = ((Y - 24576) * 32768) / 8192;
-            bad_conn_level = 28000 - ((28000 * ratio) >> 15);
-            scramble_level = (32767 * ratio) >> 15;
+        if (Y < 16384) {
+            tape_sat = 30000 - (Y * 30000) / 16384;
+            tape_hiss = 30 - (Y * 30) / 16384;
+            pop_prob = 12 - (Y * 12) / 16384;
         }
 
-        // Apply Main Knob intensity boost (50% -> 100%) and Global Noise Scale
-        tape_sat       = (tape_sat * intensity_mult) >> 15;
-        fuzz_level     = (fuzz_level * intensity_mult) >> 15;
-        decimate_level = (decimate_level * intensity_mult) >> 15;
-        bad_conn_level = (bad_conn_level * intensity_mult) >> 15;
-        scramble_level = (scramble_level * intensity_mult) >> 15;
-        pop_prob       = (pop_prob * intensity_mult) >> 15;
-        sputter_prob   = (sputter_prob * intensity_mult) >> 15;
+        if (Y < 16384) {
+            bad_conn_level = (Y * 32767) / 16384;
+            sputter_prob = (Y * 50) / 16384;
+        } else {
+            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
+            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
+        }
 
-        tape_sat       = (tape_sat * globalNoiseScale) >> 15;
-        fuzz_level     = (fuzz_level * globalNoiseScale) >> 15;
-        decimate_level = (decimate_level * globalNoiseScale) >> 15;
-        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 15;
-        scramble_level = (scramble_level * globalNoiseScale) >> 15;
-        pop_prob       = (pop_prob * globalNoiseScale) >> 15;
-        sputter_prob   = (sputter_prob * globalNoiseScale) >> 15;
+        if (Y >= 16384) {
+            scramble_level = ((Y - 16384) * 32767) / 16383;
+        }
 
-        if (tape_sat > 32767) tape_sat = 32767;
+        // Scale pop_prob by X quality
+        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
+        pop_prob = (pop_prob * x_scale_q15) >> 15;
+
+        // Fuzz level quadratic warp
+        fuzz_level = (fuzz_level * fuzz_level) >> 15;
+
+        // Scale by Main knob (strength)
+        int32_t glitch_strength = 16384 + (raw_strength >> 1);
+        fuzz_level = (fuzz_level * raw_strength) >> 15;
+        decimate_level = (decimate_level * raw_strength) >> 15;
+        mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
+        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
+        scramble_level = (scramble_level * glitch_strength) >> 15;
+
+        int32_t pop_strength = 16384 + (raw_strength >> 1);
+        pop_prob = (pop_prob * pop_strength) >> 15;
+
+        // Global Noise Scale modifier
+        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
+        decimate_level = (decimate_level * globalNoiseScale) >> 14;
+        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
+        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
+        scramble_level = (scramble_level * globalNoiseScale) >> 14;
+        pop_prob = (pop_prob * globalNoiseScale) >> 14;
+
         if (fuzz_level > 32767) fuzz_level = 32767;
         if (decimate_level > 32767) decimate_level = 32767;
+        if (mp3_ring_level > 32767) mp3_ring_level = 32767;
         if (bad_conn_level > 32767) bad_conn_level = 32767;
         if (scramble_level > 32767) scramble_level = 32767;
 
-        int32_t click_depth = (click_ratio * intensity_mult) >> 15;
-        click_depth = (click_depth * globalNoiseScale) >> 15;
-        if (click_depth > 32767) click_depth = 32767;
+        int32_t click_ratio = 0;
+        if (Y >= 10000 && Y < 13000) {
+            click_ratio = ((Y - 10000) * 16384) / 3000;
+        } else if (Y >= 13000 && Y < 16000) {
+            int32_t t = Y - 13000;
+            click_ratio = 16384 - ((t * 16384) / 3000);
+        }
+        int32_t click_depth = (click_ratio * raw_strength) >> 15;
+        click_depth = (click_depth * x_scale_q15) >> 15;
+        click_depth = (click_depth * 16000) >> 15;
 
         sputter_prob = (sputter_prob * raw_strength) >> 15;
         sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
@@ -2158,17 +2150,20 @@ void BendsCard::tick_ui_once() {
                 size = 4000;
             }
             int32_t loop_size = 128;
-            if (active_clk > 240) {
+            if (size < 4096) {
+                // Super-short Knob X (0% -> 12.5%): Micro-Granular Pitch Synthesizer (32 -> 256 samples / 1.3ms -> 10.6ms)
+                loop_size = 32 + ((size * 224) >> 12);
+            } else if (active_clk > 240) {
                 static const int32_t clk_div_num[7] = {1, 2, 4, 8, 16, 32, 64};
                 int32_t num_steps = 7;
-                int32_t size_sq = (size * size) >> 15;
+                int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
+                int32_t size_sq = (norm_size * norm_size) >> 15;
                 int32_t step = (size_sq * num_steps) >> 15;
                 if (step < 0) step = 0;
                 if (step > num_steps - 1) step = num_steps - 1;
                 int32_t target_beat_samples = (active_clk * clk_div_num[step]) / 16;
 
                 // When speeding down (speed < 1.0), expand buffer loop size inversely with speed
-                // so pitched-down playback captures 2× to 4× longer audio phrases instead of shrinking!
                 int32_t speed_mag = std::abs(p.glitch_speed_mapped);
                 if (speed_mag < 4096) speed_mag = 4096;
                 if (speed_mag < 65536) {
@@ -2177,9 +2172,10 @@ void BendsCard::tick_ui_once() {
                     loop_size = (int32_t)(((int64_t)target_beat_samples * speed_mag) >> 16);
                 }
             } else {
-                static const int32_t size_lut[9] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
-                int32_t num_steps = eff_mono ? 9 : 8;
-                int32_t step = (size * num_steps) >> 15;
+                static const int32_t size_lut[8] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
+                int32_t num_steps = eff_mono ? 8 : 7;
+                int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
+                int32_t step = (norm_size * num_steps) >> 15;
                 if (step < 0) step = 0;
                 if (step > num_steps - 1) step = num_steps - 1;
                 int32_t base_size = size_lut[step];
@@ -2191,9 +2187,41 @@ void BendsCard::tick_ui_once() {
                     loop_size = base_size;
                 }
             }
-            p.glitch_loop_size = clamp_i32(loop_size, 128, max_buf_samples);
+            p.glitch_loop_size = clamp_i32(loop_size, 32, max_buf_samples);
 
-            int32_t scrub_offset = is_frozen ? p.glitch_mix : 0;
+            int32_t scrub_offset = 0;
+            static uint16_t freeze_lfo_phase = 0;
+            static uint16_t freeze_skip_timer = 0;
+            static int32_t freeze_random_step = 0;
+
+            if (is_frozen) {
+                int32_t raw_mix = p.glitch_mix; // Main knob on Page 7 (0..32767)
+                if (raw_mix < 3277) {
+                    // Zone 1 (First 10%: 0% -> 10%): Slow Ambient LFO Auto-Scrubbing
+                    int32_t lfo_speed = 3 + (((3277 - raw_mix) * 18) / 3277); // LFO rate
+                    freeze_lfo_phase += lfo_speed;
+                    int16_t sine_val = lookup_sine(freeze_lfo_phase);
+                    scrub_offset = (sine_val + 32768) >> 1; // 0..32767
+                } else if (raw_mix > 29490) {
+                    // Zone 3 (Last 10%: 90% -> 100%): Rhythmic Random Slice Auto-Skip
+                    int32_t skip_interval = 800 - (((raw_mix - 29490) * 720) / (32767 - 29490)); // 800 down to 80 ticks
+                    if (skip_interval < 80) skip_interval = 80;
+                    freeze_skip_timer++;
+                    if (freeze_skip_timer >= skip_interval) {
+                        freeze_skip_timer = 0;
+                        freeze_random_step = fast_rand(rand_seed) & 0x7FFF;
+                    }
+                    scrub_offset = freeze_random_step;
+                } else {
+                    // Zone 2 (Middle 80%: 10% -> 90%): High-Resolution Manual Position Scrubbing
+                    int32_t manual_ratio = ((raw_mix - 3277) * 32768) / (29490 - 3277);
+                    scrub_offset = clamp_i32(manual_ratio, 0, 32767);
+                }
+            } else {
+                freeze_lfo_phase = 0;
+                freeze_skip_timer = 0;
+            }
+
             int32_t cv1_offset = p.cv1 * 6;
             int32_t range = max_buf_samples - p.glitch_loop_size;
             if (range < 0) range = 0;
@@ -2407,18 +2435,18 @@ void BendsCard::tick_ui_once() {
     }
     if (chainVisTimer > 0) {
         chainVisTimer--;
-        uint32_t elapsed = 2100 - chainVisTimer;
+        uint32_t elapsed = 800 - chainVisTimer;
         int16_t bright_leds[6] = {0, 0, 0, 0, 0, 0};
         
-        if (elapsed < 200) {
-            // Start Flash ON
+        if (elapsed < 80) {
+            // Fast Start Flash ON (80ms)
             for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
-        } else if (elapsed < 300) {
-            // Gap OFF
+        } else if (elapsed < 120) {
+            // Gap OFF (40ms)
             for (int i = 0; i < 6; i++) bright_leds[i] = 0;
-        } else if (elapsed < 1800) {
-            // Steps 0..5
-            int step_idx = (elapsed - 300) / 250;
+        } else if (elapsed < 660) {
+            // Rapid Sequence Steps 0..5 (90ms per step)
+            int step_idx = (elapsed - 120) / 90;
             if (step_idx >= 0 && step_idx < 6) {
                 int chain[6];
                 get_routing_chain(chainVisMode, chainVisMono, chain);
@@ -2427,11 +2455,11 @@ void BendsCard::tick_ui_once() {
                     bright_leds[active_led] = 4095;
                 }
             }
-        } else if (elapsed < 1900) {
-            // Gap OFF
+        } else if (elapsed < 720) {
+            // Gap OFF (60ms)
             for (int i = 0; i < 6; i++) bright_leds[i] = 0;
         } else {
-            // End Flash ON
+            // Fast End Flash ON (80ms)
             for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
         }
 
