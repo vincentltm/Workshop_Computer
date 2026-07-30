@@ -91,7 +91,7 @@ controls:
         description: CCW = Extended Mono Mode (~2.73s delay/freeze), Mid = Stereo Width, CW = Dual Mono Mode
       y:
         name: DSP Routing Preset
-        description: Selects routing chain (0: Series Standard, 1: Space Wash, 2: Scatter Cloud, 3: Filtered Dub)
+        description: "Selects routing chain (0: Series Standard, 1: Space Wash, 2: Scatter Cloud, 3: Filtered Dub)"
   leds:
     - when: { z: middle }
       display: list
