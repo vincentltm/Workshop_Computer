@@ -1,11 +1,13 @@
 draft: true
 Name: USB Audio & MIDI
-Description: 6-Channel USB Audio & MIDI firmware with CV/Gate support
+short-description: 6-Channel USB Audio & MIDI firmware with CV/Gate support
 Language: C++ (RPi Pico SDK)
 Creator: Vincent Maurer (vincentmaurer.de)
 Version: 1.0
 Status: Release
 License: GPL-3.0
+date-created: 2026-01-23
+date-updated: 2026-01-23
 Editor: https://vincentmaurer.de/usb-audio/midi_config.html
 
 tags:
@@ -15,7 +17,7 @@ tags:
   - cv
   - gate
 
-manual: |
+summary: |
   Class-compliant USB composite firmware providing multichannel USB audio plus USB MIDI.
   Middle switch mode runs standard audio interface behavior; up switch mode enables configurable MIDI/CV/Gate mapping;
   down switch mode disables MIDI for audio-only operation.

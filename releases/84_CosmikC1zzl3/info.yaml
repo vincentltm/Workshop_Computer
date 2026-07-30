@@ -1,15 +1,24 @@
 id: 84_CosmikC1zzl3
-title: Cosmik C1ZZL3
+Name: Cosmik C1ZZL3
 draft: false
-release: 84 / 1.0
+release: 84 / 1.4
+date-created: 2026-07-22
+date-updated: 2026-07-24
 summary: >-
-  Stable phase-distortion synthesiser and Turing machine firmware with Web MIDI custom
-  envelopes, USB MIDI device/host operation, MIDI CC control, and optional Turing MIDI
-  output.
-description: >-
-  Stable phase-distortion synthesiser and Turing machine firmware with Web MIDI custom
-  envelopes, USB MIDI device/host operation, MIDI CC control, and optional Turing MIDI
-  output.
+  Stable phase-distortion synthesiser and Turing machine firmware with
+  pitch-aware Web MIDI envelopes, envelope readback, PD, detune, eight waveform
+  families, hosted CZ patch import, USB MIDI device/host operation, and optional
+  Turing MIDI output that defaults off.
+short-description: >-
+  Stable phase-distortion synthesiser and Turing machine firmware with
+  pitch-aware Web MIDI envelopes, envelope readback, PD, detune, eight waveform
+  families, hosted CZ patch import, USB MIDI device/host operation, and optional
+  Turing MIDI output that defaults off.
+Language: C++ (Pico SDK)
+Creator: Adrian Vos
+Version: "1.4"
+Status: Beta - stable in single-developer testing
+License: MIT
 panel:
   controls:
     main:
@@ -60,8 +69,8 @@ panel:
         Envelope
         Trig
       description: >-
-        Triggers selected envelope and oscillator sync in synth mode when preset is
-        active
+        Triggers selected envelope and oscillator sync in synth mode; held gates loop
+        supported envelopes and gate-off lets them complete
       source: info.yaml
   outputs:
     audio_out_l:
@@ -110,11 +119,14 @@ leds:
   - "In startup envelope selection: factory presets use the binary LED display, and custom slots light LED 6 and use LEDs 1-3 for the custom slot number."
 notes:
   - >-
-    Web MIDI Envelope Editor: Browser editor for custom envelopes and performance
-    settings
+    Envelope Lab: Browser editor for amplitude, phase-distortion, and pitch
+    envelopes, envelope readback, and performance settings.
+  - >-
+    C1ZZL3 Import Lab: Hosted browser translator for Casio CZ `.syx` patches,
+    with pitch-aware handoff into Envelope Lab for final editing and sending.
   - |
     MIDI CC1 controls phase distortion, CC20 detune, CC21 ring modulation, CC22 noise,
-    CC23 waveform, and CC24 Turing CV octave range.
+    CC23 waveform, and CC24 Turing CV octave range. Turing MIDI output defaults off.
 source:
   - releases/84_CosmikC1zzl3/info.yaml
   - releases/84_CosmikC1zzl3/README.md
@@ -133,27 +145,34 @@ readme_url: >-
 download_url: >-
   https://raw.githubusercontent.com/TomWhitwell/Workshop_Computer/main/releases/84_CosmikC1zzl3/uf2/C1ZZL3.uf2
 metadata:
-  creator: Adrian Vos
+  creator: Adrian Vos with LLM/AI assistance
   language: C++ (Pico SDK)
-  version: 1
-  status: Released
+  version: 1.4
+  status: Beta - stable in single-developer testing
   license: MIT
-  editor_url: https://soveda.github.io/CozmikC1zzl3/web-midi/editor/
-  editor_note: Configure this card in your browser
+  editor_url: https://tomwhitwell.github.io/Workshop_Computer/programs/84-cosmikc1zzl3/web/index.html
+  editor_note: Configure this card in Envelope Lab; use web/import/index.html for CZ patch translation.
 documentation:
   intro: >
-    Phase-distortion synth card with Turing machine mode, USB MIDI, and browser envelope
-    editor.
+    Phase-distortion synth card with Turing machine mode, USB MIDI, browser
+    editor tools, CZ Import Lab handoff, pitch envelopes, gate-held envelope
+    looping, natural trigger completion, and audio smoothing for high-PD tones.
 
     Switch middle is PD synth mode (Main = pitch, X = phase distortion, Y = waveform
-    morph).
+    morph). Pulse In 2 and MIDI note-on loop supported envelopes while held;
+    gate/note-off lets the envelope complete naturally.
 
     Hold switch down from middle for performance edit (detune, ring modulation,
     noise/grit) and save.
 
     Switch up is Turing mode (Main = mutation, X = length, Y = clock speed).
 
-    Turing CV and pulse outputs continue running in synth mode.
+    Turing CV and pulse outputs continue running in synth mode. Turing MIDI
+    output is optional and defaults off.
 
     Factory envelope presets are never overwritten; custom envelopes use separate
     browser-stored slots.
+
+    Envelope Lab edits and reads back envelopes and settings. C1ZZL3 Import Lab
+    prepares translated Casio CZ drafts, including pitch envelopes, for review
+    before sending them on to the card.

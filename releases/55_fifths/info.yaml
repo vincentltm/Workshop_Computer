@@ -1,10 +1,13 @@
-draft: true
+draft: false
 Name: Fifths
-Description: A quantizer/sequencer that can create harmony and nimbly traverse the circle of fifths in attempts to make jazz
+short-description: A quantizer/sequencer that can create harmony and nimbly traverse the circle of fifths in attempts to make jazz
 Language: C++ (RP2040 Pico SDK)
 Creator: Dune Desormeaux
-Version: 1.0
+Version: 1.1
 Status: Released
+demo-link: https://youtu.be/xdUCDX7FmOA
+date-created: 2025-05-24
+date-updated: 2026-07-04
 
 tags:
   - quantizer
@@ -13,7 +16,7 @@ tags:
   - cv
   - generative
 
-manual: |
+summary: |
   Fifths quantizes incoming or generated CV to keys arranged around the circle of fifths and outputs both
   a quantized note and an ambiguous third harmony voice. It can run from external clock (Pulse In 1) or internal
   tap-tempo clock, and can loop or write incoming material depending on switch state/toggles. Loop length is set by X,
@@ -26,13 +29,13 @@ panel:
       name: CV/Audio Source
       description: Main signal to be sampled/quantized (or internal random source when unpatched)
     - id: AudioIn2
-      name: VCA Control
+      name: VCA CV
       description: Optional VCA/modulation control for input scaling
     - id: CVIn1
       name: Transpose CV
       description: Adds up to roughly two octaves of transpose before quantization
     - id: CVIn2
-      name: Key Select CV
+      name: Key CV
       description: Selects key index around the circle of fifths
     - id: PulseIn1
       name: External Clock
@@ -70,7 +73,7 @@ controls:
         name: Loop Length
         description: Sets quantizer/sequencer loop length from 1 to 12 steps
       y:
-        name: VCA Amount
+        name: VCA Att
         description: Controls input scaling; can be replaced by Audio In 2 control
     - when: { z: down, gesture: hold }
       x:
@@ -79,14 +82,13 @@ controls:
       y:
         name: Pulse Probability Threshold
         description: Sets probability threshold for sequence pulse generation
-  switches:
-    - id: Z
-      up:
-        name: Write Mode
-        description: Favors live/write behavior over loop playback
-      middle:
-        name: Loop Mode
-        description: Starts in looping playback mode
-      down:
-        name: Tap/Shift Input
-        description: Tap tempo and hold gestures for alternate parameter editing
+  switch:
+    up:
+      name: Write Mode
+      description: Favors live/write behavior over loop playback
+    middle:
+      name: Loop Mode
+      description: Starts in looping playback mode
+    down:
+      name: Tap/Shift Input
+      description: Tap tempo and hold gestures for alternate parameter editing

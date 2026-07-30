@@ -1,10 +1,12 @@
-draft: true
+draft: false
 Name: Duo MIDI
-Description: A duophonic midi device/host interface
+short-description: A duophonic midi device/host interface
 Language: Lua / Blackbird
 Creator: Dune Desormeaux
 Version: 0.1
 Status: Released
+date-created: 2026-01-09
+date-updated: 2026-01-12
 
 tags:
   - midi
@@ -12,8 +14,8 @@ tags:
   - duophonic
   - blackbird
 
-manual: |
-  Duophonic MIDI-to-CV/envelope card running a Blackbird Lua script. Z up is duophonic voice
+summary: |
+  Duophonic MIDI-to-CV card running a Blackbird Lua script. Z up is duophonic voice
   allocation, Z middle is mirrored mono, and Z down toggles pulse outputs between trigger and gate
   mode. Main sets velocity sensitivity; X and Y set envelope attack and release. Receives MIDI note,
   velocity, pitch bend, and mod wheel.
@@ -47,37 +49,36 @@ panel:
   # certainty: low — pulse input envelope behavior inferred from duo_midi.lua and not documented in README
   inputs:
     - id: PulseIn1
-      name: Voice 1 Envelope Gate Input
+      name: Env1 Gate
       type: pulse
       description: Toggles AudioOut1 envelope state and refreshes envelope parameters
     - id: PulseIn2
-      name: Voice 2 Envelope Gate Input
+      name: Env 2 Gate
       type: pulse
       description: Toggles AudioOut2 envelope state and refreshes envelope parameters
 
 controls:
+  switch:
+    up:
+      name: Duophonic
+      description: Duophonic voice allocation across the two voices
+    middle:
+      name: Mirrored Mono
+      description: Both voices mirror the same mono note
+    down:
+      name: Trigger/Gate Toggle
+      description: Toggles pulse outputs between 10ms trigger and sustained gate behavior
   knobs:
-    - when: { z: up }
+    - when: { z: any }
       main:
         name: Velocity Sensitivity
         description: Scales envelope sustain by MIDI velocity
       x:
-        name: Envelope Attack
+        name: Env Attack
         description: Sets ASR attack time
       y:
-        name: Envelope Release
+        name: Env Release
         description: Sets ASR release time
-    - when: { z: middle }
-      main:
-        name: Velocity Sensitivity
-      x:
-        name: Envelope Attack
-      y:
-        name: Envelope Release
-    - when: { z: down }
-      main:
-        name: Trigger/Gate Mode Toggle
-        description: Toggles pulse outputs between 10ms trigger and sustained gate behavior
 
 host:
   usb:

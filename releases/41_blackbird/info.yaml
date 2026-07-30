@@ -1,14 +1,17 @@
-draft: true
+draft: false
 Name: Blackbird
-Description: "A scriptable, live-codable, USB-serial-to-CV device implementing monome crow's protocol"
+short-description: "A scriptable, live-codable, USB-serial-to-CV device implementing monome crow's protocol"
 Language: Pico SDK + Lua
 Creator: Dune Desormeaux
 Version: 1.1
 Status: Released
 License: GPLv3 or later
+date-created: 2025-11-10
+date-updated: 2026-01-19
 Editor: https://dessertplanet.github.io/web-druid/
+demo-link: https://youtu.be/V9HAspnpEWU
 
-manual: |
+summary: |
   Blackbird runs crow-compatible Lua scripts over USB serial and can also store scripts on card flash.
   Panel control behavior is script-defined: Lua code reads `bb.knob.*`, `bb.switch.position`, and inputs,
   then decides how outputs respond. LEDs always reflect positive output voltages on the six outputs.
@@ -16,10 +19,10 @@ manual: |
 panel:
   inputs:
     - id: CVIn1
-      name: input[1] / bb.connected.cv1
+      name: input[1]
       description: Script-readable CV input mapped to crow input[1]
     - id: CVIn2
-      name: input[2] / bb.connected.cv2
+      name: input[2]
       description: Script-readable CV input mapped to crow input[2]
     - id: AudioIn1
       name: bb.audioin[1]
@@ -54,8 +57,18 @@ panel:
       description: Digital pulse output for Lua-triggered actions
 
 controls:
+  switch:
+    up:
+      name: position = up
+      description: Three-position switch state exposed to Lua; script decides response
+    middle:
+      name: position = middle
+      description: Three-position switch state exposed to Lua; script decides response
+    down:
+      name: position = down
+      description: Three-position switch state exposed to Lua; script decides response
   knobs:
-    - when: { z: middle }
+    - when: { z: any }
       main:
         name: bb.knob.main
         description: Normalized analog knob value exposed to Lua; behavior depends on loaded script
@@ -65,32 +78,6 @@ controls:
       y:
         name: bb.knob.y
         description: Normalized analog knob value exposed to Lua; behavior depends on loaded script
-    - when: { z: any }
-      main:
-        name: bb.switch.position
-        description: Three-position switch state exposed to Lua; script decides response
-  leds:
-    - when: { z: any }
-      display: list
-      items:
-        - id: LED0
-          name: Output 1 Positive Voltage
-          description: Reflects positive portion of output[1] level
-        - id: LED1
-          name: Output 2 Positive Voltage
-          description: Reflects positive portion of output[2] level
-        - id: LED2
-          name: Output 3 Positive Voltage
-          description: Reflects positive portion of output[3] level
-        - id: LED3
-          name: Output 4 Positive Voltage
-          description: Reflects positive portion of output[4] level
-        - id: LED4
-          name: Pulse Out 1 Positive Voltage
-          description: Reflects positive portion of bb.pulseout[1] level
-        - id: LED5
-          name: Pulse Out 2 Positive Voltage
-          description: Reflects positive portion of bb.pulseout[2] level
 
 host:
   usb:

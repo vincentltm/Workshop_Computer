@@ -1,11 +1,13 @@
 draft: true
 Name: Flux
-Description: Effects, Synthesizer and Utility
+short-description: Effects, Synthesizer and Utility
 Language: C++ (RP2040 Pico SDK)
 Creator: Vincent Maurer
 Version: 1.0
 Status: Released
 Editor: https://vincentmaurer.de/flux/flux_manager.html
+date-created: 2026-04-03
+date-updated: 2026-04-03
 
 tags:
   - multi-fx
@@ -14,7 +16,7 @@ tags:
   - utility
   - midi
 
-manual: |
+summary: |
   Flux combines stereo effects, multiple synth engines, sample/granular playback, and utility generators
   on one Workshop Computer card. Switch up is synth mode, middle is effect mode, down-hold selects
   synth/effect, and double-down-hold enters performance controls. A web manager is used for CV/pulse routing,
