@@ -377,12 +377,18 @@ inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x
 }
 
 static void bake_macro_to_vp(int32_t active_macro) {
+    int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 28000);
     int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
+    int32_t macro_delay  = get_staggered_macro(active_macro, 14000, 30000);
+    int32_t macro_glitch = get_staggered_macro(active_macro, 6000, 24000);
     int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
 
+    vp[0][2] = scale_grit(vp[0][2], 32767, macro_chorus);
     vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
     vp[1][1] = scale_grit(vp[1][1], 32767, macro_codec);
     vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
+    vp[2][2] = scale_grit(vp[2][2], 32767, macro_delay);
+    vp[3][0] = scale_grit(vp[3][0], 32767, macro_glitch);
     vp[5][0] = scale_grit(vp[5][0], 32767, macro_reverb);
 }
 
@@ -1797,26 +1803,28 @@ void BendsCard::tick_ui_once() {
     }
 
     if (sw_down_exited) {
-        if (active_sw_held_ms < 350 && !settings_adjusted_this_hold) {
+        bool macro_was_turned = (grittiness_macro != 16384);
+
+        if (macro_was_turned) {
+            // ALWAYS bake Macro Grittiness into virtual parameters (vp) when Main Knob was used!
+            bake_macro_to_vp(grittiness_macro);
+            grittiness_macro = 16384; // Reset to transparent center
+            g_macro_active = false;
+            last_modified_macro_knob = 0;
+        } else if (active_sw_held_ms < 350 && !settings_adjusted_this_hold) {
             // Flick DOWN (< 350ms) with no knob adjustments — cycle pages 0→1→2→3→4→5→0
             currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
             pageFlashTimer = 400;
             param_changed = true;
-        } else if (active_sw_held_ms >= 350) {
-            // Hold DOWN (>= 350ms) — save settings to flash ONLY if Knob X or Knob Y were adjusted
-            if (settings_adjusted_this_hold) {
-                bends_save_settings();
-                if (routing_changed_this_hold) {
-                    bends_trigger_chain_vis(global_routing_mode, global_mono_mode && debounced_no_audio2);
-                }
-            }
+        }
 
-            // Bake Macro Grittiness into virtual parameters (vp) if Main Knob was used!
-            if (grittiness_macro != 16384) {
-                bake_macro_to_vp(grittiness_macro);
+        if (active_sw_held_ms >= 350 && settings_adjusted_this_hold) {
+            // Save settings to flash ONLY if Knob X or Knob Y were adjusted
+            bends_save_settings();
+            if (routing_changed_this_hold) {
+                bends_trigger_chain_vis(global_routing_mode, global_mono_mode && debounced_no_audio2);
             }
-
-            grittiness_macro = 16384; // Reset to transparent center
+            grittiness_macro = 16384;
             g_macro_active = false;
             last_modified_macro_knob = 0;
         }
