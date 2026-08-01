@@ -53,6 +53,7 @@ struct Core1Params {
     int32_t chorus_mix;
     int32_t chorus_rate;
     int32_t chorus_depth_fb; // Keep for legacy, but we will use the decoded ones
+    bool karplus_active;
     int32_t chorus_depth;
     int32_t chorus_feedback;
     int32_t chorus_xor_mask;
@@ -70,7 +71,7 @@ struct Core1Params {
     int32_t codec_sputter_prob;
     int32_t codec_tape_sat;
     int32_t codec_tape_hiss;
-    int32_t codec_tape_hicut;
+    int32_t codec_tape_wow_flutter;
     int32_t codec_active_loss;
 
     int32_t delay_mix;
@@ -163,7 +164,7 @@ static int32_t vp[6][3] = {
 
 // Dedicated freeze scrub buffer -- completely separate from vp[3] (Glitcher page)
 // so that freeze knob adjustments never corrupt the live Glitcher settings.
-static int32_t freeze_vp[3] = { 0, 19661, 16384 }; // scrub offset, loop size, speed
+static int32_t freeze_vp[3] = { 32767, 19661, 16384 }; // scrub offset (32767 = current beat), loop size, speed
 
 static uint32_t chainVisTimer = 0;
 static int      chainVisMode = 0;
@@ -202,7 +203,14 @@ static void get_routing_chain(int routing_mode, bool mono_mode, int chain[6]) {
 static void bends_trigger_chain_vis(int routing_mode, bool mono_mode) {
     chainVisMode = routing_mode;
     chainVisMono = mono_mode;
-    chainVisTimer = 800;
+    chainVisTimer = 1200;
+}
+
+static void bends_trigger_chain_vis_fast() {
+    // Fast 300ms confirmation flash (no routing sequence)
+    chainVisMode = global_routing_mode;
+    chainVisMono = global_mono_mode;
+    chainVisTimer = 300;
 }
 
 // ============================================================================
@@ -292,7 +300,7 @@ static void bends_reset_factory_defaults() {
         {     0, 16384, 16384 }
     };
     memcpy(vp, default_vp, sizeof(vp));
-    freeze_vp[0] = 0;
+    freeze_vp[0] = 32767;
     freeze_vp[1] = 19661;
     freeze_vp[2] = 16384;
 }
@@ -308,6 +316,9 @@ static void bends_erase_settings() {
 // Visual feedback (Core 1 → Core 0)
 std::atomic<uint16_t> vis_lfo_phase{0};       // Chorus LFO phase for LED glow
 std::atomic<bool>     vis_frame_dropped{false}; // Codec dropout for LED flash
+std::atomic<bool>     vis_delay_pulse{false};   // Delay echo repeat pulse for LED flash
+std::atomic<bool>     vis_codec_glitch{false};  // Codec vinyl pop & glitch detector
+std::atomic<uint16_t> vis_input_level{0};      // Real-time audio input level meter
 
 // ============================================================================
 // ComputerCard Subclass
@@ -362,8 +373,19 @@ inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x
     }
     int32_t range = end_x - start_x;
     int32_t val = ((x - start_x) * 32768) / range;
-    int32_t val_sq = (val * val) >> 15; // Quadratic curve for fine-grained start and steep end control
-    return 16384 + (val_sq >> 1); // Maps back to [16384, 32767]
+    return 16384 + ((val * 16383) >> 15); // Maps back to [16384, 32767]
+}
+
+static void bake_macro_to_vp(int32_t active_macro) {
+    int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
+    int32_t macro_filter = get_staggered_macro(active_macro, 18000, 32767);
+    int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
+
+    vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
+    vp[1][1] = scale_grit(vp[1][1], 32767, macro_codec);
+    vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
+    vp[4][0] = scale_grit(vp[4][0], 32767, macro_filter);
+    vp[5][0] = scale_grit(vp[5][0], 32767, macro_reverb);
 }
 
 // ============================================================================
@@ -373,19 +395,19 @@ __attribute__((noinline)) void __not_in_flash_func(run_chorus)(int16_t &L, int16
     chorus.process(L, L, R, R, p.chorus_mix, p.chorus_rate, p.chorus_depth, p.chorus_feedback, p.chorus_xor_mask, p.cv1_bipolar, p.chorus_depth_fb);
 }
 
-__attribute__((noinline)) void __not_in_flash_func(run_codec)(int16_t &L, int16_t &R, const volatile Core1Params &p) {
+__attribute__((noinline)) void __not_in_flash_func(run_codec)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool pulse1_live = false, bool p1_rising = false) {
     codec.process(L, L, R, R,
                   p.codec_mix,
                   p.codec_mp3_ring, p.codec_fuzz, p.codec_decimate,
                   p.codec_pop_prob, p.codec_click_depth, p.codec_bad_conn, p.codec_scramble,
-                  p.codec_sputter_prob, p.codec_tape_sat, p.codec_tape_hiss, p.codec_active_loss,
-                  rand_seed);
+                  p.codec_sputter_prob, p.codec_tape_sat, p.codec_tape_hiss, p.codec_tape_wow_flutter, p.codec_active_loss,
+                  rand_seed, pulse1_live, p1_rising);
 }
 
 __attribute__((noinline)) void __not_in_flash_func(run_delay)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool freeze, bool pulse1_live, uint32_t clk_period_samples) {
     delay_fx.process(L, L, R, R,
                      p.delay_mix, p.delay_time, p.delay_feedback, freeze, 0, 0, p.global_noise_scale,
-                     pulse1_live, clk_period_samples, p.mono_mode);
+                     pulse1_live, clk_period_samples, p.mono_mode, p.input_width);
 }
 
 __attribute__((noinline)) void __not_in_flash_func(run_glitcher)(int16_t &L, int16_t &R, const volatile Core1Params &p, bool freeze, bool stutter, bool is_freeze_page, int32_t cv2, int32_t scrub_offset, bool pulse1_live, bool p1_rising, bool p1_val, bool pulse2_live, bool p2_rising, bool p2_val, uint32_t clk_period_samples, uint32_t clk_timer) {
@@ -455,48 +477,94 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     static uint32_t clk_lockout = 0;
     clk_timer++;
 
-    // Timeout Check: if no clock pulse received for 2.5 seconds (120,000 samples @ 48kHz)
+    // Timeout Check: if no clock pulse received for 10 seconds (240,000 samples @ 24kHz)
     // or if the cable is unplugged, disable clock sync.
     static uint32_t last_mult = 1;
-    if (clk_timer > 120000 || !pulse1_live) {
+    static uint8_t din_sync_stability = 0;
+    static bool din_sync_locked = false;
+    static uint8_t din_unlock_ctr = 0;
+    if (clk_timer > 240000 || !pulse1_live) {
         clk_period_samples = 0;
         g_clk_period_samples = 0;
         clk_lockout = 0;
         last_mult = 1;
+        din_sync_stability = 0;
+        din_sync_locked = false;
+        din_unlock_ctr = 0;
     }
 
     if (pulse1_live && p1_rising) {
-        if (clk_timer > 240 && clk_timer > clk_lockout) {
+        if (clk_timer > 120 && (clk_timer > clk_lockout ||
+            (clk_period_samples > 0 && clk_timer > (clk_period_samples >> 1)))) {
             clk_period_samples = clk_timer;
-            // Set dynamic lockout to 35% of the raw period to ignore bounce/secondary peaks
-            clk_lockout = (clk_period_samples * 35) / 100;
-            if (clk_lockout < 240) clk_lockout = 240;
+            // Dynamic lockout at 20% of period to accept swung clocks (up to 80/20 swing)
+            clk_lockout = (clk_period_samples * 20) / 100;
+            if (clk_lockout < 120) clk_lockout = 120;
 
             // Multi-Standard Clock Auto-Detection (1 PPQN, 2 PPQN, 4 PPQN, 24 PPQN DIN Sync)
-            // Measures raw pulse interval and normalises to 1 PPQN (quarter note), biased towards finer subdivisions.
-            // Uses hysteresis around threshold boundaries to prevent jitter/flickering.
+            // Measures raw pulse interval and normalises to 1 PPQN (quarter note).
+            // Uses hysteresis + stability counter for robust DIN sync lock.
             uint32_t eff_clk_period = clk_period_samples;
             uint32_t mult = 1;
-            if (last_mult == 24) {
-                mult = (eff_clk_period < 1700) ? 24 : ((eff_clk_period < 4400) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
-            } else if (last_mult == 4) {
-                mult = (eff_clk_period < 1300) ? 24 : ((eff_clk_period < 4400) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
-            } else if (last_mult == 2) {
-                mult = (eff_clk_period < 1300) ? 24 : ((eff_clk_period < 3600) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
+
+            if (din_sync_locked) {
+                // Already locked to 24 PPQN — stay locked unless 3 consecutive out-of-range pulses
+                if (eff_clk_period < 3000) {
+                    mult = 24;
+                    din_unlock_ctr = 0;
+                } else {
+                    din_unlock_ctr++;
+                    if (din_unlock_ctr >= 3) {
+                        din_sync_locked = false;
+                        din_sync_stability = 0;
+                        din_unlock_ctr = 0;
+                    } else {
+                        mult = 24; // hold lock during brief glitches
+                    }
+                }
             } else {
-                mult = (eff_clk_period < 1300) ? 24 : ((eff_clk_period < 3600) ? 4 : ((eff_clk_period < 7400) ? 2 : 1));
+                // Threshold detection with hysteresis for each PPQN standard
+                if (last_mult == 24) {
+                    mult = (eff_clk_period < 3000) ? 24 : ((eff_clk_period < 4400) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
+                } else if (last_mult == 4) {
+                    mult = (eff_clk_period < 2400) ? 24 : ((eff_clk_period < 4400) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
+                } else if (last_mult == 2) {
+                    mult = (eff_clk_period < 2400) ? 24 : ((eff_clk_period < 3600) ? 4 : ((eff_clk_period < 8600) ? 2 : 1));
+                } else {
+                    mult = (eff_clk_period < 2400) ? 24 : ((eff_clk_period < 3600) ? 4 : ((eff_clk_period < 7400) ? 2 : 1));
+                }
+
+                // Build stability counter for DIN sync lock
+                if (mult == 24) {
+                    din_sync_stability++;
+                    if (din_sync_stability >= 8) {
+                        din_sync_locked = true;
+                    }
+                } else {
+                    din_sync_stability = 0;
+                }
             }
             last_mult = mult;
             eff_clk_period *= mult;
 
-            // Clamped to valid 1 PPQN quarter-note period range (4000..96000 samples = 15..360 BPM)
-            eff_clk_period = clamp_i32(eff_clk_period, 4000, 96000);
+            // Clamped to valid 1 PPQN quarter-note period range (4000..144000 samples = 10..360 BPM)
+            eff_clk_period = clamp_i32(eff_clk_period, 4000, 144000);
 
-            // 4-tap IIR smoothing to filter out small pulse timing jitter
+            // Rock-solid clock stabilization: ignore hardware pulse jitter (< 1.5%) to prevent delay pitch wobble
             if (g_clk_period_samples == 0) {
                 g_clk_period_samples = eff_clk_period;
             } else {
-                g_clk_period_samples = (g_clk_period_samples * 3 + eff_clk_period) / 4;
+                int32_t delta = (int32_t)eff_clk_period - (int32_t)g_clk_period_samples;
+                if (delta < 0) delta = -delta;
+                int32_t deadband = g_clk_period_samples >> 6; // 1.5% deadband (~270 samples @ 80 BPM)
+                if (delta > deadband) {
+                    int32_t threshold = g_clk_period_samples >> 3; // 12.5% threshold for tempo jumps
+                    if (delta > threshold) {
+                        g_clk_period_samples = eff_clk_period;
+                    } else {
+                        g_clk_period_samples = (g_clk_period_samples * 7 + eff_clk_period) / 8;
+                    }
+                }
             }
             clk_timer = 0;
         }
@@ -514,49 +582,57 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     static int32_t  ms_pitch_sweep = 0;  // pitch sweep delta
     static int32_t  ms_type = 0;         // 0 = click, 1 = chirp, 2 = squeal, 3 = noise pop
 
+    if (pulse1_live && p1_rising) {
+        uint32_t ms_prob = (p.codec_mix > 500) ? (uint32_t)p.codec_mix : 8000;
+        if (((fast_rand(rand_seed) & 0x7FFF) < ms_prob) && ms_event_timer > 500) {
+            ms_event_timer = 0; // Align microsound trigger to clock pulse
+        }
+    }
+
     if (ms_event_timer > 0) {
         ms_event_timer--;
     } else {
-        // 1. Codec Mix (Main Knob) scales event density:
-        // Sweeps max interval from 28800 samples (1.2s) down to 2800 samples (116ms)
-        int32_t max_interval = 28800 - ((p.codec_mix * 26000) >> 15);
-        if (max_interval < 2800) max_interval = 2800;
+        // 1. Codec Y Knob (Temporal Instability / Pops) scales pop rate & Geiger density:
+        // Low Y = sparse relaxed pops (1.2s interval); High Y = dense geiger crackle & rapid microglitches (50ms interval)
+        int32_t ms_rate_param = p.codec_scramble > p.codec_pop_prob ? p.codec_scramble : p.codec_pop_prob;
+        int32_t max_interval = 28800 - ((ms_rate_param * 27600) >> 15);
+        if (max_interval < 1200) max_interval = 1200;
 
         uint32_t r = fast_rand(rand_seed);
-        ms_event_timer = 960 + (((r & 0xFFFF) * (max_interval - 960)) >> 16);
+        ms_event_timer = 480 + (((r & 0xFFFF) * (max_interval - 480)) >> 16);
         
-        // 2. Event type distribution (always active so "blips and blups" are always heard):
-        // 0..2 = click, 3..4 = chirp (blip), 5..6 = squeal (bleep), 7 = noise pop
-        uint32_t type_roll = (r >> 16) & 7;
-        if (type_roll <= 2)      ms_type = 0; // Click
-        else if (type_roll <= 4) ms_type = 1; // Chirp / Sweep
-        else if (type_roll <= 6) ms_type = 2; // Squeal / EMI
-        else                     ms_type = 3; // Noise pop
+        // 2. Codec X Knob (Demolition Character / Noise) controls sound type & noise vs tone balance:
+        // Low X = deep sub-clicks, Mid X = tonal sine chirps/squeals, High X = noise pops & digital hash noise
+        int32_t x_param = p.codec_downsample;
+        if (x_param < 10000) {
+            ms_type = (r & 1) ? 0 : 1; // Clicks & low blups
+        } else if (x_param < 22000) {
+            ms_type = (r & 1) ? 1 : 2; // Tonal chirps & high squeals
+        } else {
+            ms_type = (r & 1) ? 3 : 2; // Noise pops & digital noise
+        }
 
         ms_env = 32767;
         ms_phase = 0;
 
-        // 3. Codec X Knob (Downsample) scales chirp pitch/frequency, decay time, and sweep speed:
-        int32_t pitch_offset = (p.codec_downsample * 100000000) >> 15;
+        // 3. Codec X Knob scales chirp pitch/frequency, decay time, and sweep speed:
+        int32_t pitch_offset = (x_param * 100000000) >> 15;
 
         if (ms_type == 0) {
             ms_decay = 0; // single sample click
         } else if (ms_type == 1) {
             // Digital chirp: rapid pitch sweep down.
-            // High X makes chirps shorter (snappier decay) and sweeps pitch faster.
-            ms_decay = 31200 - ((p.codec_downsample * 4000) >> 15);
+            ms_decay = 31200 - ((x_param * 4000) >> 15);
             ms_freq = 40000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
-            ms_pitch_sweep = -120000 - ((p.codec_downsample * 200000) >> 15);
+            ms_pitch_sweep = -120000 - ((x_param * 200000) >> 15);
         } else if (ms_type == 2) {
             // High squeal: slow pitch slide up.
-            // High X makes squeals shorter and sweeps faster.
-            ms_decay = 32500 - ((p.codec_downsample * 6000) >> 15);
+            ms_decay = 32500 - ((x_param * 6000) >> 15);
             ms_freq = 90000000 + pitch_offset + (int32_t)(fast_rand(rand_seed) & 0x0FFFFFFF);
-            ms_pitch_sweep = 15000 + ((p.codec_downsample * 30000) >> 15);
+            ms_pitch_sweep = 15000 + ((x_param * 30000) >> 15);
         } else {
-            // Short noise pop.
-            // High X makes it a tiny, high-passed click.
-            ms_decay = 29000 - ((p.codec_downsample * 5000) >> 15);
+            // Short noise pop / digital hash.
+            ms_decay = 29000 - ((x_param * 5000) >> 15);
         }
     }
 
@@ -611,25 +687,25 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     int32_t rawL = event_sig + surface_crackle;
     int32_t rawR = (ms_type == 3) ? -rawL : (event_sig + surface_crackle);
 
-    // Page 1 (Codec Engine) directly controls the internal microsound generator level when no input is plugged in!
-    int32_t codec_level = (p.codec_mix > 4000) ? p.codec_mix : 4000;
-    int32_t gain_level = 16 + ((codec_level * 16384) >> 15);
-
     // --- Read Audio Inputs & Attenuate for Headroom ---
     // AudioIn() returns ±2048 (12-bit). Net << 3 → ±16384 in Q15 (50% FS, 6dB headroom).
     int16_t L = (int16_t)((AudioIn1() << 4) >> 1);
     int16_t R = no_audio2 ? L : (int16_t)((AudioIn2() << 4) >> 1);
 
-    // If both input jacks are unplugged, route organic microsounds to the main audio path
+    // If both input jacks are unplugged, only route microsound generator if Codec/Destruction mix is active
     if (p.no_audio1 && p.no_audio2) {
-        L = (int16_t)((rawL * gain_level) >> 15);
-        R = (int16_t)((rawR * gain_level) >> 15);
+        int32_t active_codec = p.codec_mix;
+        if (active_codec > 500) {
+            int32_t gain_level = (active_codec * 16384) >> 15;
+            L = (int16_t)((rawL * gain_level) >> 15);
+            R = (int16_t)((rawR * gain_level) >> 15);
+        } else {
+            L = 0;
+            R = 0;
+        }
     }
 
     // --- Anti-Aliasing Lowpass (1-pole, coef=30500 → -3dB @ ~8.5 kHz @ 24 kHz) ---
-    // ComputerCard applies a 12 kHz notch (Q=100) inside BufferFull() to remove the
-    // fundamental MUX clock tone. This LP removes the sub-harmonics at 4–8 kHz that
-    // fold back within the 12 kHz Nyquist and are audible as a high-frequency whine.
     lp_aa_L += (((int32_t)L - lp_aa_L) * 30500) >> 15;
     L = (int16_t)lp_aa_L;
     lp_aa_R += (((int32_t)R - lp_aa_R) * 30500) >> 15;
@@ -639,35 +715,50 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     L = dc_inL.process(L);
     R = dc_inR.process(R);
 
-    // Bypassed when both inputs are unplugged to let the self-oscillation seed pass through.
+    // Apply Noise Gate & Downward Expander when audio cables are plugged in
     if (!(p.no_audio1 && p.no_audio2)) {
-        // 1-pole low-pass filter at ~300Hz in the sidechain to ignore high-frequency USB whine
+        // Full-band sidechain with gentle LPF (~6kHz) to accurately track all musical pitches & harmonics
         static int32_t gate_lpL = 0;
         static int32_t gate_lpR = 0;
-        gate_lpL += (((int32_t)L - gate_lpL) * 2385) >> 15;
-        gate_lpR += (((int32_t)R - gate_lpR) * 2385) >> 15;
+        gate_lpL += (((int32_t)L - gate_lpL) * 26000) >> 15;
+        gate_lpR += (((int32_t)R - gate_lpR) * 26000) >> 15;
 
         int32_t absL = gate_lpL < 0 ? -gate_lpL : gate_lpL;
         int32_t absR = gate_lpR < 0 ? -gate_lpR : gate_lpR;
-        int32_t input_level = absL + absR;
+        int32_t input_level = absL > absR ? absL : absR;
         
         static int32_t gate_env = 0;
         if (input_level > gate_env) {
-            gate_env += (input_level - gate_env) >> 4;   // fast attack ~1ms
+            // Instant attack: catch transients immediately on sample 1 so note heads are never chopped
+            gate_env = input_level;
         } else {
-            gate_env += (input_level - gate_env) >> 13;  // slow release/decay ~340ms (prevents chattering)
+            // Smooth decay (~300ms) to preserve natural note decay tails
+            gate_env += (input_level - gate_env) >> 10;
         }
+        vis_input_level.store((uint16_t)gate_env, std::memory_order_relaxed);
         
-        static bool gate_open = true;
-        if (gate_env > 300) {
+        // Hysteresis Noise Gate & Downward Expander:
+        //   Threshold: 350 DAC counts (-40 dB).
+        //   When input_level > 350: gate opens instantly (32768)
+        //   When input_level < 200: expander attenuates idle cable hiss to zero
+        static bool gate_open = false;
+        if (gate_env > 350) {
             gate_open = true;
-        } else if (gate_env < 180) {
+        } else if (gate_env < 200) {
             gate_open = false;
         }
+
+        int32_t target_gain = 0;
+        if (gate_open) {
+            target_gain = 32768;
+        } else if (gate_env > 50) {
+            target_gain = ((gate_env - 50) * 16384) / 150;
+        } else {
+            target_gain = 0;
+        }
         
-        static int32_t gate_gain = 32768;
-        int32_t target_gain = gate_open ? 32768 : 0;
-        gate_gain += (target_gain - gate_gain) >> 10;     // 40ms click-free fade
+        static int32_t gate_gain = 0;
+        gate_gain += (target_gain - gate_gain) >> 6; // ~3ms click-free smooth fade
         
         L = (int16_t)(((int32_t)L * gate_gain) >> 15);
         R = (int16_t)(((int32_t)R * gate_gain) >> 15);
@@ -717,12 +808,12 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
             run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             if (mono_mode) run_chorus(L, R, p);
-            run_codec(L, R, p);
+            run_codec(L, R, p, pulse1_live, p1_rising);
             break;
 
         case 2: // Scatter Cloud (Chorus already post-delay in this preset)
             run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
-            run_codec(L, R, p);
+            run_codec(L, R, p, pulse1_live, p1_rising);
             // Delay follows glitcher: don't freeze delay write pointer so it keeps recording
             // the frozen glitch output -- passing freeze=true would stale the delay buffer.
             run_delay(L, R, p, false, pulse1_live, clk_period_samples);
@@ -733,7 +824,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
         case 3: // Filtered Dub
             run_filter(L, R, p);
-            run_codec(L, R, p);
+            run_codec(L, R, p, pulse1_live, p1_rising);
             if (!mono_mode) run_chorus(L, R, p);
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
             run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
@@ -744,7 +835,7 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
         case 0:
         default: // Series Standard
             if (!mono_mode) run_chorus(L, R, p);
-            run_codec(L, R, p);
+            run_codec(L, R, p, pulse1_live, p1_rising);
             run_delay(L, R, p, freeze, pulse1_live, clk_period_samples);
             run_glitcher(L, R, p, freeze, stutter, is_freeze_page, cv2, scrub_offset, pulse1_live, p1_rising, p1_val, pulse2_live, p2_rising, p2_val, g_clk_period_samples, clk_timer);
             if (mono_mode) run_chorus(L, R, p);
@@ -771,57 +862,72 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     static uint32_t slow_clock_ctr = 0;
     
     // Check if we need to update our stepped CV values:
-    // Either on a loop boundary (loop_triggered) or every ~500ms (24000 samples) when not glitching
-    bool trigger_cv_update = loop_triggered;
-    slow_clock_ctr++;
-    if (slow_clock_ctr >= 24000) {
-        slow_clock_ctr = 0;
-        if (!glitcher.active) {
+    bool trigger_cv_update = false;
+    bool clock_synced = (g_clk_period_samples > 0);
+    
+    if (clock_synced) {
+        // Clock-synced: advance step on rising edge of Pulse In 1
+        trigger_cv_update = p1_rising;
+    } else {
+        // Unclocked: advance step on loop boundaries OR internal clock timer (~500ms @ 24 kHz)
+        slow_clock_ctr++;
+        if (slow_clock_ctr >= 12000) { // 500ms interval (120 BPM step tempo)
+            slow_clock_ctr = 0;
+            trigger_cv_update = true;
+        }
+        if (loop_triggered) {
             trigger_cv_update = true;
         }
     }
     
     if (trigger_cv_update) {
-        // Harmonically weighted semitone options:
-        // Index 0..4: consonant (unison, 4th, 5th, octave) -> {-12, -5, 0, 7, 12}
-        // Index 5..9: slightly more tense (3rds, 6ths) -> {-9, -8, -3, 4, 9}
-        // Index 10..14: dissonant (tritones, 7ths, seconds) -> {-11, -6, -1, 6, 11}
+        // Universal Harmonically Weighted Semitone Options (15 notes):
+        // Index 0..4: Consonant (unison, 4th, 5th, octave) -> {-12, -5, 0, 7, 12}
+        // Index 5..9: Warm (3rds, 6ths) -> {-9, -8, -3, 4, 9}
+        // Index 10..14: Tense / Chromatic (2nds, 7ths, tritones) -> {-11, -6, -1, 6, 11}
         static const int16_t semitone_table[15] = {
             -12, -5, 0, 7, 12,
             -9, -8, -3, 4, 9,
             -11, -6, -1, 6, 11
         };
-        
-        int32_t active_grit = p.cv1_live ? p.cv1 : 0;
-        
-        // Pick a semitone for CV1:
-        // If grit is low, limit choice to consonant (first 5 values).
-        // If grit is high, allow tense and dissonant values.
+
+        // Glitcher Page Y Knob (vp[3][2]) controls Sequencer mutation rate & scale degree palette:
+        int32_t seq_knob = vp[3][2];
+
         int32_t max_choice = 5;
-        if (active_grit > 500) max_choice = 10;
-        if (active_grit > 1200) max_choice = 15;
+        if (seq_knob > 10000) max_choice = 10;
+        if (seq_knob > 22000) max_choice = 15;
+
+        // Generative 8-step pattern buffer (Turing Machine style):
+        static int32_t seq_pattern[8] = {0, 2, 4, 1, 3, 0, 4, 2};
+        static uint8_t pat_idx = 0;
         
-        int32_t choice1 = (fast_rand(rand_seed) & 0x7FFF) % max_choice;
-        int16_t semi1 = semitone_table[choice1];
-        
-        // Choose a harmonic interval for CV2:
-        // Typically a consonant interval (major 3rd, minor 3rd, 4th, 5th)
-        // If grit is high, can also be dissonant intervals
-        static const int16_t interval_table[6] = {3, 4, 5, 7, 1, 6};
-        int32_t max_interval = 4; // 3, 4, 5, 7
-        if (active_grit > 1000) max_interval = 6;
-        
-        int32_t choice2 = (fast_rand(rand_seed) & 0x7FFF) % max_interval;
-        int16_t interval = interval_table[choice2];
-        int16_t semi2 = semi1 + interval;
-        if (semi2 > 12) semi2 -= 12; // keep within ±12 semitones
-        if (semi2 < -12) semi2 += 12;
-        
-        // Convert semitones to DAC counts:
-        // Eurorack CV standard here: Q11 output where ±1 octave = ±820 DAC counts (approx ±0.8V).
-        // Standard calibration is ±2048 = ±2 octaves, so 1 semitone = 820 / 12 = 68 DAC counts.
-        last_cv1 = semi1 * 68;
-        last_cv2 = semi2 * 68;
+        pat_idx = (pat_idx + 1) & 7;
+
+        // Low Glitcher Y Knob (< 4000): 0% mutation -> Pattern is LOCKED into a fixed 8-note repeating riff!
+        // Turning Glitcher Y Knob up (> 4000): Mutation rate scales smoothly (0% .. 40%), generating evolving melodies!
+        int32_t mutate_rate = 0;
+        if (seq_knob > 4000) {
+            mutate_rate = ((seq_knob - 4000) * 13107) / 28767;
+        }
+
+        if (mutate_rate > 0 && (fast_rand(rand_seed) & 0x7FFF) < mutate_rate) {
+            int32_t delta = ((fast_rand(rand_seed) & 1) == 0) ? 1 : -1;
+            int32_t new_val = seq_pattern[pat_idx] + delta;
+            if (new_val < 0) new_val = max_choice - 1;
+            if (new_val >= max_choice) new_val = 0;
+            seq_pattern[pat_idx] = new_val;
+        }
+
+        int32_t choice = seq_pattern[pat_idx] % max_choice;
+        int16_t lead_semi = semitone_table[choice];
+
+        // Convert semitones to DAC counts (Eurorack 1V/Oct standard: 68 DAC counts per semitone)
+        last_cv1 = lead_semi * 68;
+
+        // CV Out 2: Stepped Random Voltage Generator (Sample & Hold)
+        // Outputs random 0V to +3.0V stepped CV modulation on every clock / sequencer step!
+        last_cv2 = (int16_t)(((fast_rand(rand_seed) & 0x7FFF) * 2048) >> 15);
     }
     
     CVOut1(last_cv1);
@@ -844,6 +950,16 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
 
 
     // --- Output ---
+    // Output microsound generator on Pulse Out 2 as PWM audio
+    // rawL contains the combined event_sig + surface_crackle from the microsound engine
+    // Scale to 10-bit PWM range. Hardware buffer inverts, so use (1023 - level).
+    {
+        int32_t pwm_sig = rawL;
+        if (pwm_sig > 16384) pwm_sig = 16384;
+        if (pwm_sig < -16384) pwm_sig = -16384;
+        uint16_t pwm_val = 1023 - (uint16_t)((pwm_sig + 16384) >> 5);
+        pwm_set_gpio_level(PULSE_2_RAW_OUT, pwm_val);
+    }
     // Unity gain: input << 3 and output >> 4 cancel exactly (±16384 Q15 → ±1024 DAC ≡ ±3V).
     // A ±6V Eurorack signal (ADC ±2048 → Q15 ±16384) comes out at the same ±6V.
     // The previous << 1 caused a spurious +6dB, making Bends louder than peer modules.
@@ -878,396 +994,623 @@ static bool is_frozen       = false;
 
 
 
-static void push_params_to_core1() {
-    int32_t active_macro = g_macro_active ? grittiness_macro : 16384;
-    if (active_macro > 15884 && active_macro < 16884) {
-        active_macro = 16384; // Center deadzone to prevent CV drift from scaling parameters
+static void push_params_for_idx(
+    uint32_t idx,
+    bool cv1_live = false, int32_t raw_cv1_val = 0,
+    bool cv2_live = false, int32_t raw_cv2_val = 0,
+    bool pulse1_live = false, bool pulse1_val = false,
+    bool pulse2_live = false,
+    bool debounced_no_audio1 = true, bool debounced_no_audio2 = true,
+    ComputerCard::Switch debounced_sw = ComputerCard::Switch::Middle,
+    uint32_t active_sw_held_ms = 0
+) {
+    volatile Core1Params &p = g_params[idx];
+    
+    g_macro_active = (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350);
+    int32_t base_macro = g_macro_active ? grittiness_macro : 16384;
+
+    // CV1 no longer modulates macro globally (dedicated to digital loss engine)
+    int32_t cv1_val = cv1_live ? raw_cv1_val : 0;
+    int32_t cv2_val = cv2_live ? raw_cv2_val : 0;
+
+    // Scale CV inputs so that the 4 Voltages button presses (max ~1.62V for CV1, ~1.82V for CV2 on Volt3/4)
+    // can sweep the full range, while normal CV still functions correctly (clamping at the limits).
+    if (cv1_live) {
+        // Capped at 1000 (approx 48% of full scale) so button-triggered degradation is tasteful and not too strong
+        cv1_val = (cv1_val * 1000) / 553;
+        if (cv1_val > 1000) cv1_val = 1000;
+        if (cv1_val < -1000) cv1_val = -1000;
     }
-    for (int idx = 0; idx < 2; idx++) {
-        volatile Core1Params &p = g_params[idx];
+    if (cv2_live) {
+        cv2_val = (cv2_val * 2048) / 621;
+        if (cv2_val > 2048) cv2_val = 2048;
+        if (cv2_val < -2048) cv2_val = -2048;
+    }
 
-        // Precompute staggered macros for the grittiness sweep
-        int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 30000);
-        int32_t macro_codec  = get_staggered_macro(active_macro, 0, 22000);
-        int32_t macro_delay  = get_staggered_macro(active_macro, 12000, 32767);
-        int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
-        int32_t macro_filter = get_staggered_macro(active_macro, 16000, 32767);
-        int32_t macro_reverb = get_staggered_macro(active_macro, 20000, 32767);
+    int32_t cv1_abs = cv1_val < 0 ? -cv1_val : cv1_val;
+    int32_t cv2_abs = cv2_val < 0 ? -cv2_val : cv2_val;
+    int32_t active_macro = base_macro;
 
-        // Precompute global noise scale first (tied to reverb/lofi entrance)
-        int32_t noise_scale = 16384;
-        int32_t rev_damping = vp[5][2];
-        if (rev_damping > 16384) {
-            int32_t diff = rev_damping - 16384;
-            noise_scale = 16384 + (diff << 1);
-        }
-        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, macro_reverb);
-        p.global_noise_scale = globalNoiseScale;
+    // Precompute staggered macros for the grittiness sweep
+    int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 28000);
+    int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
+    int32_t macro_delay  = get_staggered_macro(active_macro, 14000, 30000);
+    int32_t macro_glitch = get_staggered_macro(active_macro, 6000, 24000);
+    int32_t macro_filter = get_staggered_macro(active_macro, 18000, 32767);
+    int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
 
-        p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
-        p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = vp[0][2];
+    // Precompute global noise scale first (tied to reverb/lofi entrance)
+    int32_t noise_scale = 16384;
+    int32_t rev_damping = vp[5][2];
+    if (rev_damping > 16384) {
+        int32_t diff = rev_damping - 16384;
+        noise_scale = 16384 + (diff << 1);
+    }
+    int32_t globalNoiseScale = scale_grit(noise_scale, 49152, macro_reverb);
+    p.global_noise_scale = globalNoiseScale;
 
-        // Pre-decode Chorus depth, feedback, and destroy
-        int32_t raw_depth_fb = vp[0][2];
-        int32_t chorus_depth = 0;
-        int32_t chorus_feedback = 0;
-        int32_t chorus_xor_mask = 0;
-        if (raw_depth_fb < 16384) {
-            chorus_depth = raw_depth_fb * 2;
-            chorus_feedback = 0;
+    bool chorus_karplus_active = (vp[0][2] >= 22500);
+    bool delay_karplus_active  = (vp[2][1] < 3000 && vp[2][2] >= 24000);
+    bool filter_note_active    = (vp[4][1] >= 24000);
+    bool is_note_gen_mode      = chorus_karplus_active || delay_karplus_active || filter_note_active;
+
+    p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
+    int32_t eff_chorus_rate = vp[0][1];
+    if (chorus_karplus_active && cv1_live && cv1_val != 0) {
+        eff_chorus_rate = clamp_i32(eff_chorus_rate + (cv1_val * 4), 0, 32767);
+    }
+    p.chorus_rate      = eff_chorus_rate;
+    p.chorus_depth_fb  = vp[0][2];
+    p.karplus_active   = chorus_karplus_active;
+
+    // Pre-decode Chorus depth, feedback, and destroy
+    int32_t raw_depth_fb = vp[0][2];
+    int32_t chorus_depth = 0;
+    int32_t chorus_feedback = 0;
+    int32_t chorus_xor_mask = 0;
+    if (raw_depth_fb < 16384) {
+        chorus_depth = raw_depth_fb * 2;
+        chorus_feedback = 0;
+    } else {
+        chorus_depth = 32767;
+        int32_t base_fb = 0;
+        int32_t base_xor = 0;
+        if (raw_depth_fb < 22500) {
+            base_fb = ((raw_depth_fb - 16384) * 26000) / (22500 - 16384);
+        } else if (raw_depth_fb < 31500) {
+            base_fb = 26000 + (((raw_depth_fb - 22500) * 6700) / (31500 - 22500));
+            base_xor = 0;
         } else {
-            chorus_depth = 32767;
-            int32_t base_fb = 0;
-            int32_t base_xor = 0;
-            if (raw_depth_fb < 26214) {
-                base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
-            } else {
-                base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
-                base_xor = (raw_depth_fb - 26214) >> 9;
-            }
-            if (active_macro < 16384) {
-                chorus_feedback = (base_fb * active_macro) >> 14;
-                chorus_xor_mask = (base_xor * active_macro) >> 14;
-            } else {
-                int32_t diff_fb = 32767 - base_fb;
-                int32_t diff_xor = 31 - base_xor;
-                int32_t scale_q15 = (macro_chorus - 16384) * 2;
-                chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
-                chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
-            }
+            base_fb = 32700 + (((raw_depth_fb - 31500) * 67) / (32767 - 31500));
+            base_xor = ((raw_depth_fb - 31500) * 8) / (32767 - 31500);
         }
-        p.chorus_depth = chorus_depth;
-        p.chorus_feedback = chorus_feedback;
-        p.chorus_xor_mask = chorus_xor_mask;
-
-        // Pre-calculate Codec levels (Omitting 16384 fourth parameter allows 100% full intensity scaling)
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
-        int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
-        
-        p.codec_mix = raw_strength;
-        p.codec_downsample = raw_downsample;
-        p.codec_ringing_xor = raw_ringing_xor;
-
-        int32_t X = raw_downsample;
-        int32_t Y = raw_ringing_xor;
-        Y = clamp_i32(Y, 0, 32767);
-
-        int32_t mp3_ring_level = 0;
-        int32_t fuzz_level = 0;
-        int32_t decimate_level = 0;
-
-        // Knob X Transitions (Islands & Bridges)
-        if (X < 5000) {
-            mp3_ring_level = 32767;
-            fuzz_level = 0;
-            decimate_level = 0;
-        } else if (X < 12000) {
-            int32_t ratio = (X - 5000) * 32768 / 7000;
-            mp3_ring_level = 32767 - ((32767 * ratio) >> 15);
-            fuzz_level = (32767 * ratio) >> 15;
-            decimate_level = 0;
-        } else if (X < 20000) {
-            mp3_ring_level = 0;
-            fuzz_level = 32767;
-            decimate_level = 0;
-        } else if (X < 27000) {
-            int32_t ratio = (X - 20000) * 32768 / 7000;
-            mp3_ring_level = 0;
-            fuzz_level = 32767 - ((32767 * ratio) >> 15);
-            decimate_level = (32767 * ratio) >> 15;
+        if (active_macro < 16384) {
+            chorus_feedback = (base_fb * active_macro) >> 14;
+            chorus_xor_mask = (base_xor * active_macro) >> 14;
         } else {
-            mp3_ring_level = 0;
-            fuzz_level = 0;
-            decimate_level = 32767;
+            int32_t diff_fb = 32767 - base_fb;
+            int32_t diff_xor = 15 - base_xor;
+            int32_t scale_q15 = (macro_chorus - 16384) * 2;
+            chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
+            chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
         }
+    }
+    p.chorus_depth = chorus_depth;
+    p.chorus_feedback = chorus_feedback;
+    p.chorus_xor_mask = chorus_xor_mask;
 
-        // Knob Y Transitions (Islands & Bridges)
-        int32_t tape_sat = 0;
-        int32_t tape_hiss = 0;
-        int32_t tape_hicut = 0;
-        int32_t pop_prob = 0;
-        int32_t click_ratio = 0;
-        int32_t bad_conn_level = 0;
-        int32_t sputter_prob = 0;
-        int32_t scramble_level = 0;
+    // Pre-calculate Codec levels
+    int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
+    int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
+    int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
+    
+    p.codec_mix = raw_strength;
+    p.codec_downsample = raw_downsample;
+    p.codec_ringing_xor = raw_ringing_xor;
 
-        if (Y < 5000) {
-            tape_sat = 30000;
-            tape_hiss = 30;
-            pop_prob = 12;
-            bad_conn_level = 0;
-            sputter_prob = 0;
-            scramble_level = 0;
-            click_ratio = 12000;
-        } else if (Y < 12000) {
-            int32_t ratio = (Y - 5000) * 32768 / 7000;
-            tape_sat = 30000 - ((30000 * ratio) >> 15);
-            tape_hiss = 30 - ((30 * ratio) >> 15);
-            pop_prob = 12 - ((12 * ratio) >> 15);
-            bad_conn_level = (32767 * ratio) >> 15;
-            sputter_prob = (50 * ratio) >> 15;
-            scramble_level = 0;
-            click_ratio = 12000 - ((12000 * ratio) >> 15);
-        } else if (Y < 20000) {
-            tape_sat = 0;
-            tape_hiss = 0;
-            pop_prob = 0;
-            bad_conn_level = 32767;
-            sputter_prob = 50;
-            scramble_level = 0;
-            click_ratio = 0;
-        } else if (Y < 27000) {
-            int32_t ratio = (Y - 20000) * 32768 / 7000;
-            tape_sat = 0;
-            tape_hiss = 0;
-            pop_prob = 0;
-            bad_conn_level = 32767 - ((20000 * ratio) >> 15);
-            sputter_prob = 50 - ((30 * ratio) >> 15);
-            scramble_level = (32767 * ratio) >> 15;
-            click_ratio = 0;
+    int32_t X = raw_downsample;
+    int32_t Y = raw_ringing_xor;
+    Y = clamp_i32(Y, 0, 32767);
+
+    int32_t mp3_ring_level = 0;
+    int32_t fuzz_level = 0;
+    int32_t decimate_level = 0;
+
+    // X Knob: 4-Zone Demolition Character Morph (0 to 32767)
+    // Zone 0 (0..5000): Tape Drive & Warmth Zone (tape_sat 0..32767 & tape_hiss 0..500)
+    // Zone 1 (5000..14000): MP3 Lossy Subband Ringing
+    // Zone 2 (14000..23000): Lossy Bitcrush Fuzz
+    // Zone 3 (23000..32767): Bit-Shred Decimation
+    int32_t tape_sat = 0;
+    int32_t tape_hiss = 0;
+
+    if (X < 5000) {
+        tape_sat = (X * 32767) / 5000;
+        // Tape Hiss exists ONLY in Tape Zone (0..5000): ramps up 0..2500 then fades quickly to 0 at 5000
+        if (X < 2500) {
+            tape_hiss = (X * 450) / 2500;
         } else {
-            tape_sat = 0;
-            tape_hiss = 0;
-            pop_prob = 0;
-            bad_conn_level = 12767;
-            sputter_prob = 20;
-            scramble_level = 32767;
-            click_ratio = 0;
+            tape_hiss = 450 - (((X - 2500) * 450) / 2500);
+        }
+        mp3_ring_level = 0;
+        fuzz_level = 0;
+        decimate_level = 0;
+    } else if (X < 14000) {
+        int32_t t = ((X - 5000) * 32767) / 9000;
+        tape_sat = 32767;
+        tape_hiss = 0;
+        mp3_ring_level = (t * 32767) >> 15;
+        fuzz_level = 0;
+        decimate_level = 0;
+    } else if (X < 23000) {
+        int32_t t = ((X - 14000) * 32767) / 9000;
+        tape_sat = 32767;
+        tape_hiss = 0;
+        mp3_ring_level = 32767 - ((t * 32767) >> 15);
+        fuzz_level = (t * 32767) >> 15;
+        decimate_level = 0;
+    } else {
+        int32_t t = ((X - 23000) * 32767) / 9767;
+        tape_sat = 32767;
+        tape_hiss = 0;
+        mp3_ring_level = 0;
+        fuzz_level = 32767 - ((t * 20000) >> 15);
+        decimate_level = (t * 32767) >> 15;
+    }
+
+    // Y Knob: Temporal Artifacts & Instability (0 to 32767)
+    // Zone 1 (0..10922): Pitch Wow & Flutter Warble & Vinyl Crackle Pops
+    // Zone 2 (10922..21845): Bad Connection & Packet Drops
+    // Zone 3 (21845..32767): CD Sputter & Digital Scramble
+    int32_t tape_wow_flutter = 0;
+    int32_t pop_prob = 0;
+    int32_t bad_conn_level = 0;
+    int32_t sputter_prob = 0;
+    int32_t scramble_level = 0;
+
+    if (Y < 10922) {
+        tape_wow_flutter = (Y * 32767) / 10922;
+        pop_prob = (Y * 40) / 10922; // Authentic vinyl pops
+    } else if (Y < 21845) {
+        int32_t rel_y = Y - 10922;
+        tape_wow_flutter = 32767 - ((rel_y * 16384) / 10923);
+        bad_conn_level = (rel_y * 32767) / 10923;
+        pop_prob = 40 - ((rel_y * 20) / 10923);
+    } else {
+        int32_t rel_y = Y - 21845;
+        tape_wow_flutter = 16383;
+        bad_conn_level = 32767;
+        sputter_prob = (rel_y * 50) / 10922;
+        scramble_level = (rel_y * 32767) / 10922;
+        if (scramble_level > 32767) scramble_level = 32767;
+    }
+
+    // Scale pop_prob by X quality
+    int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
+    pop_prob = (pop_prob * x_scale_q15) >> 15;
+
+    // Fuzz level quadratic warp
+    fuzz_level = (fuzz_level * fuzz_level) >> 15;
+
+    // Scale by Main knob (strength)
+    fuzz_level = (fuzz_level * raw_strength) >> 15;
+    decimate_level = (decimate_level * raw_strength) >> 15;
+    mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
+
+    // Global Noise Scale modifier
+    fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
+    decimate_level = (decimate_level * globalNoiseScale) >> 14;
+    mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
+    bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
+    scramble_level = (scramble_level * globalNoiseScale) >> 14;
+    pop_prob = (pop_prob * globalNoiseScale) >> 14;
+
+    if (fuzz_level > 32767) fuzz_level = 32767;
+    if (decimate_level > 32767) decimate_level = 32767;
+    if (mp3_ring_level > 32767) mp3_ring_level = 32767;
+    if (bad_conn_level > 32767) bad_conn_level = 32767;
+    if (scramble_level > 32767) scramble_level = 32767;
+
+    int32_t click_ratio = 0;
+    if (Y < 8000) {
+        click_ratio = 4000 + ((Y * 12000) / 8000); // 4000 to 16000 in Zone 1
+    } else if (Y >= 8000 && Y < 16000) {
+        click_ratio = 16000 + (((Y - 8000) * 8000) / 8000); // 16000 to 24000 in Zone 2
+    } else {
+        click_ratio = 24000;
+    }
+    int32_t click_depth = (click_ratio * raw_strength) >> 15;
+    click_depth = (click_depth * x_scale_q15) >> 15;
+    click_depth = (click_depth * 16000) >> 15;
+
+    sputter_prob = (sputter_prob * raw_strength) >> 15;
+    sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
+
+    // CV1 global circuit bending injection (active when NOT in pitch/note generation mode):
+    if (!is_note_gen_mode && cv1_live && cv1_abs > 100) {
+        p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 16), 0, 32767);
+        int32_t cv1_x_mod = (cv1_abs * 16);
+        X = clamp_i32(X + cv1_x_mod, 0, 32767);
+
+        if (X < 16384) {
+            fuzz_level = X * 2;
+            decimate_level = 0;
+        } else {
+            decimate_level = (X - 16384) * 2;
+            if (decimate_level > 32767) decimate_level = 32767;
+            fuzz_level = 32767 - decimate_level;
         }
 
-        // Link MP3 low-bitrate filter roll-off directly to Knob X's MP3 Ringing level
-        tape_hicut = (mp3_ring_level * 22000) >> 15;
-
-        // Scale pop_prob by X quality
-        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
-        pop_prob = (pop_prob * x_scale_q15) >> 15;
-
-        // Fuzz level quadratic warp
-        fuzz_level = (fuzz_level * fuzz_level) >> 15;
-
-        // Scale by Main knob (strength)
-        int32_t glitch_strength = 16384 + (raw_strength >> 1);
         fuzz_level = (fuzz_level * raw_strength) >> 15;
         decimate_level = (decimate_level * raw_strength) >> 15;
-        mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
-        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
-        scramble_level = (scramble_level * glitch_strength) >> 15;
-        tape_hicut = (tape_hicut * raw_strength) >> 15;
-
-        int32_t pop_strength = 16384 + (raw_strength >> 1);
-        pop_prob = (pop_prob * pop_strength) >> 15;
-
-        // Global Noise Scale modifier
         fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
         decimate_level = (decimate_level * globalNoiseScale) >> 14;
         mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
-        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
-        scramble_level = (scramble_level * globalNoiseScale) >> 14;
-        pop_prob = (pop_prob * globalNoiseScale) >> 14;
-        tape_hiss = (tape_hiss * globalNoiseScale) >> 14;
-
+        
         if (fuzz_level > 32767) fuzz_level = 32767;
         if (decimate_level > 32767) decimate_level = 32767;
         if (mp3_ring_level > 32767) mp3_ring_level = 32767;
-        if (bad_conn_level > 32767) bad_conn_level = 32767;
-        if (scramble_level > 32767) scramble_level = 32767;
-        if (tape_hicut > 32767) tape_hicut = 32767;
 
-        int32_t click_depth = (click_ratio * raw_strength) >> 15;
-        click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 8000) >> 15;
+        pop_prob = clamp_i32(pop_prob + (cv1_abs * 45) / 2048, 0, 50);
+        int32_t pop_cv1_depth = (cv1_abs * 16000) >> 11;
+        if (click_depth < pop_cv1_depth) click_depth = pop_cv1_depth;
 
-        sputter_prob = (sputter_prob * raw_strength) >> 15;
-        sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
-
-        int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
-
-        p.codec_mp3_ring = mp3_ring_level;
-        p.codec_fuzz = fuzz_level;
-        p.codec_decimate = decimate_level;
-        p.codec_pop_prob = pop_prob;
-        p.codec_click_depth = click_depth;
-        p.codec_bad_conn = bad_conn_level;
-        p.codec_scramble = scramble_level;
-        p.codec_sputter_prob = sputter_prob;
-        p.codec_tape_sat = tape_sat;
-        p.codec_tape_hiss = tape_hiss;
-        p.codec_tape_hicut = tape_hicut;
-        p.codec_active_loss = active_loss;
-
-        p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
-        
-        // Scale delay time by active_macro
-        int32_t raw_delay_time = vp[2][1];
-        int32_t scaled_delay_time = raw_delay_time;
-        if (active_macro < 16384) {
-            if (raw_delay_time > 16384) {
-                int32_t diff = raw_delay_time - 16384;
-                scaled_delay_time = 16384 + ((diff * macro_delay) >> 14);
-            }
-        } else {
-            int32_t diff = 32767 - raw_delay_time;
-            scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
-        }
-        p.delay_time     = scaled_delay_time;
-
-        // Custom Delay Feedback and Glitch Feedback scaling:
-        // Delay feedback below 22937 is clean. Only the glitch/XOR feedback portion above 22937 is scaled by macro.
-        int32_t raw_fb = vp[2][2];
-        int32_t clean_fb = raw_fb;
-        int32_t glitch_fb = 0;
-        if (raw_fb > 22937) {
-            clean_fb = 22937;
-            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
+        if (cv1_abs > 500) {
+            int32_t sputter_mod = ((cv1_abs - 500) * 80) / 1548;
+            sputter_prob = clamp_i32(sputter_prob + sputter_mod, 0, 80);
         }
 
-        if (active_macro < 16384) {
-            glitch_fb = (glitch_fb * active_macro) >> 14;
-        } else {
-            int32_t diff_fb = 32767 - glitch_fb;
-            int32_t scale_q15 = (macro_delay - 16384) * 2;
-            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
-        }
-
-        if (raw_fb > 22937) {
-            p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
-            if (p.delay_feedback > 32767) p.delay_feedback = 32767;
-        } else {
-            p.delay_feedback = clean_fb;
-        }
-        p.glitch_feedback = 0; // Disable glitcher's internal feedback loop
-
-        bool use_freeze_params = is_frozen;
-        int32_t raw_glitch_speed = 16384;
-        if (use_freeze_params) {
-            p.glitch_mix   = freeze_vp[0]; // scrub offset
-            raw_glitch_speed = freeze_vp[2]; // speed (Y knob)
-            p.glitch_size  = freeze_vp[1]; // loop size (X knob)
-        } else {
-            int32_t raw_mix = apply_deadzone(vp[3][0]);
-            p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
-            p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
-        }
-        p.glitch_speed = raw_glitch_speed;
-
-        // Glitch / Freeze speed mapping
-        int32_t glitch_speed_mapped = 65536;
-        if (use_freeze_params) {
-            int32_t knob = freeze_vp[2];
-            if (knob > 15300 && knob < 17400) {
-                knob = 16384;
-            }
-            glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767);
-        } else {
-            if (raw_glitch_speed > 18000) {
-                glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
-            } else if (raw_glitch_speed < 14000) {
-                glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
-            }
-        }
-        p.glitch_speed_mapped = glitch_speed_mapped;
-
-
-
-        // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
-        p.filter_cutoff = vp[4][0];
-        p.filter_res    = vp[4][1];
-        p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
-
-        p.freeze = freeze_latched;
-        p.stutter = false;
-        p.cv1 = 0;
-        p.cv2 = 0;
-
-        p.no_audio1 = true;
-        p.no_audio2 = true;
-        p.mono_mode  = false;
-
-        p.is_freeze_page = is_frozen;
-        p.flash_writing  = false;
-        p.grittiness_macro = active_macro;
-        p.input_width = global_input_width;
-        p.routing_mode = global_routing_mode;
-
-
-        // Reverb params — Reverb mix is clean (not scaled by macro).
-        p.reverb_mix  = apply_deadzone(vp[5][0]);
-        {
-            int32_t fb = vp[5][2];
-            int32_t fb_glitch = fb;
-            if (fb > 12000) {
-                if (active_macro < 16384) {
-                    fb_glitch = 12000 + (((fb - 12000) * active_macro) >> 14);
-                } else {
-                    int32_t target_max = 32767; // Scale up to 100% full intensity
-                    fb_glitch = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
-                }
-            }
-            
-            int32_t size_scale = 4915 + (((int32_t)vp[5][1] * 27852) >> 15);
-            p.reverb_size = size_scale;
-            // max_decay scales from ~28000 (small room) to 32400 (largest room).
-            // 32400/32767 ≈ 98.9% feedback — near-infinite ambience at max X + max size.
-            int32_t max_decay = 28000 + (((size_scale - 4915) * 60817) >> 20);
-
-            int32_t decay = 0;
-            if (fb_glitch < 24000) {
-                // Clean decay zone: linear ramp from 0 to max_decay
-                int32_t val = (fb_glitch * 87381) >> 16; // fb/24000 in Q15
-                decay = (val * max_decay) >> 15;
-            } else {
-                decay = max_decay;
-            }
-
-            int32_t lofi_level = 0;
-            if (fb_glitch < 12000) {
-                lofi_level = 0;
-            } else if (fb_glitch < 26000) {
-                int32_t diff = fb_glitch - 12000;
-                int32_t raw_lofi = (diff * 153391) >> 16;
-                int32_t raw_sq = (raw_lofi * raw_lofi) >> 15;
-                lofi_level = (raw_sq * raw_sq) >> 15;
-            } else {
-                lofi_level = 32767;
-            }
-
-            int32_t sparkle_level = 0;
-            if (fb_glitch < 14000) {
-                sparkle_level = 0;
-            } else if (fb_glitch < 28000) {
-                int32_t diff = fb_glitch - 14000;
-                sparkle_level = (diff * 153391) >> 16;
-            } else {
-                sparkle_level = 32767;
-            }
-
-            int32_t circuit_bent_level = 0;
-            if (fb_glitch < 20000) {
-                circuit_bent_level = 0;
-            } else {
-                int32_t diff = fb_glitch - 20000;
-                circuit_bent_level = (diff * 168188) >> 16;
-                if (circuit_bent_level > 32767) circuit_bent_level = 32767;
-            }
-
-            int32_t damp = 30000 - ((lofi_level * 8000) >> 15);
-
-            int32_t shift_q15 = (lofi_level * 6);
-            int32_t int_shift = shift_q15 >> 15;
-            int32_t frac_shift = shift_q15 & 0x7FFF;
-
-            p.reverb_decay = decay;
-            p.reverb_damp = damp;
-            p.reverb_lofi_level = lofi_level;
-            p.reverb_sparkle_level = sparkle_level;
-            p.reverb_circuit_bent_level = circuit_bent_level;
-            p.reverb_lofi_shift = int_shift;
-            p.reverb_lofi_frac = frac_shift;
+        if (cv1_abs > 1200) {
+            int32_t scramble_mod = ((cv1_abs - 1200) * 32767) / 848;
+            scramble_level = clamp_i32(scramble_level + scramble_mod, 0, 32767);
         }
     }
+
+    int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
+
+    p.codec_mp3_ring = mp3_ring_level;
+    p.codec_fuzz = fuzz_level;
+    p.codec_decimate = decimate_level;
+    p.codec_pop_prob = pop_prob;
+    p.codec_click_depth = click_depth;
+    p.codec_bad_conn = bad_conn_level;
+    p.codec_scramble = scramble_level;
+    p.codec_sputter_prob = sputter_prob;
+    p.codec_tape_sat = tape_sat;
+    p.codec_tape_hiss = tape_hiss;
+    p.codec_tape_wow_flutter = tape_wow_flutter;
+    p.codec_active_loss = active_loss;
+
+    p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
+    
+    // Scale delay time by active_macro
+    int32_t raw_delay_time = vp[2][1];
+    int32_t scaled_delay_time = raw_delay_time;
+    if (active_macro < 16384) {
+        if (raw_delay_time > 16384) {
+            int32_t diff = raw_delay_time - 16384;
+            scaled_delay_time = 16384 + ((diff * macro_delay) >> 14);
+        }
+    } else {
+        int32_t diff = 32767 - raw_delay_time;
+        scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
+    }
+    if (delay_karplus_active && cv1_live && cv1_val != 0) {
+        scaled_delay_time = clamp_i32(scaled_delay_time + (cv1_val * 4), 24, 32767);
+    }
+    static int32_t slewed_delay_time = 12000;
+    slewed_delay_time += (scaled_delay_time - slewed_delay_time) >> 3; // ~45ms tape inertia pitch-glide
+    p.delay_time     = slewed_delay_time;
+
+    // Custom Delay Feedback and Glitch Feedback scaling:
+    int32_t raw_fb = vp[2][2];
+    int32_t clean_fb = raw_fb;
+    int32_t glitch_fb = 0;
+    if (raw_fb > 22937) {
+        int32_t diff = raw_fb - 22937;
+        clean_fb = 22937 + ((diff * (33000 - 22937)) / (32767 - 22937));
+        glitch_fb = (diff * 32767) / (32767 - 22937);
+    }
+
+    if (active_macro < 16384) {
+        glitch_fb = (glitch_fb * active_macro) >> 14;
+    } else {
+        int32_t diff_fb = 32767 - glitch_fb;
+        int32_t scale_q15 = (macro_delay - 16384) * 2;
+        glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
+    }
+
+    p.delay_feedback = clean_fb;
+    p.glitch_feedback = glitch_fb;
+
+    bool use_freeze_params = is_frozen;
+    int32_t raw_glitch_speed = 16384;
+    if (use_freeze_params) {
+        p.glitch_mix     = freeze_vp[0]; // scrub offset
+        raw_glitch_speed = freeze_vp[2]; // speed
+        p.glitch_size    = freeze_vp[1]; // loop size
+    } else {
+        int32_t raw_mix = apply_deadzone(vp[3][0]);
+        p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
+        p.glitch_size  = vp[3][1];
+        raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
+
+        if (cv2_live && cv2_abs > 800) {
+            int32_t mix_inject;
+            if (cv2_abs > 1900) {
+                int32_t t = clamp_i32(cv2_abs - 1900, 0, 148);
+                mix_inject = 24000 + (t * 8767) / 148;
+            } else {
+                int32_t t = cv2_abs - 800;
+                mix_inject = (t * 24000) / 1100;
+            }
+            p.glitch_mix = clamp_i32(p.glitch_mix + mix_inject, 0, 32767);
+        }
+    }
+    p.glitch_speed = raw_glitch_speed;
+
+    // Glitch / Freeze speed mapping
+    int32_t glitch_speed_mapped = 65536;
+    if (use_freeze_params) {
+        int32_t knob = freeze_vp[2];
+        if (knob > 7600 && knob < 8700) {
+            glitch_speed_mapped = 32768; // Octave Down
+        } else if (knob > 10300 && knob < 11500) {
+            glitch_speed_mapped = 43700; // Fifth Down
+        } else if (knob > 15300 && knob < 17400) {
+            glitch_speed_mapped = 65536; // Unison
+        } else if (knob > 23800 && knob < 25200) {
+            glitch_speed_mapped = 98304; // Fifth Up
+        } else if (knob > 31500) {
+            glitch_speed_mapped = 131072; // Octave Up
+        } else {
+            glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767);
+        }
+    } else {
+        if (raw_glitch_speed > 18000) {
+            glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
+        } else if (raw_glitch_speed < 14000) {
+            glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
+        }
+    }
+    p.glitch_speed_mapped = glitch_speed_mapped;
+
+    // Precompute Glitch targets for Core 1
+    {
+        static bool last_is_frozen = false;
+        static uint32_t frozen_clk_period = 0;
+        if (is_frozen && !last_is_frozen) {
+            frozen_clk_period = g_clk_period_samples;
+        }
+        last_is_frozen = is_frozen;
+
+        bool eff_mono = debounced_no_audio2 || global_mono_mode;
+        int32_t max_buf_samples = eff_mono ? 65520 : 32760;
+        int32_t active_clk = is_frozen ? (frozen_clk_period > 0 ? frozen_clk_period : g_clk_period_samples) : g_clk_period_samples;
+        int32_t size = p.glitch_size;
+        if (cv2_live && cv2_abs > 800 && size < 4000) {
+            size = 4000;
+        }
+        int32_t loop_size = 128;
+        if (size < 4096) {
+            loop_size = 32 + ((size * 224) >> 12);
+        } else if (active_clk > 240) {
+            // 16 rhythmic subdivisions (in 16th note units):
+            // 1/16, 1/8, 3/16, 1/4, 3/8, 1/2, 3/4, 1 beat, 1.5b, 2b, 3b, 4b (1 bar), 6b, 8b (2 bars), 12b (3 bars), 16b (4 bars)
+            static const int32_t clk_div_num[16] = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256};
+            
+            // Dynamically count valid subdivisions that fit inside max_buf_samples
+            int32_t valid_steps = 16;
+            while (valid_steps > 1 && (((int64_t)active_clk * clk_div_num[valid_steps - 1]) / 16) > max_buf_samples) {
+                valid_steps--;
+            }
+
+            int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
+            int32_t step = (norm_size * valid_steps) >> 15;
+            if (step < 0) step = 0;
+            if (step >= valid_steps) step = valid_steps - 1;
+            int32_t target_beat_samples = (active_clk * clk_div_num[step]) / 16;
+
+            int32_t speed_mag = std::abs(p.glitch_speed_mapped);
+            if (speed_mag < 4096) speed_mag = 4096;
+            if (speed_mag < 65536) {
+                loop_size = (int32_t)(((int64_t)target_beat_samples * 65536) / speed_mag);
+            } else {
+                loop_size = (int32_t)(((int64_t)target_beat_samples * speed_mag) >> 16);
+            }
+        } else {
+            static const int32_t size_lut[8] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
+            int32_t num_steps = eff_mono ? 8 : 7;
+            int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
+            int32_t step = (norm_size * num_steps) >> 15;
+            if (step < 0) step = 0;
+            if (step > num_steps - 1) step = num_steps - 1;
+            int32_t base_size = size_lut[step];
+            int32_t speed_mag = std::abs(p.glitch_speed_mapped);
+            if (speed_mag < 4096) speed_mag = 4096;
+            if (speed_mag < 65536) {
+                loop_size = (int32_t)(((int64_t)base_size * 65536) / speed_mag);
+            } else {
+                loop_size = base_size;
+            }
+        }
+        p.glitch_loop_size = clamp_i32(loop_size, 512, max_buf_samples);
+
+        int32_t scrub_offset = 0;
+        static uint16_t freeze_lfo_phase = 0;
+        static uint16_t freeze_skip_timer = 0;
+        static int32_t freeze_random_step = 0;
+
+        if (is_frozen) {
+            int32_t raw_mix = p.glitch_mix;
+            if (raw_mix < 3277) {
+                int32_t lfo_speed = 3 + (((3277 - raw_mix) * 18) / 3277);
+                freeze_lfo_phase += lfo_speed;
+                int16_t sine_val = lookup_sine(freeze_lfo_phase);
+                scrub_offset = (sine_val + 32768) >> 1;
+            } else if (raw_mix > 29490) {
+                int32_t skip_interval = 800 - (((raw_mix - 29490) * 720) / (32767 - 29490));
+                if (skip_interval < 80) skip_interval = 80;
+                freeze_skip_timer++;
+                if (freeze_skip_timer >= skip_interval) {
+                    freeze_skip_timer = 0;
+                    freeze_random_step = fast_rand(rand_seed) & 0x7FFF;
+                }
+                scrub_offset = freeze_random_step;
+            } else {
+                int32_t manual_ratio = ((raw_mix - 3277) * 32768) / (29490 - 3277);
+                scrub_offset = clamp_i32(manual_ratio, 0, 32767);
+            }
+        } else {
+            freeze_lfo_phase = 0;
+            freeze_skip_timer = 0;
+        }
+
+        int32_t cv1_offset = p.cv1 * 6;
+        int32_t range = max_buf_samples - p.glitch_loop_size;
+        if (range < 0) range = 0;
+
+        int32_t raw_offset = 0;
+        if (active_clk > 240) {
+            // Beat-aligned scrubbing: grid unit = loop size for breakbeat slicing,
+            // or 1 beat if loop size is larger than a beat
+            int32_t grid_unit = p.glitch_loop_size;
+            if (grid_unit > active_clk) grid_unit = active_clk;
+            if (grid_unit < 128) grid_unit = 128;
+            int32_t num_grid_steps = range / grid_unit;
+            if (num_grid_steps > 0) {
+                int32_t step_idx = ((32767 - scrub_offset) * num_grid_steps) >> 15;
+                step_idx = clamp_i32(step_idx, 0, num_grid_steps);
+                raw_offset = (step_idx * grid_unit) + p.glitch_loop_size;
+            } else {
+                raw_offset = p.glitch_loop_size;
+            }
+        } else {
+            raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
+        }
+        int32_t target_offset = raw_offset + cv1_offset;
+        p.glitch_target_offset = clamp_i32(target_offset, 0, max_buf_samples);
+
+        p.glitch_speed_q16 = p.glitch_speed_mapped;
+    }
+
+    // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
+    int32_t eff_filter_cutoff = vp[4][0];
+    if (filter_note_active && cv1_live && cv1_val != 0) {
+        eff_filter_cutoff = clamp_i32(eff_filter_cutoff + (cv1_val * 4), 0, 32767);
+    }
+    p.filter_cutoff = eff_filter_cutoff;
+    p.filter_res    = vp[4][1];
+    p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
+
+    p.freeze = is_frozen;
+    bool cv2_stutter = cv2_live && (cv2_abs > 1900);
+    p.stutter = (pulse1_live && pulse1_val) || cv2_stutter;
+    p.cv1 = cv1_live ? cv1_abs : 0;
+    p.cv1_bipolar = cv1_live ? cv1_val : 0;
+    p.cv2 = cv2_val;
+    p.pulse1_live = pulse1_live;
+    p.pulse2_live = pulse2_live;
+    p.cv1_live = cv1_live;
+    p.cv2_live = cv2_live;
+
+    p.no_audio1 = debounced_no_audio1;
+    p.no_audio2 = debounced_no_audio2;
+    // Extended Mono Mode (4.0s delay time): active if Input 2 unplugged OR user toggles Mono Mode via Switch DOWN + Knob X Left
+    p.mono_mode = debounced_no_audio2 || global_mono_mode;
+
+    p.is_freeze_page = is_frozen;
+    p.flash_writing  = false;
+    p.grittiness_macro = active_macro;
+    p.input_width = global_input_width;
+    p.routing_mode = global_routing_mode;
+
+    // Reverb params
+    p.reverb_mix  = apply_deadzone(vp[5][0]);
+    {
+        int32_t fb = vp[5][2];
+        int32_t fb_glitch = fb;
+        if (fb > 12000) {
+            if (active_macro < 16384) {
+                fb_glitch = 12000 + (((fb - 12000) * active_macro) >> 14);
+            } else {
+                int32_t target_max = 32767;
+                fb_glitch = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
+            }
+        }
+        
+        int32_t raw_x = vp[5][1];
+        int32_t reverb_mode = 0;
+        int32_t size_scale = 16384;
+
+        if (raw_x < 14000) {
+            reverb_mode = 1;
+            size_scale = 6000 + (((14000 - raw_x) * 26767) / 14000);
+        } else if (raw_x > 18700) {
+            reverb_mode = 0;
+            size_scale = 6000 + (((raw_x - 18700) * 26767) / 14067);
+        } else {
+            reverb_mode = 0;
+            size_scale = 6000;
+        }
+
+        p.reverb_mode = reverb_mode;
+        p.reverb_size = size_scale;
+        
+        // Max decay capped at 30000 (~0.915) to ensure feedback tank stability without bass runaway
+        int32_t max_decay = 24000 + (((size_scale - 3276) * 45000) >> 20); // max 30000
+        int32_t decay = (fb_glitch * max_decay) >> 15;
+        if (decay > 30000) decay = 30000;
+
+        // Damping mapped between 18000 (warm dark plate) and 29000 (bright plate)
+        int32_t damp = 29000 - ((fb_glitch * 11000) >> 15);
+
+        // Bitcrushing & lo-fi degradation trigger ONLY at high Y knob settings (> 20000 / ~62% rotation):
+        int32_t lofi_level = (fb_glitch > 20000) ? (((fb_glitch - 20000) * 32767) / 12767) : 0;
+        int32_t sparkle_level = (fb_glitch > 24000) ? (((fb_glitch - 24000) * 32767) / 8767) : 0;
+        int32_t circuit_bent_level = (fb_glitch > 27000) ? (((fb_glitch - 27000) * 32767) / 5767) : 0;
+
+        p.reverb_decay = decay;
+        p.reverb_damp = damp;
+        p.reverb_lofi_level = lofi_level;
+        p.reverb_sparkle_level = sparkle_level;
+        p.reverb_circuit_bent_level = circuit_bent_level;
+        p.reverb_lofi_shift = 0;
+        p.reverb_lofi_frac = 0;
+    }
+
+    if (cv1_live && cv1_abs > 100) {
+        if (cv1_abs > 1200) {
+            int32_t t = clamp_i32(cv1_abs - 1200, 0, 848);
+            p.filter_morph    = clamp_i32(p.filter_morph + (t * 3000) / 848, 0, 32767);
+            int32_t xor_add   = (t * 2) / 848;
+            p.chorus_xor_mask = clamp_i32(p.chorus_xor_mask + xor_add, 0, 31);
+        }
+    }
+
+    if (cv2_live && cv2_abs > 800) {
+        if (cv2_abs <= 1900) {
+            int32_t t = (cv2_abs - 800) * 32767 / 1100;
+            p.chorus_mix    = clamp_i32(p.chorus_mix    + ((4000 * t) >> 15), 0, 32767);
+            p.chorus_depth  = clamp_i32(p.chorus_depth  + ((2000 * t) >> 15), 0, 32767);
+            p.chorus_rate   = clamp_i32(p.chorus_rate   + ((1000 * t) >> 15), 0, 32767);
+            p.filter_cutoff = clamp_i32(p.filter_cutoff - ((1500 * t) >> 15), 0, 32767);
+        } else {
+            p.chorus_mix    = clamp_i32(p.chorus_mix    + 4000, 0, 32767);
+            p.chorus_depth  = clamp_i32(p.chorus_depth  + 2000, 0, 32767);
+            p.chorus_rate   = clamp_i32(p.chorus_rate   + 1000, 0, 32767);
+            p.filter_cutoff = clamp_i32(p.filter_cutoff - 1500, 0, 32767);
+            int32_t t = clamp_i32(cv2_abs - 1900, 0, 148) * 32767 / 148;
+            p.reverb_mix           = clamp_i32(p.reverb_mix           + ((4000 * t) >> 15), 0, 32767);
+            p.reverb_decay         = clamp_i32(p.reverb_decay         + ((3000 * t) >> 15), 0, 32767);
+            p.reverb_sparkle_level = clamp_i32(p.reverb_sparkle_level + ((2000 * t) >> 15), 0, 32767);
+        }
+    }
+}
+
+static void push_params_to_core1() {
+    push_params_for_idx(0);
+    push_params_for_idx(1);
 }
 
 static void get_bar_graph_leds(int32_t val, int16_t out_brightness[6]) {
@@ -1444,126 +1787,28 @@ void BendsCard::tick_ui_once() {
     static bool routing_changed_this_hold = false;
 
     if (sw_down_entered) {
-        lockMacro.engage(dzMain, grittiness_macro, false); // No catchup logic on switch down
+        // INSTANT PAGE CYCLE ON PRESS!
+        currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
+        if (currentPage == 3 && is_frozen) {
+            lockMain.engage(dzMain, freeze_vp[0]);
+            lockX.engage(dzX, freeze_vp[1]);
+            lockY.engage(dzY, freeze_vp[2]);
+        } else {
+            lockMain.engage(dzMain, vp[currentPage][0]);
+            lockX.engage(dzX, vp[currentPage][1]);
+            lockY.engage(dzY, vp[currentPage][2]);
+        }
+        pageFlashTimer = 400;
+        param_changed = true;
+
+        grittiness_macro = 16384; // Always default to transparent center (16384) on Switch DOWN
+        lockMacro.engage(dzMain, 16384, true); // Catchup lock enabled for Macro Main knob
         settings_adjusted_this_hold = false;
         routing_changed_this_hold = false;
     }
     if (sw_down_exited) {
         if (active_sw_held_ms >= 350) {
-            // Bake the macro-scaled values into vp (both upward and downward scaling).
-            // The live scaling path uses active_macro=16384 when switch is not held,
-            // so knobs always retain their full range outside of macro mode.
-            {
-                int32_t macro_chorus = get_staggered_macro(grittiness_macro, 10000, 30000);
-                int32_t macro_codec  = get_staggered_macro(grittiness_macro, 0, 22000);
-                int32_t macro_delay  = get_staggered_macro(grittiness_macro, 12000, 32767);
-                int32_t macro_glitch = get_staggered_macro(grittiness_macro, 8000, 28000);
-                int32_t macro_filter = get_staggered_macro(grittiness_macro, 16000, 32767);
-                int32_t macro_reverb = get_staggered_macro(grittiness_macro, 20000, 32767);
-
-                // Bake Chorus parameters (feedback/destroy part above 16384 only)
-                {
-                    int32_t raw_depth_fb = vp[0][2];
-                    if (raw_depth_fb >= 16384) {
-                        int32_t base_fb = 0;
-                        int32_t base_xor = 0;
-                        if (raw_depth_fb < 26214) {
-                            base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
-                        } else {
-                            base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
-                            base_xor = (raw_depth_fb - 26214) >> 9;
-                        }
-                        int32_t chorus_feedback = 0;
-                        int32_t chorus_xor_mask = 0;
-                        if (grittiness_macro < 16384) {
-                            chorus_feedback = (base_fb * grittiness_macro) >> 14;
-                            chorus_xor_mask = (base_xor * grittiness_macro) >> 14;
-                        } else {
-                            int32_t diff_fb = 32767 - base_fb;
-                            int32_t diff_xor = 31 - base_xor;
-                            int32_t scale_q15 = (macro_chorus - 16384) * 2;
-                            chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
-                            chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
-                        }
-                        if (chorus_xor_mask > 0) {
-                            vp[0][2] = 26214 + (chorus_xor_mask << 9);
-                        } else {
-                            vp[0][2] = 16384 + ((chorus_feedback * 32768) / 65536);
-                        }
-                    }
-                }
-
-                // Bake Codec parameters
-                vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
-                vp[1][1] = scale_grit(vp[1][1], 32767, macro_codec);
-                vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
-
-                // Bake Delay time
-                {
-                    int32_t val = vp[2][1];
-                    if (grittiness_macro < 16384) {
-                        if (val > 16384) {
-                            int32_t diff = val - 16384;
-                            vp[2][1] = 16384 + ((diff * grittiness_macro) >> 14);
-                        }
-                    } else {
-                        int32_t diff = 32767 - val;
-                        vp[2][1] = val + ((diff * ((macro_delay - 16384) * 2)) >> 15);
-                    }
-                }
-                // Bake glitch/XOR feedback portion of delay feedback above 22937
-                {
-                    int32_t raw_fb = vp[2][2];
-                    if (raw_fb > 22937) {
-                        int32_t glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
-                        if (grittiness_macro < 16384) {
-                            glitch_fb = (glitch_fb * grittiness_macro) >> 14;
-                        } else {
-                            int32_t diff_fb = 32767 - glitch_fb;
-                            int32_t scale_q15 = (macro_delay - 16384) * 2;
-                            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
-                        }
-                        vp[2][2] = 22937 + ((glitch_fb * 32768) / 109224);
-                        if (vp[2][2] > 32767) vp[2][2] = 32767;
-                    }
-                }
-
-                // Bake Glitcher probability and speed
-                vp[3][0] = scale_grit(vp[3][0], 32767, macro_glitch);
-                vp[3][2] = scale_grit(vp[3][2], 32767, macro_glitch);
-
-                // Bake Filter morph/grit
-                vp[4][2] = scale_grit(vp[4][2], 32767, macro_filter);
-
-                // Bake Reverb lofi/damping above 12000
-                {
-                    int32_t fb = vp[5][2];
-                    if (fb > 12000) {
-                        if (grittiness_macro < 16384) {
-                            vp[5][2] = 12000 + (((fb - 12000) * grittiness_macro) >> 14);
-                        } else {
-                            int32_t target_max = 32767;
-                            vp[5][2] = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
-                        }
-                    }
-                }
-            }
-
-            if (!settings_adjusted_this_hold) {
-                currentPage = (currentPage == 0) ? 5 : (currentPage - 1);
-                if (currentPage == 3 && is_frozen) {
-                    lockMain.engage(dzMain, freeze_vp[0]);
-                    lockX.engage(dzX, freeze_vp[1]);
-                    lockY.engage(dzY, freeze_vp[2]);
-                } else {
-                    lockMain.engage(dzMain, vp[currentPage][0]);
-                    lockX.engage(dzX, vp[currentPage][1]);
-                    lockY.engage(dzY, vp[currentPage][2]);
-                }
-                pageFlashTimer = 400;
-            }
-
-            // Save settings (routing mode, input width, mono mode) to flash if adjusted
+            // Save settings (input width, mono mode, routing mode) to flash ONLY if Knob X or Knob Y were adjusted
             if (settings_adjusted_this_hold) {
                 bends_save_settings();
                 if (routing_changed_this_hold) {
@@ -1571,26 +1816,29 @@ void BendsCard::tick_ui_once() {
                 }
             }
 
-            grittiness_macro = 16384; // Reset to transparent center after bake
+            // Bake Macro Grittiness into virtual parameters (vp) if Main Knob was used!
+            if (grittiness_macro != 16384) {
+                bake_macro_to_vp(grittiness_macro);
+            }
+
+            grittiness_macro = 16384; // Reset to transparent center
             g_macro_active = false;
             last_modified_macro_knob = 0;
-            if (currentPage == 3 && is_frozen) {
-                lockMain.engage(dzMain, freeze_vp[0]);
-                lockX.engage(dzX, freeze_vp[1]);
-                lockY.engage(dzY, freeze_vp[2]);
-            } else {
-                lockMain.engage(dzMain, vp[currentPage][0]);
-                lockX.engage(dzX, vp[currentPage][1]);
-                lockY.engage(dzY, vp[currentPage][2]);
-            }
-            lockMacro.engage(dzMain, grittiness_macro, false);
-            param_changed = true;
+        }
+
+        if (currentPage == 3 && is_frozen) {
+            lockMain.engage(dzMain, freeze_vp[0]);
+            lockX.engage(dzX, freeze_vp[1]);
+            lockY.engage(dzY, freeze_vp[2]);
         } else {
             lockMain.engage(dzMain, vp[currentPage][0]);
+            lockX.engage(dzX, vp[currentPage][1]);
+            lockY.engage(dzY, vp[currentPage][2]);
         }
+        lockMacro.engage(dzMain, grittiness_macro, true);
+        param_changed = true;
     }
 
-    static bool manual_save_triggered = false;
     if (debounced_sw == last_debounced_sw) {
         if (debounced_sw != ComputerCard::Switch::Middle) {
             active_sw_held_ms++;
@@ -1601,22 +1849,14 @@ void BendsCard::tick_ui_once() {
                     // Trigger hold action
                     if (debounced_sw == ComputerCard::Switch::Down) {
                         // Hold DOWN: macro active, page change deferred until release if unadjusted
-                        lockX.engage(dzX, global_input_width, false); // No catchup logic on switch down
-                        lockY.engage(dzY, global_routing_mode * 8192 + 4096, false); // No catchup logic on switch down
+                        lockX.engage(dzX, global_input_width, true); // Catchup lock enabled for Input Width Knob X
+                        lockY.engage(dzY, global_routing_mode * 8192 + 4096, true); // Catchup lock enabled for Routing Preset Knob Y
                         last_modified_macro_knob = 0; // default view is Macro
                     }
                 }
             }
-            if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000) {
-                if (!manual_save_triggered) {
-                    manual_save_triggered = true;
-                    bends_save_settings();
-                    saveFlashTimer = 600; // 600ms LED confirmation flash
-                }
-            }
         }
     } else {
-        manual_save_triggered = false;
         // Transition detected
         if (last_debounced_sw == ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Up) {
             // Instant freeze toggle on switch press UP
@@ -1626,6 +1866,7 @@ void BendsCard::tick_ui_once() {
                 freeze_latched = true;
                 is_frozen = true;
                 currentPage = 3;
+                freeze_vp[0] = 32767; // Freeze at current live beat / most recent audio
                 lockMain.engage(dzMain, freeze_vp[0]);
                 lockX.engage(dzX, freeze_vp[1]);
                 lockY.engage(dzY, freeze_vp[2]);
@@ -1641,30 +1882,8 @@ void BendsCard::tick_ui_once() {
                 param_changed = true;
             }
         }
-        if (last_debounced_sw != ComputerCard::Switch::Middle && debounced_sw == ComputerCard::Switch::Middle) {
-            // Switch was released
-            if (last_debounced_sw == ComputerCard::Switch::Down) {
-                if (active_sw_held_ms < 350) {
-                    // Flick DOWN — cycle pages 0→1→2→3→4→5→0
-                    if (!settings_adjusted_this_hold) {
-                        currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
-                        // If landing on Page 3 while frozen, locks must target freeze_vp
-                        // to avoid overwriting scrub params with Glitcher page defaults
-                        if (currentPage == 3 && is_frozen) {
-                            lockMain.engage(dzMain, freeze_vp[0]);
-                            lockX.engage(dzX, freeze_vp[1]);
-                            lockY.engage(dzY, freeze_vp[2]);
-                        } else {
-                            lockMain.engage(dzMain, vp[currentPage][0]);
-                            lockX.engage(dzX, vp[currentPage][1]);
-                            lockY.engage(dzY, vp[currentPage][2]);
-                        }
-                        pageFlashTimer = 400;
-                        param_changed = true;
-                    }
-                }
-            }
-        }
+        // Transition detected
+        // Switch DOWN page cycle now executes instantly on press (sw_down_entered)
         // Reset state
         last_debounced_sw = debounced_sw;
         active_sw_held_ms = 0;
@@ -1682,24 +1901,46 @@ void BendsCard::tick_ui_once() {
         lockMacro.engage(dzMain, grittiness_macro);
     }
 
-    if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
+    if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 100) {
         int32_t nextMacro = lockMacro.update(dzMain);
         if (grittiness_macro != nextMacro) {
             grittiness_macro = nextMacro;
             param_changed = true;
             last_modified_macro_knob = 0;
+
+            // Macro Clean Reset Gesture: turning Macro Main knob to extreme CW limit (> 31500)
+            // resets all parameters to the saved clean state (latched once per gesture)
+            static bool macro_clean_reset_latched = false;
+            if (grittiness_macro > 31500) {
+                if (!macro_clean_reset_latched) {
+                    macro_clean_reset_latched = true;
+                    bends_load_settings(); // restore saved clean state
+                    lockMain.engage(dzMain, vp[currentPage][0]);
+                    lockX.engage(dzX, vp[currentPage][1]);
+                    lockY.engage(dzY, vp[currentPage][2]);
+                    grittiness_macro = 16384; // reset macro back to transparent center
+                    lockMacro.engage(dzMain, 16384);
+                    pageFlashTimer = 300; // single LED flash confirmation
+                }
+            } else if (grittiness_macro < 26000) {
+                macro_clean_reset_latched = false;
+            }
         }
         int32_t nextWidth = lockX.update(dzX);
         if (global_input_width != nextWidth) {
+            int32_t wdiff = global_input_width - nextWidth;
+            if (wdiff < 0) wdiff = -wdiff;
+            if (wdiff > 800) {
+                settings_adjusted_this_hold = true;
+            }
             global_input_width = nextWidth;
-            settings_adjusted_this_hold = true;
             param_changed = true;
             last_modified_macro_knob = 1;
         }
-        // Mono Mode & Dual Mono Mode toggle via Knob X in Macro mode:
-        // Knob X < 500 (CCW): Extended Mono Mode (when Input 2 unplugged)
+        // Mono Mode & Dual Mono Mode toggle via Knob X in Macro mode (Switch DOWN hold):
+        // Knob X < 500 (CCW): Extended Mono Mode (mixes down dual inputs to 4.0s mono delay buffer)
         // Knob X > 31500 (CW): Dual Mono Mode (decorrelated 2-channel independent processing)
-        bool want_mono = (nextWidth < 500) && debounced_no_audio2;
+        bool want_mono = (nextWidth < 500);
         bool want_dual_mono = (nextWidth > 31500);
         if (global_mono_mode != want_mono || global_dual_mono_mode != want_dual_mono) {
             global_mono_mode = want_mono;
@@ -1718,24 +1959,26 @@ void BendsCard::tick_ui_once() {
             last_modified_macro_knob = 2;
             routing_changed_this_hold = true;
         }
-    } else if (is_frozen && currentPage == 3) {
-        // Frozen and on the freeze page — write to freeze_vp, never touch vp[3]
+    }
+
+    if (is_frozen && currentPage == 3) {
+        // Frozen and on the freeze page -- write to freeze_vp only when NOT holding switch DOWN!
         if (debounced_sw != ComputerCard::Switch::Down) {
             int32_t nextMain = lockMain.update(dzMain);
             if (freeze_vp[0] != nextMain) {
                 freeze_vp[0] = nextMain;
                 param_changed = true;
             }
-        }
-        int32_t nextX = lockX.update(dzX);
-        if (freeze_vp[1] != nextX) {
-            freeze_vp[1] = nextX;
-            param_changed = true;
-        }
-        int32_t nextY = lockY.update(dzY);
-        if (freeze_vp[2] != nextY) {
-            freeze_vp[2] = nextY;
-            param_changed = true;
+            int32_t nextX = lockX.update(dzX);
+            if (freeze_vp[1] != nextX) {
+                freeze_vp[1] = nextX;
+                param_changed = true;
+            }
+            int32_t nextY = lockY.update(dzY);
+            if (freeze_vp[2] != nextY) {
+                freeze_vp[2] = nextY;
+                param_changed = true;
+            }
         }
     } else {
         if (debounced_sw != ComputerCard::Switch::Down) {
@@ -1744,16 +1987,16 @@ void BendsCard::tick_ui_once() {
                 vp[currentPage][0] = nextMain;
                 param_changed = true;
             }
-        }
-        int32_t nextX = lockX.update(dzX);
-        if (vp[currentPage][1] != nextX) {
-            vp[currentPage][1] = nextX;
-            param_changed = true;
-        }
-        int32_t nextY = lockY.update(dzY);
-        if (vp[currentPage][2] != nextY) {
-            vp[currentPage][2] = nextY;
-            param_changed = true;
+            int32_t nextX = lockX.update(dzX);
+            if (vp[currentPage][1] != nextX) {
+                vp[currentPage][1] = nextX;
+                param_changed = true;
+            }
+            int32_t nextY = lockY.update(dzY);
+            if (vp[currentPage][2] != nextY) {
+                vp[currentPage][2] = nextY;
+                param_changed = true;
+            }
         }
     }
 
@@ -1762,653 +2005,18 @@ void BendsCard::tick_ui_once() {
     // ── 5. Push virtual params to Core 1 double buffer ───────────────────
     {
         uint32_t next_idx = 1 - g_params_idx.load(std::memory_order_relaxed);
-        volatile Core1Params &p = g_params[next_idx];
-        
-        g_macro_active = (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350);
-        int32_t base_macro = g_macro_active ? grittiness_macro : 16384;
-
-        // CV1 no longer modulates macro globally (dedicated to digital loss engine)
-        int32_t cv1_val = cv1_live ? (CVIn1()) : 0;
-        int32_t cv2_val = cv2_live ? (CVIn2()) : 0;
-
-        // Scale CV inputs so that the 4 Voltages button presses (max ~1.62V for CV1, ~1.82V for CV2 on Volt3/4)
-        // can sweep the full range, while normal CV still functions correctly (clamping at the limits).
-        if (cv1_live) {
-            // Capped at 1000 (approx 48% of full scale) so button-triggered degradation is tasteful and not too strong
-            cv1_val = (cv1_val * 1000) / 553;
-            if (cv1_val > 1000) cv1_val = 1000;
-            if (cv1_val < -1000) cv1_val = -1000;
-        }
-        if (cv2_live) {
-            cv2_val = (cv2_val * 2048) / 621;
-            if (cv2_val > 2048) cv2_val = 2048;
-            if (cv2_val < -2048) cv2_val = -2048;
-        }
-
-        int32_t cv1_abs = cv1_val < 0 ? -cv1_val : cv1_val;
-        int32_t cv2_abs = cv2_val < 0 ? -cv2_val : cv2_val;
-        int32_t active_macro = base_macro;
-
-        // Precompute staggered macros for the grittiness sweep
-        int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 30000);
-        int32_t macro_codec  = get_staggered_macro(active_macro, 0, 22000);
-        int32_t macro_delay  = get_staggered_macro(active_macro, 12000, 32767);
-        int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
-        int32_t macro_filter = get_staggered_macro(active_macro, 16000, 32767);
-        int32_t macro_reverb = get_staggered_macro(active_macro, 20000, 32767);
-
-        // Precompute global noise scale first (tied to reverb/lofi entrance)
-        int32_t noise_scale = 16384;
-        int32_t rev_damping = vp[5][2];
-        if (rev_damping > 16384) {
-            int32_t diff = rev_damping - 16384;
-            noise_scale = 16384 + (diff << 1);
-        }
-        int32_t globalNoiseScale = scale_grit(noise_scale, 49152, macro_reverb);
-        p.global_noise_scale = globalNoiseScale;
-
-        p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
-        p.chorus_rate      = vp[0][1];
-        p.chorus_depth_fb  = vp[0][2];
-
-        // Pre-decode Chorus depth, feedback, and destroy
-        int32_t raw_depth_fb = vp[0][2];
-        int32_t chorus_depth = 0;
-        int32_t chorus_feedback = 0;
-        int32_t chorus_xor_mask = 0;
-        if (raw_depth_fb < 16384) {
-            chorus_depth = raw_depth_fb * 2;
-            chorus_feedback = 0;
-        } else {
-            chorus_depth = 32767;
-            int32_t base_fb = 0;
-            int32_t base_xor = 0;
-            if (raw_depth_fb < 26214) {
-                base_fb = ((raw_depth_fb - 16384) * 65536) >> 15;
-            } else {
-                base_fb = 19660 + (((raw_depth_fb - 26214) * 57343) >> 15);
-                base_xor = (raw_depth_fb - 26214) >> 9;
-            }
-            if (active_macro < 16384) {
-                chorus_feedback = (base_fb * active_macro) >> 14;
-                chorus_xor_mask = (base_xor * active_macro) >> 14;
-            } else {
-                int32_t diff_fb = 32767 - base_fb;
-                int32_t diff_xor = 31 - base_xor;
-                int32_t scale_q15 = (macro_chorus - 16384) * 2;
-                chorus_feedback = base_fb + ((diff_fb * scale_q15) >> 15);
-                chorus_xor_mask = base_xor + ((diff_xor * scale_q15) >> 15);
-            }
-        }
-        p.chorus_depth = chorus_depth;
-        p.chorus_feedback = chorus_feedback;
-        p.chorus_xor_mask = chorus_xor_mask;
-
-        // Pre-calculate Codec levels
-        int32_t raw_strength = scale_grit(apply_deadzone(vp[1][0]), 32767, macro_codec);
-        int32_t raw_downsample = scale_grit(vp[1][1], 32767, macro_codec);
-        int32_t raw_ringing_xor = scale_grit(vp[1][2], 32767, macro_codec);
-        
-        p.codec_mix = raw_strength;
-        p.codec_downsample = raw_downsample;
-        p.codec_ringing_xor = raw_ringing_xor;
-
-        int32_t X = raw_downsample;
-        int32_t Y = raw_ringing_xor;
-        Y = clamp_i32(Y, 0, 32767);
-
-        int32_t mp3_ring_level = 0;
-        int32_t fuzz_level = 0;
-        int32_t decimate_level = 0;
-
-        // X Transitions: MP3 Ringing -> Fuzz/Bitcrushing -> Decimation
-        if (X < 16384) {
-            mp3_ring_level = 32767 - (X * 2);
-        } else {
-            mp3_ring_level = 0;
-        }
-
-        if (X < 16384) {
-            fuzz_level = X * 2;
-        } else {
-            fuzz_level = 32767 - ((X - 16384) * 2);
-        }
-
-        if (X < 16384) {
-            decimate_level = 0;
-        } else {
-            decimate_level = (X - 16384) * 2;
-            if (decimate_level > 32767) decimate_level = 32767;
-        }
-
-        // Y Transitions: Vinyl Crackle -> CD Skips -> Full Crazyness
-        int32_t tape_sat = 0;
-        int32_t tape_hiss = 0;
-        int32_t pop_prob = 0;
-        int32_t bad_conn_level = 0;
-        int32_t sputter_prob = 0;
-        int32_t scramble_level = 0;
-
-        if (Y < 16384) {
-            tape_sat = 30000 - (Y * 30000) / 16384;
-            tape_hiss = 30 - (Y * 30) / 16384;
-            pop_prob = 12 - (Y * 12) / 16384;
-        }
-
-        if (Y < 16384) {
-            bad_conn_level = (Y * 32767) / 16384;
-            sputter_prob = (Y * 50) / 16384;
-        } else {
-            bad_conn_level = 32767 - ((Y - 16384) * 32767) / 16384;
-            sputter_prob = 50 - ((Y - 16384) * 50) / 16384;
-        }
-
-        if (Y >= 16384) {
-            scramble_level = ((Y - 16384) * 32767) / 16383;
-        }
-
-        // Scale pop_prob by X quality
-        int32_t x_scale_q15 = 8000 + ((X * 24767) >> 15);
-        pop_prob = (pop_prob * x_scale_q15) >> 15;
-
-        // Fuzz level quadratic warp
-        fuzz_level = (fuzz_level * fuzz_level) >> 15;
-
-        // Scale by Main knob (strength)
-        int32_t glitch_strength = 16384 + (raw_strength >> 1);
-        fuzz_level = (fuzz_level * raw_strength) >> 15;
-        decimate_level = (decimate_level * raw_strength) >> 15;
-        mp3_ring_level = (mp3_ring_level * raw_strength) >> 15;
-        bad_conn_level = (bad_conn_level * glitch_strength) >> 15;
-        scramble_level = (scramble_level * glitch_strength) >> 15;
-
-        int32_t pop_strength = 16384 + (raw_strength >> 1);
-        pop_prob = (pop_prob * pop_strength) >> 15;
-
-        // Global Noise Scale modifier
-        fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
-        decimate_level = (decimate_level * globalNoiseScale) >> 14;
-        mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
-        bad_conn_level = (bad_conn_level * globalNoiseScale) >> 14;
-        scramble_level = (scramble_level * globalNoiseScale) >> 14;
-        pop_prob = (pop_prob * globalNoiseScale) >> 14;
-
-        if (fuzz_level > 32767) fuzz_level = 32767;
-        if (decimate_level > 32767) decimate_level = 32767;
-        if (mp3_ring_level > 32767) mp3_ring_level = 32767;
-        if (bad_conn_level > 32767) bad_conn_level = 32767;
-        if (scramble_level > 32767) scramble_level = 32767;
-
-        int32_t click_ratio = 0;
-        if (Y >= 10000 && Y < 13000) {
-            click_ratio = ((Y - 10000) * 16384) / 3000;
-        } else if (Y >= 13000 && Y < 16000) {
-            int32_t t = Y - 13000;
-            click_ratio = 16384 - ((t * 16384) / 3000);
-        }
-        int32_t click_depth = (click_ratio * raw_strength) >> 15;
-        click_depth = (click_depth * x_scale_q15) >> 15;
-        click_depth = (click_depth * 16000) >> 15;
-
-        sputter_prob = (sputter_prob * raw_strength) >> 15;
-        sputter_prob = (sputter_prob * globalNoiseScale) >> 14;
-
-        // CV1 global circuit bending injection:
-        // Inject vinyl clicks and CD stutters when CV1 is plugged in
-        // (CV1 is now dedicated solely to the digital loss engine, using absolute magnitude)
-        if (cv1_live && cv1_abs > 100) {
-            // Overall mix injection
-            p.codec_mix = clamp_i32(p.codec_mix + (cv1_abs * 16), 0, 32767);
-
-            // Shift degradation type from Fuzz -> Decimation by adding a bias to X
-            int32_t cv1_x_mod = (cv1_abs * 16);
-            X = clamp_i32(X + cv1_x_mod, 0, 32767);
-
-            // Recompute fuzz and decimation levels based on modulated X
-            if (X < 16384) {
-                fuzz_level = X * 2;
-                decimate_level = 0;
-            } else {
-                decimate_level = (X - 16384) * 2;
-                if (decimate_level > 32767) decimate_level = 32767;
-                fuzz_level = 32767 - decimate_level;
-            }
-
-            // Apply strength/noise scaling to the newly computed levels
-            fuzz_level = (fuzz_level * raw_strength) >> 15;
-            decimate_level = (decimate_level * raw_strength) >> 15;
-            
-            fuzz_level = (fuzz_level * globalNoiseScale) >> 14;
-            decimate_level = (decimate_level * globalNoiseScale) >> 14;
-            mp3_ring_level = (mp3_ring_level * globalNoiseScale) >> 14;
-            
-            if (fuzz_level > 32767) fuzz_level = 32767;
-            if (decimate_level > 32767) decimate_level = 32767;
-            if (mp3_ring_level > 32767) mp3_ring_level = 32767;
-
-            // Vinyl pops (pop_prob) - active across all non-zero buttons
-            pop_prob = clamp_i32(pop_prob + (cv1_abs * 45) / 2048, 0, 50);
-            int32_t pop_cv1_depth = (cv1_abs * 16000) >> 11;
-            if (click_depth < pop_cv1_depth) click_depth = pop_cv1_depth;
-
-            // CD stutter (sputter_prob) - triggers only at medium/high voltages (Button 1 & 2)
-            if (cv1_abs > 500) {
-                int32_t sputter_mod = ((cv1_abs - 500) * 80) / 1548;
-                sputter_prob = clamp_i32(sputter_prob + sputter_mod, 0, 80);
-            }
-
-            // Full scramble - triggers only at high voltage (Button 2)
-            if (cv1_abs > 1200) {
-                int32_t scramble_mod = ((cv1_abs - 1200) * 32767) / 848;
-                scramble_level = clamp_i32(scramble_level + scramble_mod, 0, 32767);
-            }
-        }
-
-        // CV2 global codec injection removed (CV2 is dedicated solely to glitcher)
-
-        int32_t active_loss = bad_conn_level > scramble_level ? bad_conn_level : scramble_level;
-
-        p.codec_mp3_ring = mp3_ring_level;
-        p.codec_fuzz = fuzz_level;
-        p.codec_decimate = decimate_level;
-        p.codec_pop_prob = pop_prob;
-        p.codec_click_depth = click_depth;
-        p.codec_bad_conn = bad_conn_level;
-        p.codec_scramble = scramble_level;
-        p.codec_sputter_prob = sputter_prob;
-        p.codec_tape_sat = tape_sat;
-        p.codec_tape_hiss = tape_hiss;
-        p.codec_active_loss = active_loss;
-
-        p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
-        
-        // Scale delay time by active_macro
-        int32_t raw_delay_time = vp[2][1];
-        int32_t scaled_delay_time = raw_delay_time;
-        if (active_macro < 16384) {
-            if (raw_delay_time > 16384) {
-                int32_t diff = raw_delay_time - 16384;
-                scaled_delay_time = 16384 + ((diff * macro_delay) >> 14);
-            }
-        } else {
-            int32_t diff = 32767 - raw_delay_time;
-            scaled_delay_time = raw_delay_time + ((diff * (macro_delay - 16384)) / 16383);
-        }
-        static int32_t slewed_delay_time = 12000;
-        slewed_delay_time += (scaled_delay_time - slewed_delay_time) >> 3; // ~45ms tape inertia pitch-glide
-        p.delay_time     = slewed_delay_time;
-
-        // Custom Delay Feedback and Glitch Feedback scaling:
-        // Delay feedback below 22937 is clean. Only the glitch/XOR feedback portion above 22937 is scaled by macro.
-        int32_t raw_fb = vp[2][2];
-        int32_t clean_fb = raw_fb;
-        int32_t glitch_fb = 0;
-        if (raw_fb > 22937) {
-            clean_fb = 22937;
-            glitch_fb = ((raw_fb - 22937) * 109224) >> 15;
-        }
-
-        if (active_macro < 16384) {
-            glitch_fb = (glitch_fb * active_macro) >> 14;
-        } else {
-            int32_t diff_fb = 32767 - glitch_fb;
-            int32_t scale_q15 = (macro_delay - 16384) * 2;
-            glitch_fb = glitch_fb + ((diff_fb * scale_q15) >> 15);
-        }
-
-        if (raw_fb > 22937) {
-            p.delay_feedback = clean_fb + ((glitch_fb * 32768) / 109224);
-            if (p.delay_feedback > 32767) p.delay_feedback = 32767;
-            p.glitch_feedback = glitch_fb;
-        } else {
-            p.delay_feedback = clean_fb;
-            p.glitch_feedback = 0;
-        }
-
-        bool use_freeze_params = is_frozen;
-        int32_t raw_glitch_speed = 16384;
-        if (use_freeze_params) {
-            p.glitch_mix     = freeze_vp[0]; // scrub offset (MAIN knob on freeze page)
-            raw_glitch_speed = freeze_vp[2]; // speed        (Y knob on freeze page)
-            p.glitch_size    = freeze_vp[1]; // loop size    (X knob on freeze page)
-        } else {
-            int32_t raw_mix = apply_deadzone(vp[3][0]);
-            p.glitch_mix   = (raw_mix >= 32760) ? 32767 : scale_grit(raw_mix, 32767, macro_glitch);
-            p.glitch_size  = vp[3][1];
-            raw_glitch_speed = scale_grit(vp[3][2], 32767, macro_glitch);
-
-            // CV2 Button Injection Overrides — proportional scaling:
-            // The 4V knob position maps directly to glitch intensity so exploration is smooth.
-            // Glitch onset at cv2_abs > 800 (Key 1 zone starts much earlier in knob sweep).
-            // Key 1 zone (800-1900): mix scales 0→24000 over the full 1100-unit span.
-            // Key 2 zone (>1900):    mix scales 24000→32767 over the final 148 units.
-            // glitch_size always comes from Page 3 X knob.
-            if (cv2_live && cv2_abs > 800) {
-                int32_t mix_inject;
-                if (cv2_abs > 1900) {
-                    // Key 2 zone: ramp 24000→32767 over the remaining 148 units
-                    int32_t t = clamp_i32(cv2_abs - 1900, 0, 148);
-                    mix_inject = 24000 + (t * 8767) / 148;
-                } else {
-                    // Ramp 0→24000 over the 1100-unit span (800→1900)
-                    int32_t t = cv2_abs - 800;
-                    mix_inject = (t * 24000) / 1100;
-                }
-                p.glitch_mix = clamp_i32(p.glitch_mix + mix_inject, 0, 32767);
-            }
-        }
-        p.glitch_speed = raw_glitch_speed;
-
-        // Glitch / Freeze speed mapping
-        int32_t glitch_speed_mapped = 65536;
-        if (use_freeze_params) {
-            // Freeze page Y knob: playback speed 0× → 2×
-            //   Left  (0)     = fully stopped (speed 0)
-            //   Centre (16384) = normal speed (1×)
-            //   Right (32767) = double speed (2×)
-            // Simple linear map: speed_q16 = knob * 2 * 65536 / 32767
-            int32_t knob = freeze_vp[2]; // 0..32767
-            // Quantized semitone snapping for playable musical pitch shifts (Octave Down, 5th Down, Unison, 5th Up, Octave Up)
-            if (knob > 7600 && knob < 8700) {
-                glitch_speed_mapped = 32768; // Octave Down (-12 semitones)
-            } else if (knob > 10300 && knob < 11500) {
-                glitch_speed_mapped = 43700; // Fifth Down (-7 semitones)
-            } else if (knob > 15300 && knob < 17400) {
-                glitch_speed_mapped = 65536; // Unison (0 semitones)
-            } else if (knob > 23800 && knob < 25200) {
-                glitch_speed_mapped = 98304; // Fifth Up (+7 semitones)
-            } else if (knob > 31500) {
-                glitch_speed_mapped = 131072; // Octave Up (+12 semitones)
-            } else {
-                glitch_speed_mapped = (int32_t)(((int64_t)knob * 131072) / 32767); // 0..131072 (0×..2× in Q16)
-            }
-        } else {
-            // Normal glitch-mode speed mapping (forward + reverse)
-            if (raw_glitch_speed > 18000) {
-                glitch_speed_mapped = 65536 + (((raw_glitch_speed - 18000) * 65536) / 14767);
-            } else if (raw_glitch_speed < 14000) {
-                glitch_speed_mapped = -65536 + ((raw_glitch_speed * 131072) / 14000);
-            }
-        }
-        p.glitch_speed_mapped = glitch_speed_mapped;
-
-        // Precompute Glitch targets for Core 1 (removes divisions/lookups from sample interrupt)
-        {
-            static bool last_is_frozen = false;
-            static uint32_t frozen_clk_period = 0;
-            if (is_frozen && !last_is_frozen) {
-                frozen_clk_period = g_clk_period_samples;
-            }
-            last_is_frozen = is_frozen;
-
-            bool eff_mono = debounced_no_audio2 && global_mono_mode;
-            int32_t max_buf_samples = eff_mono ? 65520 : 32760;
-            int32_t active_clk = is_frozen ? (frozen_clk_period > 0 ? frozen_clk_period : g_clk_period_samples) : g_clk_period_samples;
-            int32_t size = p.glitch_size;
-            // Sensible default minimum size during button/CV exploration to prevent buzzy ranges
-            if (cv2_live && cv2_abs > 800 && size < 4000) {
-                size = 4000;
-            }
-            int32_t loop_size = 128;
-            if (size < 4096) {
-                // Super-short Knob X (0% -> 12.5%): Micro-Granular Pitch Synthesizer (32 -> 256 samples / 1.3ms -> 10.6ms)
-                loop_size = 32 + ((size * 224) >> 12);
-            } else if (active_clk > 240) {
-                static const int32_t clk_div_num[7] = {1, 2, 4, 8, 16, 32, 64};
-                int32_t num_steps = 7;
-                int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
-                int32_t size_sq = (norm_size * norm_size) >> 15;
-                int32_t step = (size_sq * num_steps) >> 15;
-                if (step < 0) step = 0;
-                if (step > num_steps - 1) step = num_steps - 1;
-                int32_t target_beat_samples = (active_clk * clk_div_num[step]) / 16;
-
-                // When speeding down (speed < 1.0), expand buffer loop size inversely with speed
-                int32_t speed_mag = std::abs(p.glitch_speed_mapped);
-                if (speed_mag < 4096) speed_mag = 4096;
-                if (speed_mag < 65536) {
-                    loop_size = (int32_t)(((int64_t)target_beat_samples * 65536) / speed_mag);
-                } else {
-                    loop_size = (int32_t)(((int64_t)target_beat_samples * speed_mag) >> 16);
-                }
-            } else {
-                static const int32_t size_lut[8] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768};
-                int32_t num_steps = eff_mono ? 8 : 7;
-                int32_t norm_size = ((size - 4096) * 32768) / (32767 - 4096);
-                int32_t step = (norm_size * num_steps) >> 15;
-                if (step < 0) step = 0;
-                if (step > num_steps - 1) step = num_steps - 1;
-                int32_t base_size = size_lut[step];
-                int32_t speed_mag = std::abs(p.glitch_speed_mapped);
-                if (speed_mag < 4096) speed_mag = 4096;
-                if (speed_mag < 65536) {
-                    loop_size = (int32_t)(((int64_t)base_size * 65536) / speed_mag);
-                } else {
-                    loop_size = base_size;
-                }
-            }
-            p.glitch_loop_size = clamp_i32(loop_size, 32, max_buf_samples);
-
-            int32_t scrub_offset = 0;
-            static uint16_t freeze_lfo_phase = 0;
-            static uint16_t freeze_skip_timer = 0;
-            static int32_t freeze_random_step = 0;
-
-            if (is_frozen) {
-                int32_t raw_mix = p.glitch_mix; // Main knob on Page 7 (0..32767)
-                if (raw_mix < 3277) {
-                    // Zone 1 (First 10%: 0% -> 10%): Slow Ambient LFO Auto-Scrubbing
-                    int32_t lfo_speed = 3 + (((3277 - raw_mix) * 18) / 3277); // LFO rate
-                    freeze_lfo_phase += lfo_speed;
-                    int16_t sine_val = lookup_sine(freeze_lfo_phase);
-                    scrub_offset = (sine_val + 32768) >> 1; // 0..32767
-                } else if (raw_mix > 29490) {
-                    // Zone 3 (Last 10%: 90% -> 100%): Rhythmic Random Slice Auto-Skip
-                    int32_t skip_interval = 800 - (((raw_mix - 29490) * 720) / (32767 - 29490)); // 800 down to 80 ticks
-                    if (skip_interval < 80) skip_interval = 80;
-                    freeze_skip_timer++;
-                    if (freeze_skip_timer >= skip_interval) {
-                        freeze_skip_timer = 0;
-                        freeze_random_step = fast_rand(rand_seed) & 0x7FFF;
-                    }
-                    scrub_offset = freeze_random_step;
-                } else {
-                    // Zone 2 (Middle 80%: 10% -> 90%): High-Resolution Manual Position Scrubbing
-                    int32_t manual_ratio = ((raw_mix - 3277) * 32768) / (29490 - 3277);
-                    scrub_offset = clamp_i32(manual_ratio, 0, 32767);
-                }
-            } else {
-                freeze_lfo_phase = 0;
-                freeze_skip_timer = 0;
-            }
-
-            int32_t cv1_offset = p.cv1 * 6;
-            int32_t range = max_buf_samples - p.glitch_loop_size;
-            if (range < 0) range = 0;
-
-            int32_t raw_offset = 0;
-            if (active_clk > 240) {
-                // Clock-quantized position scrubbing: snap scrub offset to 16th-note beat grid boundaries
-                int32_t grid_unit = active_clk / 4; // 16th note grid
-                if (grid_unit < 128) grid_unit = 128;
-                int32_t num_grid_steps = range / grid_unit;
-                if (num_grid_steps > 0) {
-                    int32_t step_idx = ((32767 - scrub_offset) * num_grid_steps) >> 15;
-                    step_idx = clamp_i32(step_idx, 0, num_grid_steps);
-                    raw_offset = (step_idx * grid_unit) + p.glitch_loop_size;
-                } else {
-                    raw_offset = p.glitch_loop_size;
-                }
-            } else {
-                // Continuous smooth position scrubbing when unclocked
-                raw_offset = (((32767 - scrub_offset) * range) >> 15) + p.glitch_loop_size;
-            }
-            int32_t target_offset = raw_offset + cv1_offset;
-            p.glitch_target_offset = clamp_i32(target_offset, 0, max_buf_samples);
-
-            p.glitch_speed_q16 = p.glitch_speed_mapped;
-        }
-
-        // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
-        p.filter_cutoff = vp[4][0];
-        p.filter_res    = vp[4][1];
-        p.filter_morph  = scale_grit(vp[4][2], 32767, macro_filter);
-
-        p.freeze = is_frozen;
-        // Only trigger infinite loop stutter if CV2 is at maximum (Button 2, cv2_abs > 1900)
-        bool cv2_stutter = cv2_live && (cv2_abs > 1900);
-        p.stutter = (pulse1_live && PulseIn1()) || cv2_stutter;
-        p.cv1 = cv1_live ? cv1_abs : 0;
-        p.cv1_bipolar = cv1_live ? cv1_val : 0;
-        p.cv2 = cv2_val;
-        p.pulse1_live = pulse1_live;
-        p.pulse2_live = pulse2_live;
-        p.cv1_live = cv1_live;
-        p.cv2_live = cv2_live;
-
-        p.no_audio1 = debounced_no_audio1;
-        p.no_audio2 = debounced_no_audio2;
-        // Extended Mono Mode: only active when Input 2 is unplugged AND user enabled it
-        p.mono_mode = debounced_no_audio2 && global_mono_mode;
-
-        p.is_freeze_page = is_frozen;
-        p.flash_writing  = false;
-        p.grittiness_macro = active_macro;
-        p.input_width = global_input_width;
-        p.routing_mode = global_routing_mode;
-
-
-
-        // Reverb params — Reverb mix is clean (not scaled by macro).
-        p.reverb_mix  = apply_deadzone(vp[5][0]);
-        {
-            int32_t fb = vp[5][2];
-            int32_t fb_glitch = fb;
-            if (fb > 12000) {
-                if (active_macro < 16384) {
-                    fb_glitch = 12000 + (((fb - 12000) * active_macro) >> 14);
-                } else {
-                    int32_t target_max = 32767; // Scale up to 100% full intensity
-                    fb_glitch = fb + (((target_max - fb) * (macro_reverb - 16384)) / 16383);
-                }
-            }
-            
-            int32_t raw_x = vp[5][1];
-            int32_t reverb_mode = 0; // 0 = Ambient Hall, 1 = Spring
-            int32_t size_scale = 16384;
-
-            if (raw_x < 15300) {
-                reverb_mode = 1; // Spring Reverb Mode (OP-1 Style Metallic Spring Tank)
-                size_scale = 3276 + ((raw_x * 13108) / 15300);
-            } else if (raw_x > 17400) {
-                reverb_mode = 0; // Ambient Hall Reverb Mode (Lush Plate/Cathedral)
-                size_scale = 16384 + (((raw_x - 17400) * 16383) / 15367);
-            } else {
-                reverb_mode = 0; // Center Studio Plate
-                size_scale = 16384;
-            }
-
-            p.reverb_mode = reverb_mode;
-            p.reverb_size = size_scale;
-            // max_decay scales from ~28000 (small spring/room) to 32400 (largest room).
-            int32_t max_decay = 28000 + (((size_scale - 3276) * 60817) >> 20);
-
-            int32_t decay = 0;
-            if (vp[5][2] > 31500) {
-                // Infinite Reverb Hold Mode: locks feedback at 100% (32767) for endless pad wash
-                decay = 32767;
-            } else if (fb_glitch < 24000) {
-                // Clean decay zone: linear ramp from 0 to max_decay
-                int32_t val = (fb_glitch * 87381) >> 16; // fb/24000 in Q15
-                decay = (val * max_decay) >> 15;
-            } else {
-                decay = max_decay;
-            }
-
-            int32_t lofi_level = 0;
-            if (fb_glitch < 12000) {
-                lofi_level = 0;
-            } else if (fb_glitch < 26000) {
-                int32_t diff = fb_glitch - 12000;
-                int32_t raw_lofi = (diff * 153391) >> 16;
-                int32_t raw_sq = (raw_lofi * raw_lofi) >> 15;
-                lofi_level = (raw_sq * raw_sq) >> 15;
-            } else {
-                lofi_level = 32767;
-            }
-
-            int32_t sparkle_level = 0;
-            if (fb_glitch < 14000) {
-                sparkle_level = 0;
-            } else if (fb_glitch < 28000) {
-                int32_t diff = fb_glitch - 14000;
-                sparkle_level = (diff * 153391) >> 16;
-            } else {
-                sparkle_level = 32767;
-            }
-
-            int32_t circuit_bent_level = 0;
-            if (fb_glitch < 20000) {
-                circuit_bent_level = 0;
-            } else {
-                int32_t diff = fb_glitch - 20000;
-                circuit_bent_level = (diff * 168188) >> 16;
-                if (circuit_bent_level > 32767) circuit_bent_level = 32767;
-            }
-
-            // Damping: 30000 = bright (~25kHz at 24kHz SR), floor = 22000 = dark/muffled
-            // Extended floor (was 24000) allows genuinely woolly reverb tails
-            int32_t damp = 30000 - ((lofi_level * 8000) >> 15);
-
-            int32_t shift_q15 = (lofi_level * 6);
-            int32_t int_shift = shift_q15 >> 15;
-            int32_t frac_shift = shift_q15 & 0x7FFF;
-
-            p.reverb_decay = decay;
-            p.reverb_damp = damp;
-            p.reverb_lofi_level = lofi_level;
-            p.reverb_sparkle_level = sparkle_level;
-            p.reverb_circuit_bent_level = circuit_bent_level;
-            p.reverb_lofi_shift = int_shift;
-            p.reverb_lofi_frac = frac_shift;
-        }
-
-        // Glitch Keyboard Tasteful Modulations — all proportional to CV level:
-        // As the 4V knob sweeps from left→right each effect fades in continuously.
-        // CV1 axis (degradation character): wavefolder grit + digital shredding scale with cv1_abs.
-        if (cv1_live && cv1_abs > 100) {
-            if (cv1_abs > 1200) {
-                // Scale morph and XOR proportionally across 1200→2048
-                int32_t t = clamp_i32(cv1_abs - 1200, 0, 848);  // 0..848
-                p.filter_morph    = clamp_i32(p.filter_morph + (t * 3000) / 848, 0, 32767);
-                // XOR mask: ramp from 0 to 2 — only crosses integer steps at ~56% and 100%
-                int32_t xor_add   = (t * 2) / 848;
-                p.chorus_xor_mask = clamp_i32(p.chorus_xor_mask + xor_add, 0, 31);
-            }
-        }
-
-        // CV2 axis: chorus/tape-drift and reverb/shimmer scale proportionally with cv2_abs.
-        if (cv2_live && cv2_abs > 800) {
-            if (cv2_abs <= 1900) {
-                // Ramp tape-drift effects 0→max across the full 1100-unit span (800→1900)
-                int32_t t = (cv2_abs - 800) * 32767 / 1100; // 0..32767
-                p.chorus_mix    = clamp_i32(p.chorus_mix    + ((4000 * t) >> 15), 0, 32767);
-                p.chorus_depth  = clamp_i32(p.chorus_depth  + ((2000 * t) >> 15), 0, 32767);
-                p.chorus_rate   = clamp_i32(p.chorus_rate   + ((1000 * t) >> 15), 0, 32767);
-                p.filter_cutoff = clamp_i32(p.filter_cutoff - ((1500 * t) >> 15), 0, 32767);
-            } else {
-                // Key 2 zone: apply full tape-drift (zone was crossed), then ramp in shimmer reverb
-                p.chorus_mix    = clamp_i32(p.chorus_mix    + 4000, 0, 32767);
-                p.chorus_depth  = clamp_i32(p.chorus_depth  + 2000, 0, 32767);
-                p.chorus_rate   = clamp_i32(p.chorus_rate   + 1000, 0, 32767);
-                p.filter_cutoff = clamp_i32(p.filter_cutoff - 1500, 0, 32767);
-                int32_t t = clamp_i32(cv2_abs - 1900, 0, 148) * 32767 / 148; // 0..32767
-                p.reverb_mix           = clamp_i32(p.reverb_mix           + ((4000 * t) >> 15), 0, 32767);
-                p.reverb_decay         = clamp_i32(p.reverb_decay         + ((3000 * t) >> 15), 0, 32767);
-                p.reverb_sparkle_level = clamp_i32(p.reverb_sparkle_level + ((2000 * t) >> 15), 0, 32767);
-            }
-        }
-
+        int32_t cv1_val = cv1_live ? CVIn1() : 0;
+        int32_t cv2_val = cv2_live ? CVIn2() : 0;
+        bool p1_val = pulse1_live ? PulseIn1() : false;
+        push_params_for_idx(
+            next_idx,
+            cv1_live, cv1_val,
+            cv2_live, cv2_val,
+            pulse1_live, p1_val,
+            pulse2_live,
+            debounced_no_audio1, debounced_no_audio2,
+            debounced_sw, active_sw_held_ms
+        );
         g_params_idx.store(next_idx, std::memory_order_release);
     }
     // ── 6. LED visualisation ──────────────────────────────────────────────
@@ -2428,39 +2036,32 @@ void BendsCard::tick_ui_once() {
         for (int i = 0; i < 6; i++) {
             LedBrightness(i, bright);
         }
-        if (saveFlashTimer == 0) {
-            bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
-        }
         return;
     }
     if (chainVisTimer > 0) {
         chainVisTimer--;
-        uint32_t elapsed = 800 - chainVisTimer;
         int16_t bright_leds[6] = {0, 0, 0, 0, 0, 0};
         
-        if (elapsed < 80) {
-            // Fast Start Flash ON (80ms)
-            for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
-        } else if (elapsed < 120) {
-            // Gap OFF (40ms)
-            for (int i = 0; i < 6; i++) bright_leds[i] = 0;
-        } else if (elapsed < 660) {
-            // Rapid Sequence Steps 0..5 (90ms per step)
-            int step_idx = (elapsed - 120) / 90;
-            if (step_idx >= 0 && step_idx < 6) {
-                int chain[6];
-                get_routing_chain(chainVisMode, chainVisMono, chain);
-                int active_led = chain[step_idx];
-                if (active_led >= 0 && active_led < 6) {
-                    bright_leds[active_led] = 4095;
+        if (chainVisTimer > 900) {
+            // Initial fast flash (1200-901 = first 300ms region)
+            uint32_t elapsed = 1200 - chainVisTimer;
+            if (elapsed < 80) {
+                for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
+            }
+            // else gap
+        } else if (chainVisTimer >= 0 && chainVisTimer <= 900) {
+            uint32_t elapsed_seq = 900 - chainVisTimer;
+            if (elapsed_seq < 900) {
+                int step_idx = elapsed_seq / 150;
+                if (step_idx >= 0 && step_idx < 6) {
+                    int chain[6];
+                    get_routing_chain(chainVisMode, chainVisMono, chain);
+                    int active_led = chain[step_idx];
+                    if (active_led >= 0 && active_led < 6) {
+                        bright_leds[active_led] = 4095;
+                    }
                 }
             }
-        } else if (elapsed < 720) {
-            // Gap OFF (60ms)
-            for (int i = 0; i < 6; i++) bright_leds[i] = 0;
-        } else {
-            // Fast End Flash ON (80ms)
-            for (int i = 0; i < 6; i++) bright_leds[i] = 4095;
         }
 
         for (int i = 0; i < 6; i++) {
@@ -2580,16 +2181,48 @@ void BendsCard::tick_ui_once() {
             LedBrightness(i, brightness);
         }
     } else {
-        // Normal mode: active page LED comfortable steady glow; others dark
-        // Bottom right LED (LED 5) turns on at half-intensity when frozen
+        // Normal mode: Active page LED soft steady glow (1800); inactive LEDs stay OFF (0) unless activity triggers
+        // Clock sync pulse: Brief highlight pulse on active LED on clock pulses
+        static uint16_t clk_pulse_flash = 0;
+        static bool last_ui_p1 = false;
+        bool ui_p1 = pulse1_live ? PulseIn1() : false;
+        bool ui_p1_rising = ui_p1 && !last_ui_p1;
+        last_ui_p1 = ui_p1;
+        if (ui_p1_rising && pulse1_live) {
+            clk_pulse_flash = 50; // 50ms clock pulse flash
+        }
+        if (clk_pulse_flash > 0) clk_pulse_flash--;
+
+        uint16_t in_lvl = vis_input_level.load(std::memory_order_relaxed);
+        bool codec_glitch = vis_codec_glitch.exchange(false, std::memory_order_relaxed);
+        bool delay_repeat = vis_delay_pulse.exchange(false, std::memory_order_relaxed);
+
         for (int i = 0; i < 6; i++) {
-            int brightness = 0;
+            int brightness = 0; // 0 baseline glow (inactive LEDs remain dark unless active)
+            if (i == 0) { // Chorus / Tape: Audio input level envelope follower
+                brightness = (in_lvl * 1200) >> 15;
+            } else if (i == 1) { // Codec: Glitches, pops, packet drops, and bit-scramble detector
+                brightness = codec_glitch ? 1000 : 0;
+            } else if (i == 2) { // Delay: Subtle rhythmic repeat pulse on active delay echoes
+                brightness = delay_repeat ? 350 : 0;
+            } else if (i == 3) { // Glitcher: Stutter active loop pulse
+                brightness = glitcher.active ? 450 : 0;
+            } else if (i == 4) { // Filter: Resonance & cutoff envelope
+                brightness = (vp[4][1] * 350) >> 15;
+            } else if (i == 5) { // Reverb / Freeze: Decay energy & freeze indicator
+                if (is_frozen) {
+                    brightness = 800;
+                } else {
+                    brightness = (vp[5][0] * 300) >> 15;
+                }
+            }
+
+            // Highlight active page LED (soft 1600 glow, boosted to 2600 ONLY on clock pulse)
             if (i == currentPage) {
-                brightness = 1500;
+                if (brightness < 1600) brightness = 1600;
+                if (clk_pulse_flash > 0) brightness = 2600;
             }
-            if (i == 5 && is_frozen) {
-                brightness = 2048;
-            }
+
             LedBrightness(i, brightness);
         }
     }
@@ -2646,6 +2279,15 @@ int main() {
     filter.init();
     reverb.init();
 
+    // Initialize Pulse Out 2 for high-speed PWM audio output (microsound generator)
+    gpio_set_function(PULSE_2_RAW_OUT, GPIO_FUNC_PWM);
+    {
+        pwm_config config = pwm_get_default_config();
+        pwm_config_set_wrap(&config, 1023); // 10-bit PWM = ~122 kHz carrier
+        pwm_init(pwm_gpio_to_slice_num(PULSE_2_RAW_OUT), &config, true);
+    }
+    pwm_set_gpio_level(PULSE_2_RAW_OUT, 512); // start at mid-point (silence)
+
     // 4. Enable normalisation probe and let it settle before reading jack state.
     //    The probe needs a few cycles to stabilise; 50 ms is more than enough.
     card.EnableNormalisationProbe();
@@ -2672,7 +2314,7 @@ int main() {
     bends_load_settings();
 
     // Trigger chain visualization on boot
-    bends_trigger_chain_vis(global_routing_mode, global_mono_mode && card.JackDisconnected(ComputerCard::Input::Audio2));
+    bends_trigger_chain_vis_fast();
 
     // 6. Push default settings to Core 1 double-buffer before Core 1 starts.
     push_params_to_core1();
