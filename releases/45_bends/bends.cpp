@@ -378,13 +378,11 @@ inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x
 
 static void bake_macro_to_vp(int32_t active_macro) {
     int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
-    int32_t macro_filter = get_staggered_macro(active_macro, 18000, 32767);
     int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
 
     vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
     vp[1][1] = scale_grit(vp[1][1], 32767, macro_codec);
     vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
-    vp[4][0] = scale_grit(vp[4][0], 32767, macro_filter);
     vp[5][0] = scale_grit(vp[5][0], 32767, macro_reverb);
 }
 
@@ -1789,8 +1787,8 @@ void BendsCard::tick_ui_once() {
     static bool manual_save_triggered = false;
 
     if (sw_down_entered) {
-        grittiness_macro = 16384; // Always default to transparent center (16384) on Switch DOWN
-        lockMacro.engage(dzMain, 16384, true); // Catchup lock enabled for Macro Main knob
+        grittiness_macro = dzMain; // Instantly track physical knob position
+        lockMacro.engage(dzMain, dzMain, false); // Instant unlock for Macro Main knob (no catchup)
         lockX.engage(dzX, global_input_width, true); // Catchup lock enabled for Input Width Knob X
         lockY.engage(dzY, global_routing_mode * 8192 + 4096, true); // Catchup lock enabled for Routing Preset Knob Y
         settings_adjusted_this_hold = false;
