@@ -1786,29 +1786,26 @@ void BendsCard::tick_ui_once() {
 
     static bool routing_changed_this_hold = false;
 
-    if (sw_down_entered) {
-        // INSTANT PAGE CYCLE ON PRESS!
-        currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
-        if (currentPage == 3 && is_frozen) {
-            lockMain.engage(dzMain, freeze_vp[0]);
-            lockX.engage(dzX, freeze_vp[1]);
-            lockY.engage(dzY, freeze_vp[2]);
-        } else {
-            lockMain.engage(dzMain, vp[currentPage][0]);
-            lockX.engage(dzX, vp[currentPage][1]);
-            lockY.engage(dzY, vp[currentPage][2]);
-        }
-        pageFlashTimer = 400;
-        param_changed = true;
+    static bool manual_save_triggered = false;
 
+    if (sw_down_entered) {
         grittiness_macro = 16384; // Always default to transparent center (16384) on Switch DOWN
         lockMacro.engage(dzMain, 16384, true); // Catchup lock enabled for Macro Main knob
+        lockX.engage(dzX, global_input_width, true); // Catchup lock enabled for Input Width Knob X
+        lockY.engage(dzY, global_routing_mode * 8192 + 4096, true); // Catchup lock enabled for Routing Preset Knob Y
         settings_adjusted_this_hold = false;
         routing_changed_this_hold = false;
+        manual_save_triggered = false;
     }
+
     if (sw_down_exited) {
-        if (active_sw_held_ms >= 350) {
-            // Save settings (input width, mono mode, routing mode) to flash ONLY if Knob X or Knob Y were adjusted
+        if (active_sw_held_ms < 350 && !settings_adjusted_this_hold) {
+            // Flick DOWN (< 350ms) with no knob adjustments — cycle pages 0→1→2→3→4→5→0
+            currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
+            pageFlashTimer = 400;
+            param_changed = true;
+        } else if (active_sw_held_ms >= 350) {
+            // Hold DOWN (>= 350ms) — save settings to flash ONLY if Knob X or Knob Y were adjusted
             if (settings_adjusted_this_hold) {
                 bends_save_settings();
                 if (routing_changed_this_hold) {
@@ -1845,14 +1842,17 @@ void BendsCard::tick_ui_once() {
             if (active_sw_held_ms >= 350) {
                 if (!hold_action_triggered) {
                     hold_action_triggered = true;
-
-                    // Trigger hold action
                     if (debounced_sw == ComputerCard::Switch::Down) {
-                        // Hold DOWN: macro active, page change deferred until release if unadjusted
-                        lockX.engage(dzX, global_input_width, true); // Catchup lock enabled for Input Width Knob X
-                        lockY.engage(dzY, global_routing_mode * 8192 + 4096, true); // Catchup lock enabled for Routing Preset Knob Y
                         last_modified_macro_knob = 0; // default view is Macro
                     }
+                }
+            }
+            // 3-second hold manual save with 600ms LED confirmation flash
+            if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000) {
+                if (!manual_save_triggered) {
+                    manual_save_triggered = true;
+                    bends_save_settings();
+                    saveFlashTimer = 600; // 600ms LED confirmation flash
                 }
             }
         }
@@ -1882,8 +1882,6 @@ void BendsCard::tick_ui_once() {
                 param_changed = true;
             }
         }
-        // Transition detected
-        // Switch DOWN page cycle now executes instantly on press (sw_down_entered)
         // Reset state
         last_debounced_sw = debounced_sw;
         active_sw_held_ms = 0;
