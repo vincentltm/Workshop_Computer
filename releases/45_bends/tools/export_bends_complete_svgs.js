@@ -28,24 +28,24 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
     { id: 'page-6-reverb', file: 'page6_reverb.svg', mode: 'normal', activeLed: 6, activePos: 'middle' }
   ];
 
-  // Socket mapping with exact short labels from info.yaml
-  const inputsObj = [
-    { id: 'AudioIn1', name: 'Audio 1', description: 'Stereo left audio input' },
-    { id: 'AudioIn2', name: 'Audio 2', description: 'Stereo right audio input' },
-    { id: 'CVIn1', name: 'CV 1', description: 'Bipolar CV input modulating primary parameter' },
-    { id: 'CVIn2', name: 'CV 2', description: 'Bipolar CV input modulating secondary parameter' },
-    { id: 'PulseIn1', name: 'Clock Sync', description: 'External clock pulse sync' },
-    { id: 'PulseIn2', name: 'Freeze Gate', description: 'Gate input locking memory into freeze' }
-  ];
+  // Socket mapping with exact short labels from info.yaml using panelPositions.js keys
+  const inputsObj = {
+    audio_l: { label: 'Audio 1' },
+    audio_r: { label: 'Audio 2' },
+    cv_1: { label: 'CV 1' },
+    cv_2: { label: 'CV 2' },
+    pulse_1: { label: 'Clock Sync' },
+    pulse_2: { label: 'Freeze Gate' }
+  };
 
-  const outputsObj = [
-    { id: 'AudioOut1', name: 'Out 1', description: 'Processed stereo left output' },
-    { id: 'AudioOut2', name: 'Out 2', description: 'Processed stereo right output' },
-    { id: 'CVOut1', name: 'Pitch CV', description: 'Turing Machine 1V/Oct semitone sequence' },
-    { id: 'CVOut2', name: 'Random CV', description: 'Stepped random Sample & Hold CV' },
-    { id: 'PulseOut1', name: 'Loop Trig', description: '+5V 2ms trigger pulse output' },
-    { id: 'PulseOut2', name: 'Texture', description: 'Lo-fi PWM audio stream' }
-  ];
+  const outputsObj = {
+    audio_out_l: { label: 'Out 1' },
+    audio_out_r: { label: 'Out 2' },
+    cv_out_1: { label: 'Pitch CV' },
+    cv_out_2: { label: 'Random CV' },
+    pulse_out_1: { label: 'Loop Trig' },
+    pulse_out_2: { label: 'Texture' }
+  };
 
   const switchModesObj = {
     up: 'Freeze',
@@ -100,12 +100,12 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
     };
 
     // Dynamic import from sitegen
-    const { renderPanelArtwork } = await import('../../tools/sitegen/src/render/cardPage.js');
+    const { renderPanelArtwork } = await import('../../../tools/sitegen/src/render/cardPage.js');
     const panelHtml = renderPanelArtwork(tabCard, '/assets/program_cards/Standalone_computer_rev1.svg', positionControl);
 
     console.log(`Generating complete web SVG for ${item.id}...`);
 
-    const svgStr = await page.evaluate(async ({ panelHtml, item }) => {
+    const svgStr = await page.evaluate(async ({ panelHtml, item, switchModesObj }) => {
       const { renderPanelElementToSvg } = await import('/assets/js/panel-export.js');
       
       const tempWrapper = document.createElement('div');
@@ -137,6 +137,13 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
       if (!panelEl) throw new Error('Could not find .program-card-panel element');
 
       let svg = await renderPanelElementToSvg(panelEl);
+
+      // Set active switch position button rect fill to bright yellow (#f7d738)
+      if (item.activePos && switchModesObj[item.activePos]) {
+        const roleName = switchModesObj[item.activePos].replace('&', '&amp;');
+        const regex = new RegExp(`(<rect\\s+[^>]*fill=")[^"]*("\\s*/><text\\s+[^>]*><tspan\\s+[^>]*>${roleName}</tspan>)`, 'g');
+        svg = svg.replace(regex, `$1#f7d738$2`);
+      }
 
       const ledCoords = [
         { cx: '6.7142', cy: '309.2807' },
@@ -184,7 +191,7 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
 
       document.body.removeChild(tempWrapper);
       return svg;
-    }, { panelHtml, item });
+    }, { panelHtml, item, switchModesObj });
 
     const filePath = path.join(targetDir, item.file);
     await fs.writeFile(filePath, svgStr, 'utf8');
