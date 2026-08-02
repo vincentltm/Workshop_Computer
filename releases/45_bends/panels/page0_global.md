@@ -25,6 +25,8 @@ Bends spans a wide range of sound processing:
 - **LED 4**: Dual Mono Mode active.
 - **LED 5**: Extended Mono Mode active.
 
+### Inputs & Outputs
+
 #### Inputs
 - **Audio 1 & 2**: Stereo audio inputs. When no cable is inserted in Audio 2, Audio 1 is normalled to both channels to maintain stereo processing.
 - **CV 1**: Bipolar CV input modulating primary page parameters or tuned 1V/Oct pitch in Karplus-Strong string and filter oscillator modes.
