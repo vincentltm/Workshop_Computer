@@ -135,7 +135,7 @@ static int32_t grittiness_macro = 16384; // 50% = transparent: baking at this va
 static bool g_macro_active = false;
 static int32_t global_input_width = 9830;
 static int32_t global_routing_mode = 0;
-static bool    global_mono_mode    = false; // Extended Mono Mode: doubles delay+glitch time (requires Input 2 unplugged)
+static bool    global_mono_mode    = false; // Extended Mono Mode: doubles delay+glitch time (enabled via Macro X CCW limit)
 static bool    global_dual_mono_mode = false; // Dual Mono Mode: decorrelated 2-channel independent processing
 static int last_modified_macro_knob = 0; // 0 = Macro, 1 = Width, 2 = Routing
 
@@ -271,7 +271,7 @@ static void bends_save_settings() {
     s->input_width    = global_input_width;
     s->mono_mode      = global_mono_mode ? 1 : 0;
     s->dual_mono_mode = global_dual_mono_mode ? 1 : 0;
-    s->current_page   = (uint8_t)currentPage;
+    s->current_page   = 0;  // Always boot to Page 0 (not restored from flash)
     memcpy(s->vp, vp, sizeof(vp));
     memcpy(s->freeze_vp, freeze_vp, sizeof(freeze_vp));
     s->crc            = bends_settings_checksum(*s);
@@ -377,11 +377,12 @@ inline int32_t get_staggered_macro(int32_t macro, int32_t start_x, int32_t end_x
 }
 
 static void bake_macro_to_vp(int32_t active_macro) {
-    int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 28000);
-    int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
-    int32_t macro_delay  = get_staggered_macro(active_macro, 14000, 30000);
-    int32_t macro_glitch = get_staggered_macro(active_macro, 6000, 24000);
-    int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
+    int32_t macro_chorus = get_staggered_macro(active_macro, 12000, 30000);
+    int32_t macro_codec  = get_staggered_macro(active_macro, 4000, 26000);
+    int32_t macro_delay  = get_staggered_macro(active_macro, 16000, 31000);
+    int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
+    int32_t macro_filter = get_staggered_macro(active_macro, 20000, 32767);
+    int32_t macro_reverb = get_staggered_macro(active_macro, 24000, 32767);
 
     vp[0][2] = scale_grit(vp[0][2], 32767, macro_chorus);
     vp[1][0] = scale_grit(vp[1][0], 32767, macro_codec);
@@ -389,6 +390,9 @@ static void bake_macro_to_vp(int32_t active_macro) {
     vp[1][2] = scale_grit(vp[1][2], 32767, macro_codec);
     vp[2][2] = scale_grit(vp[2][2], 32767, macro_delay);
     vp[3][0] = scale_grit(vp[3][0], 32767, macro_glitch);
+    if (macro_filter > 16384) {
+        vp[4][0] = scale_grit(vp[4][0], 32767, macro_filter); // Only bake upward
+    }
     vp[5][0] = scale_grit(vp[5][0], 32767, macro_reverb);
 }
 
@@ -886,13 +890,13 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     
     if (trigger_cv_update) {
         // Universal Harmonically Weighted Semitone Options (15 notes):
-        // Index 0..4: Consonant (unison, 4th, 5th, octave) -> {-12, -5, 0, 7, 12}
-        // Index 5..9: Warm (3rds, 6ths) -> {-9, -8, -3, 4, 9}
-        // Index 10..14: Tense / Chromatic (2nds, 7ths, tritones) -> {-11, -6, -1, 6, 11}
+        // Index 0..4: Consonant / Tonal (4th down, unison, 3rd, 5th, octave) -> {-5, 0, 4, 7, 12}
+        // Index 5..9: Warm / Extended (5th down, minor 3rd down, 2nd, 4th, 6th) -> {-7, -3, 2, 5, 9}
+        // Index 10..14: Tense / Full 2-Octave Chromatic (octave down, 6th down, 7th, tritone) -> {-12, -9, -1, 6, 11}
         static const int16_t semitone_table[15] = {
-            -12, -5, 0, 7, 12,
-            -9, -8, -3, 4, 9,
-            -11, -6, -1, 6, 11
+            -5,  0, 4, 7, 12,
+            -7, -3, 2, 5,  9,
+           -12, -9,-1, 6, 11
         };
 
         // Glitcher Page Y Knob (vp[3][2]) controls Sequencer mutation rate & scale degree palette:
@@ -937,9 +941,9 @@ void __not_in_flash_func(BendsCard::ProcessSample)() {
     CVOut1(last_cv1);
     CVOut2(last_cv2);
 
-    // --- Pulse Out 1: Loop Boundary Clock / Sync Pulses ---
+    // --- Pulse Out 1: Sequencer Step & Loop Sync Pulses ---
     static int16_t p1_trig_timer = 0;
-    if (glitcher.trig_out1) {
+    if (trigger_cv_update || glitcher.trig_out1) {
         glitcher.trig_out1 = false;
         p1_trig_timer = 48; // 2 ms pulse
     }
@@ -1036,12 +1040,12 @@ static void push_params_for_idx(
     int32_t active_macro = base_macro;
 
     // Precompute staggered macros for the grittiness sweep
-    int32_t macro_chorus = get_staggered_macro(active_macro, 10000, 28000);
-    int32_t macro_codec  = get_staggered_macro(active_macro, 0, 20000);
-    int32_t macro_delay  = get_staggered_macro(active_macro, 14000, 30000);
-    int32_t macro_glitch = get_staggered_macro(active_macro, 6000, 24000);
-    int32_t macro_filter = get_staggered_macro(active_macro, 18000, 32767);
-    int32_t macro_reverb = get_staggered_macro(active_macro, 22000, 32767);
+    int32_t macro_chorus = get_staggered_macro(active_macro, 12000, 30000);
+    int32_t macro_codec  = get_staggered_macro(active_macro, 4000, 26000);
+    int32_t macro_delay  = get_staggered_macro(active_macro, 16000, 31000);
+    int32_t macro_glitch = get_staggered_macro(active_macro, 8000, 28000);
+    int32_t macro_filter = get_staggered_macro(active_macro, 20000, 32767);
+    int32_t macro_reverb = get_staggered_macro(active_macro, 24000, 32767);
 
     // Precompute global noise scale first (tied to reverb/lofi entrance)
     int32_t noise_scale = 16384;
@@ -1058,7 +1062,7 @@ static void push_params_for_idx(
     bool filter_note_active    = (vp[4][1] >= 24000);
     bool is_note_gen_mode      = chorus_karplus_active || delay_karplus_active || filter_note_active;
 
-    p.chorus_mix       = apply_deadzone(vp[0][0]); // Clean parameter, not scaled by macro
+    p.chorus_mix       = scale_grit(apply_deadzone(vp[0][0]), 32767, macro_chorus); // Macro scales mix below center for full clean
     int32_t eff_chorus_rate = vp[0][1];
     if (chorus_karplus_active && cv1_live && cv1_val != 0) {
         eff_chorus_rate = clamp_i32(eff_chorus_rate + (cv1_val * 4), 0, 32767);
@@ -1285,7 +1289,7 @@ static void push_params_for_idx(
     p.codec_tape_wow_flutter = tape_wow_flutter;
     p.codec_active_loss = active_loss;
 
-    p.delay_mix      = apply_deadzone(vp[2][0]); // Clean delay mix, not scaled by macro
+    p.delay_mix      = scale_grit(apply_deadzone(vp[2][0]), 32767, macro_delay); // Macro scales mix below center for full clean
     
     // Scale delay time by active_macro
     int32_t raw_delay_time = vp[2][1];
@@ -1388,7 +1392,7 @@ static void push_params_for_idx(
         }
         last_is_frozen = is_frozen;
 
-        bool eff_mono = debounced_no_audio2 || global_mono_mode;
+        bool eff_mono = global_mono_mode;
         int32_t max_buf_samples = eff_mono ? 65520 : 32760;
         int32_t active_clk = is_frozen ? (frozen_clk_period > 0 ? frozen_clk_period : g_clk_period_samples) : g_clk_period_samples;
         int32_t size = p.glitch_size;
@@ -1445,23 +1449,63 @@ static void push_params_for_idx(
         static uint16_t freeze_skip_timer = 0;
         static int32_t freeze_random_step = 0;
 
+        int32_t cv1_offset = p.cv1 * 6;
+        int32_t range = max_buf_samples - p.glitch_loop_size;
+        if (range < 0) range = 0;
+
         if (is_frozen) {
             int32_t raw_mix = p.glitch_mix;
             if (raw_mix < 3277) {
-                int32_t lfo_speed = 3 + (((3277 - raw_mix) * 18) / 3277);
-                freeze_lfo_phase += lfo_speed;
+                // Auto Sine LFO Scrubbing (Main knob < 10% / CCW limit)
+                // Normalize LFO speed against range/grid steps so LFO cycle rate remains steady
+                int32_t base_lfo_speed = 3 + (((3277 - raw_mix) * 18) / 3277);
+                int32_t grid_unit = p.glitch_loop_size;
+                if (grid_unit > active_clk) grid_unit = active_clk;
+                if (grid_unit < 128) grid_unit = 128;
+                int32_t num_grid_steps = (grid_unit > 0) ? (range / grid_unit) : 1;
+                
+                int32_t eff_lfo_speed = base_lfo_speed;
+                if (num_grid_steps > 8) {
+                    eff_lfo_speed = (base_lfo_speed * 8) / num_grid_steps;
+                    if (eff_lfo_speed < 1) eff_lfo_speed = 1;
+                }
+                
+                freeze_lfo_phase += eff_lfo_speed;
                 int16_t sine_val = lookup_sine(freeze_lfo_phase);
                 scrub_offset = (sine_val + 32768) >> 1;
             } else if (raw_mix > 29490) {
-                int32_t skip_interval = 800 - (((raw_mix - 29490) * 720) / (32767 - 29490));
-                if (skip_interval < 80) skip_interval = 80;
+                // Random Skip Scrubbing (Main knob > 90% / CW limit)
+                int32_t skip_interval_ms;
+                if (active_clk > 240) {
+                    // Clock-synced: jump rhythmically on beat subdivisions (4 beats -> 1 beat -> 1/4 beat)
+                    int32_t clk_ms = active_clk / 24;
+                    if (clk_ms < 100) clk_ms = 100;
+                    int32_t knob_frac = ((raw_mix - 29490) * 32767) / (32767 - 29490);
+                    if (knob_frac < 8192) {
+                        skip_interval_ms = clk_ms * 4;       // Every 4 beats (1 bar)
+                    } else if (knob_frac < 16384) {
+                        skip_interval_ms = clk_ms * 2;       // Every 2 beats
+                    } else if (knob_frac < 24576) {
+                        skip_interval_ms = clk_ms;           // Every 1 beat
+                    } else if (knob_frac < 28672) {
+                        skip_interval_ms = clk_ms / 2;       // Every 1/2 beat (8th note)
+                    } else {
+                        skip_interval_ms = clk_ms / 4;       // Every 1/4 beat (16th note)
+                    }
+                } else {
+                    // Unclocked: smooth time sweep from 800ms down to 80ms
+                    skip_interval_ms = 800 - (((raw_mix - 29490) * 720) / (32767 - 29490));
+                    if (skip_interval_ms < 80) skip_interval_ms = 80;
+                }
+
                 freeze_skip_timer++;
-                if (freeze_skip_timer >= skip_interval) {
+                if (freeze_skip_timer >= (uint32_t)skip_interval_ms) {
                     freeze_skip_timer = 0;
                     freeze_random_step = fast_rand(rand_seed) & 0x7FFF;
                 }
                 scrub_offset = freeze_random_step;
             } else {
+                // Manual Scrubbing (10% to 90% knob travel): 28500 = repeat current live beat steadily
                 int32_t manual_ratio = ((raw_mix - 3277) * 32768) / (29490 - 3277);
                 scrub_offset = clamp_i32(manual_ratio, 0, 32767);
             }
@@ -1469,10 +1513,6 @@ static void push_params_for_idx(
             freeze_lfo_phase = 0;
             freeze_skip_timer = 0;
         }
-
-        int32_t cv1_offset = p.cv1 * 6;
-        int32_t range = max_buf_samples - p.glitch_loop_size;
-        if (range < 0) range = 0;
 
         int32_t raw_offset = 0;
         if (active_clk > 240) {
@@ -1498,8 +1538,12 @@ static void push_params_for_idx(
         p.glitch_speed_q16 = p.glitch_speed_mapped;
     }
 
-    // Filter cutoff and res are clean, not scaled by macro. Morph/grit is scaled.
+    // Filter cutoff: only scale upward by macro (above center). Below center, leave cutoff
+    // unchanged — closing the filter makes the signal quiet/muffled, not clean.
     int32_t eff_filter_cutoff = vp[4][0];
+    if (macro_filter > 16384) {
+        eff_filter_cutoff = scale_grit(vp[4][0], 32767, macro_filter);
+    }
     if (filter_note_active && cv1_live && cv1_val != 0) {
         eff_filter_cutoff = clamp_i32(eff_filter_cutoff + (cv1_val * 4), 0, 32767);
     }
@@ -1520,8 +1564,9 @@ static void push_params_for_idx(
 
     p.no_audio1 = debounced_no_audio1;
     p.no_audio2 = debounced_no_audio2;
-    // Extended Mono Mode (4.0s delay time): active if Input 2 unplugged OR user toggles Mono Mode via Switch DOWN + Knob X Left
-    p.mono_mode = debounced_no_audio2 || global_mono_mode;
+    // Extended Mono Mode (~2.73s buffer): active when user enables Mono Mode via Macro Switch DOWN + Knob X CCW limit
+    p.mono_mode = global_mono_mode;
+    p.dual_mono_mode = global_dual_mono_mode;
 
     p.is_freeze_page = is_frozen;
     p.flash_writing  = false;
@@ -1530,7 +1575,7 @@ static void push_params_for_idx(
     p.routing_mode = global_routing_mode;
 
     // Reverb params
-    p.reverb_mix  = apply_deadzone(vp[5][0]);
+    p.reverb_mix  = scale_grit(apply_deadzone(vp[5][0]), 32767, macro_reverb); // Macro scales mix below center for full clean
     {
         int32_t fb = vp[5][2];
         int32_t fb_glitch = fb;
@@ -1756,30 +1801,7 @@ void BendsCard::tick_ui_once() {
         }
     }
 
-    // ── Boot Reset Check (Hold DOWN for 3s after boot to erase flash & restore factory defaults) ──
-    static uint32_t boot_ms = 0;
-    static uint32_t boot_down_ms = 0;
-    static bool boot_reset_done = false;
 
-    if (boot_ms < 3000) {
-        boot_ms++;
-        if (debounced_sw == ComputerCard::Switch::Down) {
-            boot_down_ms++;
-            if (boot_down_ms >= 2500 && !boot_reset_done) {
-                boot_reset_done = true;
-                bends_reset_factory_defaults();
-                bends_erase_settings();
-                push_params_to_core1();
-                lockMain.engage(dzMain, vp[0][0]);
-                lockX.engage(dzX, vp[0][1]);
-                lockY.engage(dzY, vp[0][2]);
-                lockMacro.engage(dzMain, grittiness_macro, false);
-                factoryResetFlashTimer = 1000; // 1s fast LED blink feedback
-            }
-        } else {
-            boot_down_ms = 0;
-        }
-    }
 
     // ── 3b. Switch hold & flick state machine ────────────────────────────
     bool param_changed = false;
@@ -1793,10 +1815,10 @@ void BendsCard::tick_ui_once() {
     static bool manual_save_triggered = false;
 
     if (sw_down_entered) {
-        grittiness_macro = dzMain; // Instantly track physical knob position
-        lockMacro.engage(dzMain, dzMain, false); // Instant unlock for Macro Main knob (no catchup)
-        lockX.engage(dzX, global_input_width, true); // Catchup lock enabled for Input Width Knob X
-        lockY.engage(dzY, global_routing_mode * 8192 + 4096, true); // Catchup lock enabled for Routing Preset Knob Y
+        grittiness_macro = 16384; // Default to transparent center on entry
+        lockMacro.engage(dzMain, 16384, true); // Catchup lock: user must cross center before macro responds
+        lockX.engage(dzX, global_input_width, false); // Delta unlock: move ~5% in either direction to unlock
+        lockY.engage(dzY, global_routing_mode * 8192 + 4096, false); // Delta unlock: move ~5% in either direction to unlock
         settings_adjusted_this_hold = false;
         routing_changed_this_hold = false;
         manual_save_triggered = false;
@@ -1811,8 +1833,8 @@ void BendsCard::tick_ui_once() {
             grittiness_macro = 16384; // Reset to transparent center
             g_macro_active = false;
             last_modified_macro_knob = 0;
-        } else if (active_sw_held_ms < 350 && !settings_adjusted_this_hold) {
-            // Flick DOWN (< 350ms) with no knob adjustments — cycle pages 0→1→2→3→4→5→0
+        } else if (active_sw_held_ms < 350) {
+            // Flick DOWN (<350ms) — cycle pages 0→1→2→3→4→5→0
             currentPage = (currentPage < 5) ? (currentPage + 1) : 0;
             pageFlashTimer = 400;
             param_changed = true;
@@ -1822,7 +1844,7 @@ void BendsCard::tick_ui_once() {
             // Save settings to flash ONLY if Knob X or Knob Y were adjusted
             bends_save_settings();
             if (routing_changed_this_hold) {
-                bends_trigger_chain_vis(global_routing_mode, global_mono_mode && debounced_no_audio2);
+                bends_trigger_chain_vis(global_routing_mode, global_mono_mode);
             }
             grittiness_macro = 16384;
             g_macro_active = false;
@@ -1854,7 +1876,8 @@ void BendsCard::tick_ui_once() {
                 }
             }
             // 3-second hold manual save with 600ms LED confirmation flash
-            if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000) {
+            // Suppressed when Main Knob macro is active to avoid saving mid-adjustment
+            if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 3000 && grittiness_macro == 16384) {
                 if (!manual_save_triggered) {
                     manual_save_triggered = true;
                     bends_save_settings();
@@ -1872,10 +1895,10 @@ void BendsCard::tick_ui_once() {
                 freeze_latched = true;
                 is_frozen = true;
                 currentPage = 3;
-                freeze_vp[0] = 32767; // Freeze at current live beat / most recent audio
-                lockMain.engage(dzMain, freeze_vp[0]);
-                lockX.engage(dzX, freeze_vp[1]);
-                lockY.engage(dzY, freeze_vp[2]);
+                freeze_vp[0] = 28500; // Default to top of manual scrub zone -> repeats current live beat steadily
+                lockMain.engage(dzMain, freeze_vp[0], false); // Delta unlock: move ~5% in either direction to unlock
+                lockX.engage(dzX, freeze_vp[1], false);
+                lockY.engage(dzY, freeze_vp[2], false);
                 param_changed = true;
             } else {
                 // Unfreeze and return to the previous page
@@ -1905,30 +1928,12 @@ void BendsCard::tick_ui_once() {
         lockMacro.engage(dzMain, grittiness_macro);
     }
 
-    if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 100) {
+    if (debounced_sw == ComputerCard::Switch::Down && active_sw_held_ms >= 350) {
         int32_t nextMacro = lockMacro.update(dzMain);
         if (grittiness_macro != nextMacro) {
             grittiness_macro = nextMacro;
             param_changed = true;
             last_modified_macro_knob = 0;
-
-            // Macro Clean Reset Gesture: turning Macro Main knob to extreme CW limit (> 31500)
-            // resets all parameters to the saved clean state (latched once per gesture)
-            static bool macro_clean_reset_latched = false;
-            if (grittiness_macro > 31500) {
-                if (!macro_clean_reset_latched) {
-                    macro_clean_reset_latched = true;
-                    bends_load_settings(); // restore saved clean state
-                    lockMain.engage(dzMain, vp[currentPage][0]);
-                    lockX.engage(dzX, vp[currentPage][1]);
-                    lockY.engage(dzY, vp[currentPage][2]);
-                    grittiness_macro = 16384; // reset macro back to transparent center
-                    lockMacro.engage(dzMain, 16384);
-                    pageFlashTimer = 300; // single LED flash confirmation
-                }
-            } else if (grittiness_macro < 26000) {
-                macro_clean_reset_latched = false;
-            }
         }
         int32_t nextWidth = lockX.update(dzX);
         if (global_input_width != nextWidth) {
@@ -1962,6 +1967,24 @@ void BendsCard::tick_ui_once() {
             param_changed = true;
             last_modified_macro_knob = 2;
             routing_changed_this_hold = true;
+        }
+
+        // Clean Reset Gesture: Y knob fully right (> 31500) while Switch DOWN held
+        // resets all parameters to the saved clean state (latched once per gesture)
+        static bool clean_reset_latched = false;
+        if (nextPresetKnob > 31500) {
+            if (!clean_reset_latched) {
+                clean_reset_latched = true;
+                bends_load_settings(); // restore saved clean state
+                lockMain.engage(dzMain, vp[currentPage][0]);
+                lockX.engage(dzX, vp[currentPage][1]);
+                lockY.engage(dzY, vp[currentPage][2]);
+                grittiness_macro = 16384; // reset macro back to transparent center
+                lockMacro.engage(dzMain, 16384);
+                pageFlashTimer = 300; // single LED flash confirmation
+            }
+        } else if (nextPresetKnob < 26000) {
+            clean_reset_latched = false;
         }
     }
 
@@ -2097,6 +2120,8 @@ void BendsCard::tick_ui_once() {
             }
             if (global_mono_mode) {
                 bar_leds[5] = 4095; // Glowing LED 5 indicates Extended Mono Mode active
+            } else if (global_dual_mono_mode) {
+                bar_leds[4] = 4095; // Glowing LED 4 indicates Dual Mono Mode active
             }
             if (is_locked) {
                 static uint32_t blink_counter = 0;
@@ -2329,20 +2354,13 @@ int main() {
     // 8. Sleep for 15 ms to let the background ADC/multiplexer interrupts populate true physical knob & switch values.
     sleep_ms(15);
 
-    // 9. Check if Switch DOWN is physically held on power-up for Factory Reset
-    int hold_down_count = 0;
-    for (int i = 0; i < 20; i++) {
-        if (card.ReadSw() == ComputerCard::Switch::Down) {
-            hold_down_count++;
-        }
-        sleep_ms(10);
-    }
-    if (hold_down_count >= 15) {
-        // Factory Reset triggered by physically holding Switch DOWN at boot!
+    // 9. Instant Factory Reset on power-up if Switch DOWN is physically held at boot
+    if (card.ReadSw() == ComputerCard::Switch::Down) {
         bends_erase_settings();
         bends_reset_factory_defaults();
         bends_save_settings();
-        saveFlashTimer = 600;
+        push_params_to_core1();
+        factoryResetFlashTimer = 1000; // 1s fast LED blink feedback
     }
 
     // 10. Read initial knob positions (populated with true physical readings!)

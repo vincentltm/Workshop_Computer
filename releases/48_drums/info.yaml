@@ -1,0 +1,119 @@
+draft: true
+Name: Drums
+Description: Generative Drum Farm & Sequencer
+Language: C++ (RP2040 Pico SDK)
+Creator: Vincent Maurer
+Version: 1.0
+Status: Released
+Editor: https://vincentmaurer.de/drums/drums_manager.html
+
+tags:
+  - synthesizer
+  - drums
+  - sequencer
+  - physical-modeling
+  - effects
+
+manual: |
+  Drums features 4 designated drum voice slots (Kick, Snare, Hihat, Tom/Perc) with custom synth, physical modeling, and flash sample engines. 
+  It includes a 4-track Euclidean sequencer and a Turing-style evolving pattern generator, plus master bus effects (DJ filter, compressor, saturation, delay, reverb).
+  The 3-position toggle switch controls menus: UP (sound and volume edit), MIDDLE (sequencer and master FX), and DOWN (flick to cycle pages, hold to load/save kits).
+
+panel:
+  inputs:
+    - id: AudioIn1
+      name: Trigger / Vel 1
+      description: Trigger and velocity input for Drum Slot 1 (Kick)
+    - id: AudioIn2
+      name: Trigger / Vel 2
+      description: Trigger and velocity input for Drum Slot 2 (Snare)
+    - id: CVIn1
+      name: Trigger / Vel 3
+      description: Trigger and velocity input for Drum Slot 3 (Hihat)
+    - id: CVIn2
+      name: Trigger / Vel 4
+      description: Trigger and velocity input for Drum Slot 4 (Perc/Tom)
+    - id: PulseIn1
+      name: Clock Input
+      description: External clock source input for the sequencer
+    - id: PulseIn2
+      name: Run / Reset Input
+      description: HIGH = Sequencer runs, rising edge resets to step 0
+  outputs:
+    - id: AudioOut1
+      name: Stereo Out Left
+      description: Main stereo left drum mix
+    - id: AudioOut2
+      name: Stereo Out Right
+      description: Main stereo right drum mix
+    - id: PulseOut1
+      name: Drum 1 Trigger Out
+      description: Gate/trigger output for Slot 1 (Kick)
+    - id: PulseOut2
+      name: Drum 2 Trigger Out
+      description: Gate/trigger output for Slot 2 (Snare)
+    - id: CVOut1
+      name: Drum 3 Trigger Out
+      description: Gate/trigger output (+5V CV) for Slot 3 (Hihat)
+    - id: CVOut2
+      name: Drum 4 Trigger Out
+      description: Gate/trigger output (+5V CV) for Slot 4 (Perc/Tom)
+
+controls:
+  knobs:
+    - when: { switch: UP, page: 0 }
+      main:
+        name: Pitch
+        description: Drum 1 Pitch or sample speed
+      x:
+        name: Decay
+        description: Drum 1 Decay duration
+      y:
+        name: Timbre
+        description: Drum 1 Timbre parameter
+    - when: { switch: UP, page: 4 }
+      main:
+        name: Voice 1 & 2 Bias
+        description: Balance level between Voice 1 and Voice 2
+      x:
+        name: Voice 1 Model
+        description: Model select for Voice 1 (Kick)
+      y:
+        name: Voice 2 Model
+        description: Model select for Voice 2 (Snare)
+    - when: { switch: MIDDLE, page: 0 }
+      main:
+        name: Steps
+        description: Euclidean step count (0-16)
+      x:
+        name: Fills
+        description: Euclidean active hits (0-Steps)
+      y:
+        name: Rotate
+        description: Euclidean step rotation (0-15)
+    - when: { switch: MIDDLE, page: 4 }
+      main:
+        name: DJ Filter
+        description: Bipolar Lowpass / Highpass Master Filter
+      x:
+        name: Master FX Mix
+        description: Delay and Reverb mix amount
+      y:
+        name: FX Size / Feedback
+        description: Delay feedback and Reverb size
+    - when: { switch: MIDDLE, page: 5 }
+      main:
+        name: BPM / Div
+        description: Sequencer BPM or external Clock Division
+      x:
+        name: Swing & Fills
+        description: Sequencer Swing percentage and Global Fills macro
+      y:
+        name: Turing Mutation
+        description: Chaos / Evolving pattern mutation rate
+
+host:
+  usb:
+    - name: Drums Manager
+      role: editor
+      description: Browser editor in `web/` for managing sample slots, backing up kits, and flashing the card.

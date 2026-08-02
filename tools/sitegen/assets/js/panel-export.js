@@ -82,10 +82,21 @@ function labelSvg(panelRect, element, measure, scaleX, scaleY) {
   measure.font = `${textStyle.fontWeight} ${textStyle.fontSize} ${textStyle.fontFamily}`;
   const rawText = textElement.innerText || textElement.textContent || '';
   const text = textStyle.textTransform === 'uppercase' ? rawText.toUpperCase() : rawText;
+
+  let baseFontSize = Number.parseFloat(textStyle.fontSize) || 11;
+  measure.font = `${textStyle.fontWeight} ${baseFontSize}px ${textStyle.fontFamily}`;
+
+  const words = text.split(/\s+/).filter(Boolean);
+  const maxWordWidth = words.reduce((max, w) => Math.max(max, measure.measureText(w).width), 0);
+  if (maxWordWidth > maxWidth && baseFontSize > 7) {
+    baseFontSize = Math.max(7.5, (baseFontSize * (maxWidth / maxWordWidth)) - 0.5);
+    measure.font = `${textStyle.fontWeight} ${baseFontSize}px ${textStyle.fontFamily}`;
+  }
+
   const lines = wrapMeasuredText(measure, text, maxWidth);
   if (!lines.length) return '';
 
-  const lineHeight = Number.parseFloat(textStyle.lineHeight) || Number.parseFloat(textStyle.fontSize) || 11;
+  const lineHeight = (Number.parseFloat(textStyle.lineHeight) || Number.parseFloat(textStyle.fontSize) || 11) * (baseFontSize / (Number.parseFloat(textStyle.fontSize) || 11));
   const contentHeight = lines.length * lineHeight + paddingTop + paddingBottom;
   const height = Math.max(rect.height, contentHeight);
   const x = (rect.left - panelRect.left) * scaleX;
@@ -95,13 +106,15 @@ function labelSvg(panelRect, element, measure, scaleX, scaleY) {
   const centerX = x + width / 2;
   const totalTextHeight = lines.length * lineHeight;
   const firstBaseline = (rect.top - panelRect.top - (height - rect.height) / 2 + (height - totalTextHeight) / 2 + lineHeight * 0.82) * scaleY;
-  const neutralSwitchPosition = element.matches('.program-card-panel-switch-position[aria-pressed="true"]');
-  const backgroundColor = neutralSwitchPosition ? '#fdfdfd' : style.backgroundColor;
-  const borderWidth = neutralSwitchPosition ? 0 : Number.parseFloat(style.borderTopWidth) || 0;
+  const isSwitchPosition = element.matches('.program-card-panel-switch-position');
+  const isPressed = isSwitchPosition && element.getAttribute('aria-pressed') === 'true';
+  const backgroundColor = isPressed ? 'rgb(247, 215, 56)' : (isSwitchPosition ? 'rgb(253, 253, 253)' : style.backgroundColor);
+  const borderWidth = isSwitchPosition ? 5.6 : (Number.parseFloat(style.borderTopWidth) || 0);
+  const strokeColor = isSwitchPosition ? 'rgb(0, 0, 0)' : style.borderTopColor;
   const rectMarkup = backgroundColor === 'rgba(0, 0, 0, 0)'
     ? ''
-    : `<rect x="${x}" y="${y}" width="${width}" height="${scaledHeight}" fill="${escapeXml(backgroundColor)}"${borderWidth && style.borderTopColor !== 'rgba(0, 0, 0, 0)' ? ` stroke="${escapeXml(style.borderTopColor)}" stroke-width="${borderWidth * scaleX}"` : ''}/>`;
-  const fontSize = (Number.parseFloat(textStyle.fontSize) || 11) * scaleY;
+    : `<rect x="${x}" y="${y}" width="${width}" height="${scaledHeight}" fill="${escapeXml(backgroundColor)}"${borderWidth && strokeColor !== 'rgba(0, 0, 0, 0)' ? ` stroke="${escapeXml(strokeColor)}" stroke-width="${borderWidth * scaleX}"` : ''}/>`;
+  const fontSize = baseFontSize * scaleY;
   const tspans = lines.map((line, index) => `<tspan x="${centerX}" y="${firstBaseline + index * lineHeight * scaleY}">${escapeXml(line)}</tspan>`).join('');
   return `${rectMarkup}<text text-anchor="middle" font-family="Workshop Panel" font-size="${fontSize}" font-weight="800" fill="${escapeXml(textStyle.color)}">${tspans}</text>`;
 }

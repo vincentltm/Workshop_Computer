@@ -19,6 +19,9 @@ Icon?
 !.vscode/extensions.json
 !.vscode/settings.json
 site/
+scratch/
+__pycache__/
+**/__pycache__/
 /node_modules/
 tools/sitegen/node_modules/
 

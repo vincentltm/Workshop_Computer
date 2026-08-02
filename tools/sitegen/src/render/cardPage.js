@@ -72,7 +72,7 @@ function renderTags(card, flairs = []) {
 // lines. No unbroken token longer than eight characters is allowed to overrun
 // its background, even when the complete label is otherwise short.
 const PANEL_MIDWORD_BREAK_THRESHOLD = 15;
-const PANEL_UNBROKEN_TOKEN_THRESHOLD = 8;
+const PANEL_UNBROKEN_TOKEN_THRESHOLD = 6;
 
 function panelWrapClass(value) {
   const text = stripTags(value || '').replace(/\s+/g, ' ').trim();
@@ -118,8 +118,8 @@ function renderPanel(panel, panelImg, positionControl = null, switchModes = {}) 
 }
 
 /** Render one generated panel artwork figure for Author-page/CLI SVG export. */
-export function renderPanelArtwork(snapshot, panelImg) {
-  return renderPanel(snapshot?.panel || {}, panelImg, null, snapshot?.switch_modes || {});
+export function renderPanelArtwork(snapshot, panelImg, positionControl = null) {
+  return renderPanel(snapshot?.panel || {}, panelImg, positionControl, snapshot?.switch_modes || {});
 }
 
 function renderSwitchSection(snapshot, positionControl = null) {

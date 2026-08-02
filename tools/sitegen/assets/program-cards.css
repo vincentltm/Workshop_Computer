@@ -767,11 +767,12 @@
 }
 
 .program-card-panel-text--long {
+  font-size: 9.5px;
   line-height: 1;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
   padding-bottom: 4px;
   padding-top: 5px;
-  word-break: normal;
 }
 
 .program-card-panel__label--control {

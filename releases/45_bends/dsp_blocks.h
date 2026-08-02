@@ -360,52 +360,42 @@ struct ChorusBlock {
 inline int16_t compress_expand_mulaw_variable(int16_t sample, int32_t insanity) {
     if (insanity <= 0) return sample;
 
+    // Fast path: encode to mu-law 8-bit index, table-lookup decode
     int32_t x = sample;
-    int32_t sign = (x < 0) ? -1 : 1;
+    int32_t sign = (x < 0) ? 1 : 0;
     if (x < 0) x = -x;
-    
-    uint16_t abs_val = x;
+
+    uint16_t abs_val = (uint16_t)x;
     uint8_t exponent = 0;
     if (abs_val >= 256) {
         exponent = (31 - __builtin_clz(abs_val)) - 7;
     }
-    
-    uint8_t mantissa = 0;
-    if (exponent > 0) {
-        mantissa = (abs_val >> (exponent + 1)) & 0xF;
-    } else {
-        mantissa = (abs_val >> 2) & 0xF;
-    }
+    if (exponent > 7) exponent = 7;
 
-    auto reconstruct = [&](uint8_t mant) -> int16_t {
-        int32_t rec = 0;
-        if (exponent > 0) {
-            rec = ((mant << 1) + 33) << (exponent + 1);
-        } else {
-            rec = (mant << 2) + 2;
-        }
-        if (rec > 32767) rec = 32767;
-        return (int16_t)(rec * sign);
-    };
+    uint8_t mantissa = (exponent > 0)
+        ? (abs_val >> (exponent + 1)) & 0xF
+        : (abs_val >> 2) & 0xF;
 
-    // Compute reconstructed samples at each bit depth (4, 3, 2, 1 mantissa bits)
-    int16_t s4 = reconstruct(mantissa);
-    int16_t s3 = reconstruct(mantissa & 0xE);
-    int16_t s2 = reconstruct(mantissa & 0xC);
-    int16_t s1 = reconstruct(mantissa & 0x8);
+    // Build full-precision mu-law index and crushed index (drop low mantissa bits)
+    uint8_t idx_full = (sign << 7) | (exponent << 4) | mantissa;
 
-    // Scale insanity to 0..3 index
-    int32_t val = insanity * 3; // 0 to 98301
-    int32_t idx = val >> 15;
+    // Scale insanity to select bit-depth reduction: 0..3 levels
+    int32_t val = insanity * 3; // 0 to ~98301
+    int32_t level = val >> 15;
     int16_t fade = val & 0x7FFF;
 
-    if (idx == 0) {
-        return lerp_q15(s4, s3, fade);
-    } else if (idx == 1) {
-        return lerp_q15(s3, s2, fade);
-    } else {
-        return lerp_q15(s2, s1, fade);
-    }
+    // Mask mantissa bits based on crush level for two adjacent depths
+    static const uint8_t mant_masks[4] = { 0x0F, 0x0E, 0x0C, 0x08 };
+    uint8_t mask_a = mant_masks[level < 3 ? level : 3];
+    uint8_t mask_b = mant_masks[level < 2 ? level + 1 : 3];
+
+    uint8_t idx_a = (idx_full & 0xF0) | (mantissa & mask_a);
+    uint8_t idx_b = (idx_full & 0xF0) | (mantissa & mask_b);
+
+    int16_t sa = mulaw_decode_table[idx_a];
+    int16_t sb = mulaw_decode_table[idx_b];
+
+    return lerp_q15(sa, sb, fade);
 }
 
 // Second-order bandpass: Chamberlin SVF in bandpass mode.
@@ -2784,11 +2774,11 @@ struct ReverbBlock {
         int32_t iL = (int32_t)monoL_ap + (((int32_t)decay * fb_L) >> 15);
         int16_t iL_soft = soft_limit_q15(iL);
         int16_t sL = iL_soft + (int16_t)((16384 * modL.read_integer(scale_modL)) >> 15);
-        modL.write(soft_limit_q15((int32_t)iL_soft - (int16_t)((16384 * sL) >> 15)));
+        modL.write(saturate_q15((int32_t)iL_soft - (int16_t)((16384 * sL) >> 15)));
         d1L.write(sL);
         sL = d1L.read_integer(scale_d1L);
         lpL += (((int32_t)sL - lpL) * damp) >> 15;
-        lpL = soft_limit_q15(lpL);
+        lpL = saturate_q15(lpL);
         sL = (int16_t)lpL;
         sL = apTankL.process_fixed(sL);
         d2L.write(sL);
@@ -2797,11 +2787,11 @@ struct ReverbBlock {
         int32_t iR = (int32_t)monoR_ap + (((int32_t)decay * fb_R) >> 15);
         int16_t iR_soft = soft_limit_q15(iR);
         int16_t sR = iR_soft + (int16_t)((16384 * modR.read_integer(scale_modR)) >> 15);
-        modR.write(soft_limit_q15((int32_t)iR_soft - (int16_t)((16384 * sR) >> 15)));
+        modR.write(saturate_q15((int32_t)iR_soft - (int16_t)((16384 * sR) >> 15)));
         d1R.write(sR);
         sR = d1R.read_integer(scale_d1R);
         lpR += (((int32_t)sR - lpR) * damp) >> 15;
-        lpR = soft_limit_q15(lpR);
+        lpR = saturate_q15(lpR);
         sR = (int16_t)lpR;
         sR = apTankR.process_fixed(sR);
         d2R.write(sR);
