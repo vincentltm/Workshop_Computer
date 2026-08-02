@@ -31,23 +31,23 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
   ];
 
   // Socket mapping with exact short labels from info.yaml
-  const inputsObj = {
-    audio_l: { label: 'Audio 1' },
-    audio_r: { label: 'Audio 2' },
-    cv_1: { label: 'CV 1' },
-    cv_2: { label: 'CV 2' },
-    pulse_1: { label: 'Clock Sync' },
-    pulse_2: { label: 'Freeze Gate' }
-  };
+  const inputsObj = [
+    { id: 'AudioIn1', name: 'Audio 1', description: 'Stereo left audio input' },
+    { id: 'AudioIn2', name: 'Audio 2', description: 'Stereo right audio input' },
+    { id: 'CVIn1', name: 'CV 1', description: 'Bipolar CV input modulating primary parameter' },
+    { id: 'CVIn2', name: 'CV 2', description: 'Bipolar CV input modulating secondary parameter' },
+    { id: 'PulseIn1', name: 'Clock Sync', description: 'External clock pulse sync' },
+    { id: 'PulseIn2', name: 'Freeze Gate', description: 'Gate input locking memory into freeze' }
+  ];
 
-  const outputsObj = {
-    audio_out_l: { label: 'Out 1' },
-    audio_out_r: { label: 'Out 2' },
-    cv_out_1: { label: 'Pitch CV' },
-    cv_out_2: { label: 'Random CV' },
-    pulse_out_1: { label: 'Loop Trig' },
-    pulse_out_2: { label: 'Texture' }
-  };
+  const outputsObj = [
+    { id: 'AudioOut1', name: 'Out 1', description: 'Processed stereo left output' },
+    { id: 'AudioOut2', name: 'Out 2', description: 'Processed stereo right output' },
+    { id: 'CVOut1', name: 'Pitch CV', description: 'Turing Machine 1V/Oct semitone sequence' },
+    { id: 'CVOut2', name: 'Random CV', description: 'Stepped random Sample & Hold CV' },
+    { id: 'PulseOut1', name: 'Loop Trig', description: '+5V 2ms trigger pulse output' },
+    { id: 'PulseOut2', name: 'Texture', description: 'Lo-fi PWM audio stream' }
+  ];
 
   const switchModesObj = {
     up: 'Freeze',
@@ -149,7 +149,7 @@ const infoYamlPath = path.join(bendsDir, 'info.yaml');
       ];
 
       if (item.mode === 'freeze') {
-        // C++ bends.cpp L2168-L2199: Linear forward playhead scan across loop window (LEDs 1..4 glow #88000a, playhead peak #f80012; LEDs 5..6 dark #1d1d1b)
+        // C++ bends.cpp L2168-L2199: Linear forward playhead scan across loop window
         const freezeSawCss = `@keyframes ph-saw-1{0%,24.9%{fill:#f80012;opacity:1}25%,100%{fill:#88000a;opacity:.75}}@keyframes ph-saw-2{25%,49.9%{fill:#f80012;opacity:1}0%,49.9%,50%,100%{fill:#88000a;opacity:.75}}@keyframes ph-saw-3{50%,74.9%{fill:#f80012;opacity:1}0%,49.9%,75%,100%{fill:#88000a;opacity:.75}}@keyframes ph-saw-4{75%,99.9%{fill:#f80012;opacity:1}0%,74.9%,100%{fill:#88000a;opacity:.75}}.ph-saw-1{animation:ph-saw-1 1.2s linear infinite}.ph-saw-2{animation:ph-saw-2 1.2s linear infinite}.ph-saw-3{animation:ph-saw-3 1.2s linear infinite}.ph-saw-4{animation:ph-saw-4 1.2s linear infinite}`;
         svg = svg.replace('</style>', `${freezeSawCss}</style>`);
 
