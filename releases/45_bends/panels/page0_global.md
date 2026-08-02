@@ -25,74 +25,19 @@ Bends spans a wide range of sound processing:
 - **LED 4**: Dual Mono Mode active.
 - **LED 5**: Extended Mono Mode active.
 
-<details class="program-card-section program-card-collapsible program-card-io-section" open>
-  <summary class="program-card-io-summary">
-    <h3 class="program-card-io-mobile-heading">Inputs &amp; Outputs</h3>
-    <span class="program-card-io-headings">
-      <h3>Inputs</h3>
-      <h3>Outputs</h3>
-    </span>
-  </summary>
-  <div class="program-card-io-columns">
-    <section class="program-card-socket-section program-card-socket-section--inputs">
-      <div class="program-card-socket-list">
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Audio In 1</strong>
-          <p><span class="program-card-component-role">Audio 1</span><br>Stereo left audio input (normalled to Right if Audio 2 is unplugged)</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Audio In 2</strong>
-          <p><span class="program-card-component-role">Audio 2</span><br>Stereo right audio input (unplug for ~2.73s Extended Mono Mode)</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">CV In 1</strong>
-          <p><span class="program-card-component-role">CV 1</span><br>Bipolar CV input modulating primary page parameter or tuned 1V/Oct pitch</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">CV In 2</strong>
-          <p><span class="program-card-component-role">CV 2</span><br>Bipolar CV input modulating secondary page parameter and glitch/reverb depth</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Pulse In 1</strong>
-          <p><span class="program-card-component-role">Clock Sync</span><br>External clock pulse sync (1, 2, 4, and 24 PPQN DIN Sync) for delay subdivisions, loop stepping, and pitch CV</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Pulse In 2</strong>
-          <p><span class="program-card-component-role">Freeze Gate</span><br>Gate input (&gt; +1.2V) locking delay &amp; glitch looper buffers into live freeze</p>
-        </div>
-      </div>
-    </section>
+#### Inputs
+- **Audio 1 & 2**: Stereo audio inputs. When no cable is inserted in Audio 2, Audio 1 is normalled to both channels to maintain stereo processing.
+- **CV 1**: Bipolar CV input modulating primary page parameters or tuned 1V/Oct pitch in Karplus-Strong string and filter oscillator modes.
+- **CV 2**: Bipolar CV input modulating secondary page parameters, digital corruption, and stutter loop capture.
+- **Clock Sync (`Pulse 1`)**: Multi-standard pulse clock sync (1, 2, 4, and 24 PPQN DIN Sync) for delay subdivisions, loop stepping, and pitch CV sequence advances.
+- **Freeze Gate (`Pulse 2`)**: High gate input (>+1.2V) locking delay and stutter buffers into live freeze.
 
-    <section class="program-card-socket-section program-card-socket-section--outputs">
-      <div class="program-card-socket-list">
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Audio Out 1</strong>
-          <p><span class="program-card-component-role">Out 1</span><br>Main processed stereo left audio output</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Audio Out 2</strong>
-          <p><span class="program-card-component-role">Out 2</span><br>Main processed stereo right audio output</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">CV Out 1</strong>
-          <p><span class="program-card-component-role">Pitch CV</span><br>Turing Machine 1V/Oct quantized semitone CV sequence output</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">CV Out 2</strong>
-          <p><span class="program-card-component-role">Random CV</span><br>Stepped random Sample &amp; Hold CV output for self-modulation</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Pulse Out 1</strong>
-          <p><span class="program-card-component-role">Loop Trig</span><br>+5V 2ms trigger pulse output emitted on granular loop resets or clock steps</p>
-        </div>
-        <div class="program-card-socket">
-          <strong class="program-card-component-key">Pulse Out 2</strong>
-          <p><span class="program-card-component-role">Texture</span><br>High-frequency PWM audio stream output of microsound bleeps and vinyl crackle</p>
-        </div>
-      </div>
-    </section>
-  </div>
-</details>
+#### Outputs
+- **Out 1 & 2**: Processed stereo audio outputs with DC-blocking filters.
+- **Pitch CV (`CV Out 1`)**: Turing Machine 1V/Oct quantized semitone CV sequence output driven by internal shift register.
+- **Random CV (`CV Out 2`)**: Stepped random Sample & Hold CV output updated per clock step or loop reset, designed for self-modulation.
+- **Loop Trig (`Pulse Out 1`)**: +5V 2ms trigger pulse output emitted on granular loop resets or clock steps.
+- **Texture (`Pulse Out 2`)**: Lo-fi PWM audio stream output of microsound bleeps, vinyl crackle, and sub-harmonic loop ticks.
 
 #### Reset Procedures
 - **Preset Clean Reset**: Turn Knob Y fully CW (>96%) in Global Mode to restore all 6 parameter pages to clean factory defaults.
