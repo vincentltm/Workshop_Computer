@@ -1,14 +1,16 @@
 Name: Bends
 short-description: 6-Stage Stereo Multi-FX, Glitch Looper & Digital Degradation Engine
 Language: C++
-Creator: Ben
+Creator: Vincent Maurer
 Version: 1.0.0
 Status: Released
 License: MIT
-date-created: 2026-08-01
-date-updated: 2026-08-02
+date-created: 2026-08-02
 contact:
-  website: https://github.com/vincentltm/Workshop_Computer
+  website: https://vincentmaurer.de
+  social:
+    github: https://github.com/vincentltm
+    youtube: https://www.youtube.com/@vincentltm
 
 tags:
   - multi-fx
