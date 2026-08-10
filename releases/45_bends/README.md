@@ -46,3 +46,30 @@ The Z toggle switch controls module state:
 
 * **Preset Clean Reset**: In Global mode (Z Switch DOWN >=350ms), turn Knob Y fully clockwise (>96%) to restore clean defaults across all 6 pages.
 * **Factory Hardware Reset**: Power on system while holding Z Switch DOWN (1s LED flash) to restore original factory settings.
+
+## Printable Manual & Zine
+
+Bends includes a pocket-sized 8-page mini zine manual in PDF format:
+
+* **[bends_manual_v01_screen.pdf](bends_manual_v01_screen.pdf)** — On-screen digital viewing layout (single pages in reading order).
+* **[bends_manual_v01_print.pdf](bends_manual_v01_print.pdf)** — Single-sheet printable 8-page zine layout for printing and folding.
+
+### How to Fold the 8-Page Mini Zine
+
+To create your physical pocket manual from a single sheet of paper (A4 or Letter):
+
+1. **Print**: Print `bends_manual_v01_print.pdf` single-sided on 1 sheet of paper in Landscape mode.
+2. **Fold Lengthwise (Hamburger Fold)**: Fold the paper in half lengthwise with the printed side facing out. Crease sharply, then unfold flat.
+3. **Fold Crosswise (Grid Creases)**:
+   * Fold the paper in half crosswise (short edges together). Crease sharply.
+   * Fold each outer edge inward to meet the center fold line, creating 8 equal rectangular panel sections. Unfold flat.
+4. **Make the Center Cut**:
+   * Fold the paper in half crosswise again (short edges together).
+   * Using scissors, cut along the center fold line from the folded spine to the middle intersection (cutting through the 2 center panel sections only).
+5. **Pop the Diamond**:
+   * Unfold the paper completely flat.
+   * Fold the sheet in half lengthwise. Hold the outer left and right ends and push them inward toward the center—the slit in the middle will open up into a 3D diamond shape.
+6. **Assemble the Booklet**:
+   * Keep pushing the ends together until the 4 wings collapse flat into a 4-point cross shape (`+`).
+   * Fold the pages over each other so the Front Cover is on the outside front and Page 8 (Back Cover) is on the outside back. Press flat to finish your mini booklet!
+
