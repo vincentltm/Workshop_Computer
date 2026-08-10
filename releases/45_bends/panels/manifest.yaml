@@ -5,7 +5,7 @@ panels:
   - id: page-0-global
     name: "Global"
     image: page0_global.svg
-    content: page0_global.md
+    content: auto
 
   - id: page-1-chorus
     name: "1. Chorus"

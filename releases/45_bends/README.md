@@ -46,3 +46,15 @@ The Z toggle switch controls module state:
 
 * **Preset Clean Reset**: In Global mode (Z Switch DOWN >=350ms), turn Knob Y fully clockwise (>96%) to restore clean defaults across all 6 pages.
 * **Factory Hardware Reset**: Power on system while holding Z Switch DOWN (1s LED flash) to restore original factory settings.
+
+## Printable Manual & Zine
+
+* **[bends_manual_v01_screen.pdf](bends_manual_v01_screen.pdf)** — Digital reading layout.
+* **[bends_manual_v01_print.pdf](bends_manual_v01_print.pdf)** — Printable single-sheet 8-page zine layout.
+
+### Folding Instructions (Single Sheet)
+1. **Print**: 1-sided in Landscape mode.
+2. **Crease**: Fold into 8 equal grid sections (half lengthwise, then quarters crosswise).
+3. **Cut**: Fold in half crosswise and cut along the center fold line across the 2 middle panels only.
+4. **Fold**: Push the outer edges inward to pop the center slit into a diamond, collapse into a `+` cross, and fold into an 8-page booklet.
+

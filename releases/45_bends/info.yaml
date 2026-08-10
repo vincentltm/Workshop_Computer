@@ -65,47 +65,46 @@ panel:
       type: audio
     - id: CVOut1
       name: Pitch CV
-      description: Turing Machine 1V/Oct quantized semitone CV sequence output
+      description: Clocked Turing Machine 1V/Oct semitone sequence output (controlled by Glitcher Y knob)
       type: cv
     - id: CVOut2
       name: Random CV
-      description: Stepped random Sample & Hold CV output for self-modulation
+      description: Stepped Random Sample & Hold CV output
       type: cv
     - id: PulseOut1
       name: Loop Trig
-      description: +5V 2ms trigger pulse output emitted on granular loop resets or clock steps
+      description: +5V 2ms trigger pulse output emitted on loop resets or clock steps
       type: pulse
     - id: PulseOut2
       name: Texture
-      description: High-frequency PWM audio stream output of microsound bleeps and vinyl crackle
+      description: Lo-fi microsound bleeps and vinyl crackle driven by Loss Page (active when no inputs connected)
       type: pulse
 
 controls:
   switch:
     up:
       name: Freeze Mode
-      description: Locks recording memory into live granular freeze
+      description: Flick UP to lock buffer into live granular freeze
     middle:
       name: Perform Mode
       description: Normal live processing across pages 1 to 6
     down:
       name: Global Mode
-      description: Hold >=350ms to enter Global Mode (Bend, Stereo Width/Mode, Signal Routing)
+      description: Hold DOWN to adjust Global settings (Bend, Width, Routing). Automatically saves state after 3s.
     tap:
       name: Page Step
-      description: Tap <350ms to advance forward through parameter pages 1 to 6
-
+      description: Tap DOWN (<350ms) to cycle forward through effect pages 1 to 6
   knobs:
     - when: { panel: page-0-global }
       main:
         name: Bend
-        description: Global noise, bitcrush fuzz, distortion, and dropout depth
+        description: Bend Macro — adjusts all degradation parameters at once (noise, bitcrush fuzz, distortion, and dropouts)
       x:
         name: Width & Mode
-        description: Extended Mono Mode (CCW limit), Stereo Width 0–100%, or Dual Mono Mode (CW limit)
+        description: "Stereo Width (Left: Extended Mono Mode, Center: Stereo Width 0–100%, Right: Dual Mono Mode)"
       y:
         name: Routing & Reset
-        description: "Selects routing chain (0: Series FX, 1: Space Wash, 2: Granular Cloud, 3: Filtered Dub). Turn CW (>96%) to Clean Reset"
+        description: "Selects effects chain: 1. CLDGFR, 2. RFCDGL, 3. GLDCFR, 4. FLCDGR, 5. Clean Reset (>96%)"
 
     - when: { panel: page-1-chorus }
       main:
@@ -113,21 +112,21 @@ controls:
         description: Blends dry input audio with stereo chorus
       x:
         name: LFO Speed
-        description: Pitch modulation speed for tape drift, wow, and flutter
+        description: LFO Speed / Pitch (high Y values turn chorus into Karplus-Strong string resonator; X + CV1 set pitch)
       y:
         name: Depth / Feedback
-        description: Modulation depth (0–50%), Resonant feedback (50–68%), Karplus-Strong string (68–96%), BBD XOR (>96%)
+        description: Chorus Depth / Feedback (high Y >75% turns chorus into Karplus-Strong string resonator)
 
     - when: { panel: page-2-codec }
       main:
         name: Loss Mix
-        description: Blends clean audio with tape drive, saturation, bitcrush, and decimation
+        description: Blends clean audio with digital degradation
       x:
-        name: Crush
-        description: Morphs continuously across Tape Drive, MP3 Ringing, Bitcrush Fuzz, and Decimation
+        name: Crush Type
+        description: Blends continuously between Tape, MP3 Ringing, Bitcrush, and Decimation loss
       y:
-        name: Jitter
-        description: Sweeps across Tape Wow & Flutter, Connection dropouts, and CD Sputter skipping
+        name: Jitter Type
+        description: Blends continuously between Tape Wow/Flutter, Packet Dropouts, and CD Sputter / random XOR glitches
 
     - when: { panel: page-3-delay }
       main:
@@ -135,42 +134,42 @@ controls:
         description: Blends dry input audio with delay repeats
       x:
         name: Delay Time
-        description: Sets delay time (selects 16 clock subdivisions when Clock Sync is patched)
+        description: Delay Time (snaps to subdivisions when clock is present; short times + feedback = resonator)
       y:
         name: Feedback
-        description: Repeat feedback level; overdrives into digital XOR glitches past 70%
+        description: Repeat feedback level (overdrives into digital XOR glitches at high values)
 
     - when: { panel: page-4-glitcher }
       main:
-        name: Glitch Mix
-        description: Wet/dry blend for granular stutter looper
+        name: Glitch Probability
+        description: Glitch Probability and looper wet/dry blend
       x:
-        name: Loop Size
-        description: Loop segment size (16 clock subdivisions when Clock Sync is patched)
+        name: Glitch Length
+        description: Glitch Length (snaps to subdivisions when clock is present)
       y:
-        name: Speed & Pitch
-        description: Playback Speed (-1.0x reverse to +2.0x forward) and Pitch Mutation Rate (0–40%, expanding note palette)
+        name: Glitch Type
+        description: "Glitch Type: Stutter, Stutter + Reverse, or Stutter + Reverse + Random Pitch (controls Turing Machine sequence on Pitch CV Out)"
 
     - when: { panel: page-4-freeze }
       main:
-        name: Scrub Mode
-        description: Auto Sine LFO (<10%), Manual Scrub (10–90%), or Random Skip (>90%)
+        name: Block Position
+        description: "Scrubs buffer position (CCW: Auto LFO, Center: Manual, CW: Random Skip; snaps to clock when present)"
       x:
-        name: Slice Size
-        description: Granular slice segment length from micro-grains to full buffer loops
+        name: Block Length
+        description: Freeze block length (snaps to subdivisions when clock is present)
       y:
         name: Pitch Shift
-        description: Continuous grain pitch shift with magnetic detents (-1st Octave, -5th, Unison, +5th, +1st Octave)
+        description: Continuous grain pitch shift with detents (-1st Octave to +1st Octave)
 
     - when: { panel: page-5-filter }
       main:
-        name: Cutoff
-        description: Cutoff frequency (Lowpass CCW ↔ Highpass CW)
+        name: Filter Cutoff
+        description: Filter Cutoff (Lowpass CCW ↔ Highpass CW)
       x:
         name: Resonance
-        description: Filter Q factor; self-oscillates past 75%
+        description: Filter Resonance (self-oscillates at high settings; CV1 acts as 1V/Oct pitch input)
       y:
-        name: Fuzz
+        name: Drive / Fuzz
         description: Wavefolder drive fuzz level and saturation depth
 
     - when: { panel: page-6-reverb }
@@ -178,27 +177,27 @@ controls:
         name: Reverb Mix
         description: Reverb wet/dry blend
       x:
-        name: Reverb Size
-        description: Blends from Spring Reverb (CCW) through neutral room zone to Ambient Hall Reverb (CW)
+        name: Size / Type
+        description: Blends from Spring Reverb (left) to Hall Reverb (right) while adjusting room size
       y:
         name: Damping
-        description: Damping, lo-fi degradation (>60%), shimmer pitch-shifting (>73%), and circuit jitter (>82%)
+        description: Damping (higher values lead to bitcrushing in the reverb feedback loop)
 
   leds:
     - display: list
       items:
         - id: LED0
-          name: Routing 0 / Chorus LED
-          description: Illuminates for Series FX routing or Page 1 active LED
+          name: Routing 1 / Chorus LED
+          description: Illuminates for 1. CLDGFR (Series FX) routing or Page 1 active LED
         - id: LED1
-          name: Routing 1 / Loss LED
-          description: Illuminates for Space Wash routing or Page 2 active LED
+          name: Routing 2 / Loss LED
+          description: Illuminates for 2. RFCDGL (Space Wash) routing or Page 2 active LED
         - id: LED2
-          name: Routing 2 / Delay LED
-          description: Illuminates for Granular Cloud routing or Page 3 active LED
+          name: Routing 3 / Delay LED
+          description: Illuminates for 3. GLDCFR (Scatter Cloud) routing or Page 3 active LED
         - id: LED3
-          name: Routing 3 / Glitcher LED
-          description: Illuminates for Filtered Dub routing or Page 4 active LED
+          name: Routing 4 / Glitcher LED
+          description: Illuminates for 4. FLCDGR (Filtered Dub) routing or Page 4 active LED
         - id: LED4
           name: Dual Mono / Filter LED
           description: Illuminates when Dual Mono mode is active or Page 5 active LED
